@@ -124,7 +124,10 @@ async def sharpen_idea(idea: str, api_key: str | None = None, *, _post=None, _at
         if _post is not None:
             data = await _post(payload)
         else:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            # 8000 токенов ответа могут генерироваться дольше минуты --
+            # 60s таймаут ловил ReadTimeout на длинных идеях (прод-баг 2026-07-09).
+            timeout = httpx.Timeout(180.0, connect=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
                     ANTHROPIC_URL, json=payload,
                     headers={"x-api-key": api_key,
@@ -145,6 +148,11 @@ async def sharpen_idea(idea: str, api_key: str | None = None, *, _post=None, _at
         if _attempt == 1:
             return await sharpen_idea(idea, api_key, _post=_post, _attempt=2)
         raise OfferEngineError("ИИ ответил в неожиданном формате. Попробуйте ещё раз.")
+    except httpx.TimeoutException:
+        logger.warning("offer engine: timeout (attempt %s)", _attempt)
+        if _attempt == 1:
+            return await sharpen_idea(idea, api_key, _post=_post, _attempt=2)
+        raise OfferEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
     except Exception:
         logger.exception("offer engine failed")
         raise OfferEngineError("Не получилось заострить идею. Попробуйте ещё раз через минуту.")

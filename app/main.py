@@ -83,7 +83,22 @@ class SmokeEvent(SQLModel, table=True):
 
 SQLModel.metadata.create_all(engine)
 
-app = FastAPI(title="Создатель", version="0.1")
+app = FastAPI(title="Создатель", version="0.2")
+
+# Ключ владельца: закрывает генерацию офферов, запуск и удаление лендингов.
+# Публичными остаются только /l/{id}, /api/smoke-event, /health -- им и
+# положено быть открытыми (их дергают браузеры посетителей лендингов).
+# Пока Создателем пользуется один владелец, этого достаточно; полноценные
+# аккаунты -- этап внешних пользователей (P2 в VISION).
+OWNER_KEY = os.environ.get("SOZDATEL_OWNER_KEY", "")
+
+
+def _check_owner(request: Request) -> None:
+    if not OWNER_KEY:
+        raise HTTPException(503, "Сервер не настроен: задайте SOZDATEL_OWNER_KEY в переменных окружения.")
+    provided = request.headers.get("X-Owner-Key") or request.query_params.get("key") or ""
+    if provided != OWNER_KEY:
+        raise HTTPException(401, "Нужен ключ владельца (X-Owner-Key).")
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +110,8 @@ class IdeaIn(BaseModel):
 
 
 @app.post("/api/offers")
-async def offers(data: IdeaIn):
+async def offers(data: IdeaIn, request: Request):
+    _check_owner(request)
     try:
         result = await sharpen_idea(data.idea)
         return {"ok": True, **result}
@@ -130,7 +146,8 @@ class LaunchIn(BaseModel):
 
 
 @app.post("/api/launch")
-def launch(data: LaunchIn):
+def launch(data: LaunchIn, request: Request):
+    _check_owner(request)
     offer = data.offer
     for key in ("idea_id", "product_name", "h1", "sub", "pains",
                 "demo_left_label", "demo_left_text", "demo_right_text", "eyebrow"):
@@ -222,7 +239,8 @@ def compute_verdict(views: int, leads: int, target: int, signal: float, dead: fl
 
 
 @app.get("/api/verdict/{idea_id}")
-def verdict(idea_id: str):
+def verdict(idea_id: str, request: Request):
+    _check_owner(request)
     with Session(engine) as s:
         proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
         if proj is None:
@@ -239,7 +257,8 @@ def verdict(idea_id: str):
 
 
 @app.get("/api/projects")
-def projects():
+def projects(request: Request):
+    _check_owner(request)
     with Session(engine) as s:
         rows = s.exec(select(SmokeProject).order_by(SmokeProject.created_at.desc())).all()
         out = []
@@ -252,6 +271,22 @@ def projects():
                         "views": views, "leads": leads, "target": p.click_target,
                         "landing_url": f"/l/{p.idea_id}"})
     return {"ok": True, "projects": out}
+
+
+@app.delete("/api/projects/{idea_id}")
+def delete_project(idea_id: str, request: Request):
+    """Удалить заброшенный лендинг: сам проект + его события (контакты лидов
+    уходят вместе с ним -- выгрузи их из /api/verdict до удаления, если нужны)."""
+    _check_owner(request)
+    with Session(engine) as s:
+        proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
+        if proj is None:
+            raise HTTPException(404, "идея не найдена")
+        for ev in s.exec(select(SmokeEvent).where(SmokeEvent.idea == idea_id)).all():
+            s.delete(ev)
+        s.delete(proj)
+        s.commit()
+    return {"ok": True, "deleted": idea_id}
 
 
 @app.get("/health")

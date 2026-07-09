@@ -10,6 +10,9 @@ from app.offer_engine import OfferEngineError, sharpen_idea, _validate
 from app.main import app, compute_verdict, render_landing
 
 client = TestClient(app)
+import app.main as main_module
+main_module.OWNER_KEY = "test-owner-key"
+OWNER = {"X-Owner-Key": "test-owner-key"}
 
 VALID_OFFER = {
     "angle": "ночной завал", "idea_id": "test_v1", "product_name": "Тест",
@@ -61,7 +64,7 @@ class TestLandingAndLaunch:
         assert "как это будет работать" in html
 
     def test_launch_hosts_landing(self):
-        r = client.post("/api/launch", json={"idea_text": "тестовая идея", "offer": VALID_OFFER})
+        r = client.post("/api/launch", headers=OWNER, json={"idea_text": "тестовая идея", "offer": VALID_OFFER})
         assert r.status_code == 200
         data = r.json()
         assert data["landing_url"] == "/l/test_v1"
@@ -71,20 +74,20 @@ class TestLandingAndLaunch:
 
     def test_launch_missing_field_400(self):
         bad = dict(VALID_OFFER); bad.pop("h1")
-        r = client.post("/api/launch", json={"idea_text": "x", "offer": bad})
+        r = client.post("/api/launch", headers=OWNER, json={"idea_text": "x", "offer": bad})
         assert r.status_code == 400
 
 
 class TestEventsAndVerdict:
     def test_event_roundtrip_and_verdict(self):
-        client.post("/api/launch", json={"idea_text": "т", "offer": dict(VALID_OFFER, idea_id="verd_v1")})
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т", "offer": dict(VALID_OFFER, idea_id="verd_v1")})
         for _ in range(40):
             client.post("/api/smoke-event", json={"event": "page_view", "idea": "verd_v1",
                                                   "source": "yandex_direct"})
         for i in range(5):
             client.post("/api/smoke-event", json={"event": "lead_submitted", "idea": "verd_v1",
                                                   "contact": f"u{i}@t.ru"})
-        r = client.get("/api/verdict/verd_v1").json()
+        r = client.get("/api/verdict/verd_v1", headers=OWNER).json()
         assert r["views"] == 40 and r["leads"] == 5
         assert r["verdict"] == "СИГНАЛ ЕСТЬ"      # 12.5% >= 8%
         assert len(r["contacts"]) == 5
@@ -100,6 +103,86 @@ class TestEventsAndVerdict:
         assert compute_verdict(50, 6, 40, .08, .04)["verdict"] == "СИГНАЛ ЕСТЬ"
 
     def test_projects_list(self):
-        r = client.get("/api/projects").json()
+        r = client.get("/api/projects", headers=OWNER).json()
         ids = [p["idea_id"] for p in r["projects"]]
         assert "verd_v1" in ids
+
+
+class TestTruncationRetry:
+    def test_truncated_json_retried_once_then_ok(self):
+        import asyncio, json as _json
+        calls = {"n": 0}
+        async def flaky(payload):
+            calls["n"] += 1
+            assert payload["max_tokens"] >= 8000, "лимит должен быть поднят"
+            if calls["n"] == 1:
+                return {"content": [{"type": "text", "text": '{"offers": [{"angle": "обрыв'}]}
+            body = {"offers": [dict(VALID_OFFER, idea_id=f"r{i}") for i in range(3)]}
+            return {"content": [{"type": "text", "text": _json.dumps(body, ensure_ascii=False)}]}
+        out = asyncio.run(sharpen_idea("Достаточно длинная идея для проверки повтора", _post=flaky))
+        assert calls["n"] == 2
+        assert len(out["offers"]) == 3
+
+    def test_double_truncation_gives_human_error(self):
+        import asyncio
+        async def always_broken(payload):
+            return {"content": [{"type": "text", "text": '{"offers": [{"angle": "обр'}]}
+        with pytest.raises(OfferEngineError) as e:
+            asyncio.run(sharpen_idea("Достаточно длинная идея для проверки", _post=always_broken))
+        assert "Попробуйте ещё раз" in str(e.value)
+
+
+
+class TestOwnerKey:
+    def test_offers_requires_key(self):
+        r = client.post("/api/offers", json={"idea": "достаточно длинная идея для проверки"})
+        assert r.status_code == 401
+
+    def test_launch_requires_key(self):
+        r = client.post("/api/launch", json={"idea_text": "x", "offer": VALID_OFFER})
+        assert r.status_code == 401
+
+    def test_verdict_requires_key_but_landing_and_events_public(self):
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т", "offer": dict(VALID_OFFER, idea_id="pub_v1")})
+        assert client.get("/api/verdict/pub_v1").status_code == 401
+        assert client.get("/l/pub_v1").status_code == 200                      # публично
+        r = client.post("/api/smoke-event", json={"event": "page_view", "idea": "pub_v1"})
+        assert r.status_code == 200                                            # публично
+
+    def test_key_via_query_param(self):
+        r = client.get("/api/verdict/pub_v1?key=test-owner-key")
+        assert r.status_code == 200
+
+    def test_delete_project_with_events(self):
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т", "offer": dict(VALID_OFFER, idea_id="del_v1")})
+        client.post("/api/smoke-event", json={"event": "page_view", "idea": "del_v1"})
+        r = client.delete("/api/projects/del_v1", headers=OWNER)
+        assert r.status_code == 200
+        assert client.get("/l/del_v1").status_code == 404
+        ids = [p["idea_id"] for p in client.get("/api/projects", headers=OWNER).json()["projects"]]
+        assert "del_v1" not in ids
+
+    def test_delete_requires_key(self):
+        assert client.delete("/api/projects/whatever").status_code == 401
+
+
+class TestTimeoutRetry:
+    def test_timeout_retried_then_ok(self):
+        import asyncio, json as _json, httpx as _httpx
+        calls = {"n": 0}
+        async def slow_then_ok(payload):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _httpx.ReadTimeout("slow")
+            body = {"offers": [dict(VALID_OFFER, idea_id=f"t{i}") for i in range(3)]}
+            return {"content": [{"type": "text", "text": _json.dumps(body, ensure_ascii=False)}]}
+        out = asyncio.run(sharpen_idea("Достаточно длинная идея для проверки таймаута", _post=slow_then_ok))
+        assert calls["n"] == 2 and len(out["offers"]) == 3
+
+    def test_double_timeout_human_error(self):
+        import asyncio, httpx as _httpx
+        async def always_slow(payload):
+            raise _httpx.ReadTimeout("slow")
+        with pytest.raises(OfferEngineError) as e:
+            asyncio.run(sharpen_idea("Достаточно длинная идея для проверки", _post=always_slow))
+        assert "долго" in str(e.value)

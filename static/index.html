@@ -133,6 +133,19 @@
 </div>
 
 <script>
+/* Ключ владельца: спрашивается один раз за сессию вкладки, хранится в
+   переменной (не в localStorage -- сознательно: закрыл вкладку, ввёл снова). */
+let OWNER_KEY = "";
+function ownerHeaders(){
+  if(!OWNER_KEY) OWNER_KEY = prompt("Ключ владельца Создателя:") || "";
+  return {"Content-Type":"application/json","X-Owner-Key":OWNER_KEY};
+}
+async function ownerFetch(url, opts){
+  const r = await fetch(url, Object.assign({headers: ownerHeaders()}, opts||{}));
+  if(r.status === 401){ OWNER_KEY = ""; throw new Error("Неверный ключ владельца — попробуйте ещё раз."); }
+  return r;
+}
+
 const ideaEl = document.getElementById("idea");
 const go = document.getElementById("go");
 const offersEl = document.getElementById("offers");
@@ -143,8 +156,7 @@ go.addEventListener("click", async () => {
   offersEl.innerHTML = ""; warnEl.style.display = "none"; launchedEl.style.display = "none";
   go.disabled = true; go.textContent = "Заостряю…";
   try {
-    const r = await fetch("/api/offers", {method:"POST",
-      headers:{"Content-Type":"application/json"},
+    const r = await ownerFetch("/api/offers", {method:"POST",
       body: JSON.stringify({idea: ideaEl.value})});
     const data = await r.json();
     if (!data.ok) throw new Error(data.error || "Ошибка");
@@ -170,8 +182,7 @@ go.addEventListener("click", async () => {
 
 async function launch(offer){
   launchedEl.style.display = "none";
-  const r = await fetch("/api/launch", {method:"POST",
-    headers:{"Content-Type":"application/json"},
+  const r = await ownerFetch("/api/launch", {method:"POST",
     body: JSON.stringify({idea_text: ideaEl.value, offer})});
   const data = await r.json();
   if (!data.ok) { warnEl.textContent = "⚠ Не удалось запустить"; warnEl.style.display="block"; return; }
@@ -182,7 +193,7 @@ async function launch(offer){
     <ol>
       <li>Создайте кампанию в Директе с этими запросами (300–400 ₽/день).</li>
       <li>Ссылка объявления = адрес лендинга + UTM.</li>
-      <li>Вердикт: <a href="${data.verdict_url}" target="_blank">по этой ссылке</a> — обновляйте раз в день, не чаще.</li>
+      <li>Вердикт: <a href="${data.verdict_url}?key=${encodeURIComponent(OWNER_KEY)}" target="_blank">по этой ссылке</a> — обновляйте раз в день, не чаще.</li>
     </ol>`;
   launchedEl.style.display = "block";
 }
