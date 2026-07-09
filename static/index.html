@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Создатель — от идеи до денег по этапам</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Onest:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  /* Чертёжная фаундера: тёмно-синяя калька, белые линии, строительный оранжевый */
+  :root{
+    --blueprint:#11263F; --line:rgba(214,228,244,.16); --ink:#EAF2FB;
+    --muted:#8FA6BF; --accent:#FF8A2A; --ok:#4CC38A; --card:#0C1D31;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--blueprint) ;
+    background-image:linear-gradient(var(--line) 1px,transparent 1px),
+                     linear-gradient(90deg,var(--line) 1px,transparent 1px);
+    background-size:28px 28px;
+    color:var(--ink);font:400 17px/1.55 "Onest",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;min-height:100vh;
+  }
+  .wrap{max-width:880px;margin:0 auto;padding:48px 20px 80px}
+  .stamp{font:400 12px/1 "JetBrains Mono",monospace;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--muted);border:1px solid var(--line);
+    display:inline-block;padding:6px 10px;border-radius:4px}
+  h1{font:700 clamp(30px,6vw,46px)/1.12 "Unbounded",sans-serif;margin:18px 0 10px}
+  h1 em{font-style:normal;color:var(--accent)}
+  .sub{color:var(--muted);max-width:36em;font-size:18px}
+
+  /* Карта пути: вертикальная лестница этапов */
+  .path{margin:40px 0;display:grid;gap:0}
+  .stage{display:grid;grid-template-columns:56px 1fr;gap:16px;padding:14px 0;
+    border-left:2px solid var(--line);padding-left:18px;position:relative}
+  .stage .num{font:700 15px/1 "JetBrains Mono",monospace;color:var(--muted);
+    background:var(--blueprint);border:1.5px solid var(--line);border-radius:50%;
+    width:40px;height:40px;display:grid;place-items:center;
+    position:absolute;left:-21px;top:12px}
+  .stage.active{border-left-color:var(--accent)}
+  .stage.active .num{border-color:var(--accent);color:var(--accent)}
+  .stage h3{font:600 17px "Onest",sans-serif}
+  .stage p{color:var(--muted);font-size:15px}
+  .stage .lock{font:400 12px "JetBrains Mono",monospace;color:var(--muted)}
+
+  /* Этап 0 живой: форма идеи */
+  .studio{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:22px;margin:8px 0 8px}
+  textarea{width:100%;min-height:110px;padding:14px;font:inherit;color:var(--ink);
+    background:#081526;border:1.5px solid var(--line);border-radius:10px;resize:vertical}
+  textarea:focus{outline:2px solid var(--accent);border-color:var(--accent)}
+  .btn{margin-top:12px;padding:14px 22px;font:600 17px "Onest",sans-serif;border:0;
+    border-radius:10px;background:var(--accent);color:#1A0E00;cursor:pointer}
+  .btn:disabled{opacity:.5;cursor:wait}
+  .btn:focus-visible{outline:3px solid #fff;outline-offset:2px}
+  .note{margin-top:10px;font-size:14px;color:var(--muted)}
+  .warn{margin-top:12px;padding:12px 14px;border:1px solid var(--accent);
+    border-radius:10px;color:var(--accent);font-size:15px;display:none}
+
+  /* Офферы */
+  .offers{display:grid;gap:14px;margin-top:18px}
+  @media(min-width:760px){.offers{grid-template-columns:repeat(3,1fr)}}
+  .offer{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:16px;display:flex;flex-direction:column;gap:8px}
+  .offer .angle{font:700 12px "JetBrains Mono",monospace;color:var(--accent);
+    text-transform:uppercase;letter-spacing:.08em}
+  .offer h4{font:600 17px "Onest",sans-serif}
+  .offer p{font-size:14px;color:var(--muted);flex:1}
+  .offer button{padding:11px;font:600 15px "Onest",sans-serif;border:1.5px solid var(--accent);
+    background:transparent;color:var(--accent);border-radius:9px;cursor:pointer}
+  .offer button:hover{background:var(--accent);color:#1A0E00}
+
+  /* Результат запуска */
+  .launched{display:none;margin-top:18px;background:var(--card);
+    border:1px solid var(--ok);border-radius:12px;padding:18px}
+  .launched h4{color:var(--ok);font:600 18px "Onest",sans-serif;margin-bottom:8px}
+  .launched code{font:400 13px "JetBrains Mono",monospace;color:var(--ink);
+    background:#081526;padding:3px 7px;border-radius:6px;word-break:break-all}
+  .launched ol{margin:10px 0 0 20px;color:var(--muted);font-size:15px}
+  .launched a{color:var(--accent)}
+  .queries{margin-top:8px;font-size:14px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="stamp">Создатель · чертёж № 0.1</span>
+  <h1>От идеи — до денег.<br>По этапам, <em>которые нельзя перепрыгнуть.</em></h1>
+  <p class="sub">Опишите идею — Создатель заострит оффер, соберёт и захостит
+  проверочный лендинг и вынесет вердикт по живому спросу. До того, как вы
+  потратите на продукт полгода.</p>
+
+  <div class="path" id="path">
+    <div class="stage active"><span class="num">0</span>
+      <div style="grid-column:2">
+        <h3>Оффер</h3>
+        <p>Идея превращается в формулировку ценности, которую можно показать рекламой.</p>
+        <div class="studio">
+          <label for="idea" class="note" style="display:block;margin:0 0 8px">
+            Кому и чем помогает ваш продукт? 2–5 предложений.</label>
+          <textarea id="idea" placeholder="Например: сервис, который отвечает на отзывы покупателей за селлеров маркетплейсов — в их тоне, с учётом оценки и текста отзыва."></textarea>
+          <button class="btn" id="go">Заострить идею → 3 оффера</button>
+          <p class="note">ИИ сместит акценты: другая грань боли, другая аудитория,
+          другой момент. Уже здесь идея начнёт становиться продуктом.</p>
+          <div class="warn" id="warn"></div>
+          <div class="offers" id="offers"></div>
+          <div class="launched" id="launched"></div>
+        </div>
+      </div>
+    </div>
+    <div class="stage active"><span class="num">1</span>
+      <div style="grid-column:2"><h3>Спрос</h3>
+      <p>Лендинг + Яндекс Директ. Вердикт: сигнал есть / спроса нет / другой оффер.</p></div>
+    </div>
+    <div class="stage"><span class="num">2</span><div style="grid-column:2">
+      <h3>Активация <span class="lock">🔒 до вердикта этапа 1</span></h3>
+      <p>MVP и первые регистрации.</p></div></div>
+    <div class="stage"><span class="num">3</span><div style="grid-column:2">
+      <h3>Первая ценность <span class="lock">🔒</span></h3>
+      <p>Доходят ли люди до «ага-момента».</p></div></div>
+    <div class="stage"><span class="num">4</span><div style="grid-column:2">
+      <h3>Мост к деньгам <span class="lock">🔒</span></h3>
+      <p>От ценности — к тарифам.</p></div></div>
+    <div class="stage"><span class="num">5</span><div style="grid-column:2">
+      <h3>Оплата <span class="lock">🔒</span></h3>
+      <p>Первые деньги.</p></div></div>
+    <div class="stage"><span class="num">6</span><div style="grid-column:2">
+      <h3>Масштаб <span class="lock">🔒</span></h3>
+      <p>Экономика источников.</p></div></div>
+    <div class="stage"><span class="num">7</span><div style="grid-column:2">
+      <h3>Удержание <span class="lock">🔒</span></h3>
+      <p>Продлевают ли второй месяц — здесь решается, бизнес ли это.</p></div></div>
+  </div>
+</div>
+
+<script>
+const ideaEl = document.getElementById("idea");
+const go = document.getElementById("go");
+const offersEl = document.getElementById("offers");
+const warnEl = document.getElementById("warn");
+const launchedEl = document.getElementById("launched");
+
+go.addEventListener("click", async () => {
+  offersEl.innerHTML = ""; warnEl.style.display = "none"; launchedEl.style.display = "none";
+  go.disabled = true; go.textContent = "Заостряю…";
+  try {
+    const r = await fetch("/api/offers", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({idea: ideaEl.value})});
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || "Ошибка");
+    if (data.warning) { warnEl.textContent = "⚠ " + data.warning; warnEl.style.display = "block"; }
+    if (data.sharpened_note) {
+      const n = document.createElement("p"); n.className = "note";
+      n.textContent = "Что я сместил: " + data.sharpened_note;
+      offersEl.appendChild(n); n.style.gridColumn = "1/-1";
+    }
+    data.offers.forEach(o => {
+      const card = document.createElement("div"); card.className = "offer";
+      card.innerHTML = `<span class="angle">${o.angle}</span>
+        <h4>${o.h1.replace(/<\/?em>/g,"")}</h4><p>${o.sub}</p>`;
+      const b = document.createElement("button");
+      b.textContent = "Запустить этот лендинг";
+      b.onclick = () => launch(o);
+      card.appendChild(b); offersEl.appendChild(card);
+    });
+  } catch(e) {
+    warnEl.textContent = "⚠ " + e.message; warnEl.style.display = "block";
+  } finally { go.disabled = false; go.textContent = "Заострить идею → 3 оффера"; }
+});
+
+async function launch(offer){
+  launchedEl.style.display = "none";
+  const r = await fetch("/api/launch", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({idea_text: ideaEl.value, offer})});
+  const data = await r.json();
+  if (!data.ok) { warnEl.textContent = "⚠ Не удалось запустить"; warnEl.style.display="block"; return; }
+  launchedEl.innerHTML = `<h4>Лендинг захощен ✓</h4>
+    <p>Адрес: <a href="${data.landing_url}" target="_blank"><code>${location.origin}${data.landing_url}</code></a></p>
+    <p class="queries">UTM для Директа: <code>${data.direct_utm}</code></p>
+    <p class="queries">Запросы для кампании: ${data.queries.join(" · ")}</p>
+    <ol>
+      <li>Создайте кампанию в Директе с этими запросами (300–400 ₽/день).</li>
+      <li>Ссылка объявления = адрес лендинга + UTM.</li>
+      <li>Вердикт: <a href="${data.verdict_url}" target="_blank">по этой ссылке</a> — обновляйте раз в день, не чаще.</li>
+    </ol>`;
+  launchedEl.style.display = "block";
+}
+</script>
+</body>
+</html>

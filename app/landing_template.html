@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<!--
+  SMOKE-ЛЕНДИНГ Стартап-лаунчера. Заполнен под идею №1 (ответы на отзывы).
+  АДАПТАЦИЯ ПОД ДРУГУЮ ИДЕЮ — поменять только помеченное [SLOT]:
+  eyebrow, H1, подзаголовок, 3 абзаца боли, тексты демо-карточки,
+  SMOKE_IDEA в конфиге ниже. Цвета/шрифты можно не трогать.
+
+  ПОДКЛЮЧЕНИЕ СОБЫТИЙ: SMOKE_ENDPOINT ниже — URL по образцу
+  /api/landing-event автопоста (см. SPEC_SMOKE_MODE.md). События:
+  page_view (с UTM) при загрузке, lead_submitted при отправке формы.
+  Пока endpoint пуст — форма работает, событие пишется в console.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{PRODUCT_NAME}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Onest:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#14181F;        /* чернильный: текст */
+    --paper:#F5F6F8;      /* холодный светлый фон */
+    --card:#FFFFFF;
+    --star:#F0A32B;       /* янтарь рейтинговых звёзд — акцент из мира селлера */
+    --reply:#1F7A4D;      /* зелёный «ответ продавца» */
+    --muted:#5B6470;
+    --line:#E3E6EB;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font:400 17px/1.55 "Onest",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:640px;margin:0 auto;padding:0 20px}
+  header{padding:48px 0 8px}
+  .eyebrow{font:400 13px/1 "JetBrains Mono",monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  h1{font:700 clamp(28px,6.4vw,40px)/1.15 "Unbounded",sans-serif;margin:14px 0 12px}
+  h1 em{font-style:normal;color:var(--star)}
+  .sub{color:var(--muted);font-size:18px;max-width:34em}
+  /* Форма — выше сгиба: smoke-тест меряет заявки, а не скролл */
+  form{margin:26px 0 10px;display:flex;flex-direction:column;gap:10px}
+  @media(min-width:520px){form{flex-direction:row}}
+  input[type=text]{flex:1;padding:15px 16px;font:inherit;border:1.5px solid var(--line);border-radius:10px;background:var(--card)}
+  input[type=text]:focus{outline:2px solid var(--star);outline-offset:1px;border-color:var(--star)}
+  button{padding:15px 22px;font:600 17px "Onest",sans-serif;border:0;border-radius:10px;background:var(--ink);color:#fff;cursor:pointer}
+  button:hover{background:#000}
+  button:focus-visible{outline:3px solid var(--star);outline-offset:2px}
+  .fineprint{font-size:13px;color:var(--muted)}
+  .thanks{display:none;margin:26px 0;padding:18px;border-radius:10px;background:#EAF5EF;color:var(--reply);font-weight:500}
+
+  /* Signature: живая карточка «отзыв → ответ» */
+  .demo{margin:44px 0;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 8px 28px rgba(20,24,31,.06)}
+  .demo-head{padding:10px 16px;border-bottom:1px solid var(--line);font:400 12px/1 "JetBrains Mono",monospace;color:var(--muted);display:flex;justify-content:space-between}
+  .review,.reply{padding:16px}
+  .stars{color:var(--star);letter-spacing:2px;font-size:15px}
+  .review p{margin-top:6px}
+  .who{font-size:13px;color:var(--muted);margin-top:6px}
+  .reply{border-top:1px dashed var(--line);background:#FBFDFC}
+  .reply .tag{display:inline-block;font:400 11px/1 "JetBrains Mono",monospace;color:var(--reply);border:1px solid currentColor;border-radius:99px;padding:4px 9px;margin-bottom:8px}
+  .reply p{color:#243b30;min-height:4.6em}
+  .caret{display:inline-block;width:2px;height:1em;background:var(--reply);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  @media(prefers-reduced-motion:reduce){.caret{display:none}}
+
+  section.pain{margin:8px 0 40px;display:grid;gap:18px}
+  section.pain h2{font:600 19px "Onest",sans-serif}
+  section.pain p{color:var(--muted)}
+  footer{padding:28px 0 44px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">{{EYEBROW}}</p>
+  <h1>{{H1}}</h1>
+  <p class="sub">{{SUB}}</p>
+
+  <form id="lead">
+    <input type="text" id="contact" placeholder="Email или @telegram" autocomplete="email"
+           aria-label="Email или Telegram для раннего доступа" required>
+    <button type="submit">Получить ранний доступ</button>
+  </form>
+  <p class="fineprint">Запускаемся в августе. Ранним — 50% на первый месяц. Без спама: одно письмо о запуске.</p>
+  <p class="thanks" id="thanks">Вы в списке ранних. Напишем одно письмо — когда откроем доступ.</p>
+</header>
+
+<div class="demo" aria-label="Пример: отзыв покупателя и ответ сервиса">
+  <div class="demo-head"><span>{{DEMO_LEFT_LABEL}}</span><span>отвечено за 3 сек</span></div>
+  <div class="review">
+    <div class="stars" aria-label="оценка 1 из 5">★☆☆☆☆</div>
+    <p>{{DEMO_LEFT_TEXT}}</p>
+    <div class="who">Марина, вчера в 23:47</div>
+  </div>
+  <div class="reply">
+    <span class="tag">ответ продавца · черновик готов</span>
+    <p><span id="typed"></span><span class="caret" id="caret"></span></p>
+  </div>
+</div>
+
+<section class="pain">{{PAINS_HTML}}</section>
+
+<footer>
+  Продукт готовится к запуску; лендинг собирает ранний список. Оставляя контакт,
+  вы соглашаетесь получить одно письмо о запуске. Вопросы: пишите на адрес из письма.
+</footer>
+</div>
+
+<script>
+/* ===== КОНФИГ SMOKE-ТЕСТА ===== */
+const SMOKE_ENDPOINT = "/api/smoke-event";  // Создатель хостит и собирает сам
+const SMOKE_IDEA = "{{IDEA_ID}}";
+
+/* UTM из адреса — доезжает до аналитика с каждым событием */
+const q = new URLSearchParams(location.search);
+const utm = {
+  source: q.get("utm_source") || "", campaign: q.get("utm_campaign") || "",
+  content: q.get("utm_content") || "", term: q.get("utm_term") || "",
+};
+function sendEvent(event, extra){
+  const payload = Object.assign({event, idea: SMOKE_IDEA, page: location.pathname}, utm, extra||{});
+  if(!SMOKE_ENDPOINT){ console.log("[smoke]", payload); return; }
+  fetch(SMOKE_ENDPOINT, {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(payload), keepalive:true}).catch(()=>{});
+}
+sendEvent("page_view");
+
+/* Форма: одно поле, честная страница-спасибо на месте */
+document.getElementById("lead").addEventListener("submit", function(e){
+  e.preventDefault();
+  const contact = document.getElementById("contact").value.trim();
+  if(!contact) return;
+  sendEvent("lead_submitted", {contact});
+  this.style.display = "none";
+  document.querySelector(".fineprint").style.display = "none";
+  document.getElementById("thanks").style.display = "block";
+});
+
+/* Signature: ответ «печатается» при появлении карточки на экране */
+const REPLY_TEXT = {{DEMO_RIGHT_TEXT_JSON}};
+const typed = document.getElementById("typed");
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+function typeReply(){
+  if(reduced){ typed.textContent = REPLY_TEXT; document.getElementById("caret").remove(); return; }
+  let i = 0;
+  (function tick(){
+    typed.textContent = REPLY_TEXT.slice(0, ++i);
+    if(i < REPLY_TEXT.length) setTimeout(tick, 18);
+    else document.getElementById("caret").remove();
+  })();
+}
+new IntersectionObserver((es,o)=>{ if(es[0].isIntersecting){ typeReply(); o.disconnect(); } },
+  {threshold:.4}).observe(document.querySelector(".demo"));
+</script>
+</body>
+</html>
