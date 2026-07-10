@@ -72,6 +72,9 @@
     border-radius:10px;background:var(--accent);color:#1A0E00;cursor:pointer}
   .btn:disabled{opacity:.5;cursor:wait}
   .btn:focus-visible{outline:3px solid #fff;outline-offset:2px}
+  .copy{border:1.5px solid var(--accent);background:transparent;color:var(--accent);
+    border-radius:9px;font:600 15px "Onest",sans-serif;cursor:pointer}
+  .copy:hover{background:var(--accent);color:#1A0E00}
   .note{margin-top:10px;font-size:14px;color:var(--muted)}
   .warn{margin-top:12px;padding:12px 14px;border:1px solid var(--accent);
     border-radius:10px;color:var(--accent);font-size:15px;display:none}
@@ -102,17 +105,11 @@
 </head>
 <body>
 <div class="wrap">
-  <span class="stamp">Создатель · чертёж № 0.1</span>
+  <span class="stamp">Создатель · чертёж № 0.5</span> <a href="/portfolio" style="float:right;color:var(--accent);font:500 15px Onest">Портфель →</a>
   <h1>От идеи — до денег.<br>По этапам, <em>которые нельзя перепрыгнуть.</em></h1>
   <p class="sub">Опишите идею — Создатель заострит оффер, соберёт и захостит
   проверочный лендинг и вынесет вердикт по живому спросу. До того, как вы
   потратите на продукт полгода.</p>
-
-  <div class="cab" id="cab">
-    <h2>Мои проекты</h2>
-    <button class="loadbtn" id="loadCab">Показать портфель (нужен ключ владельца)</button>
-    <div id="cabList"></div>
-  </div>
 
   <div class="path" id="path">
     <div class="stage active"><span class="num">0</span>
@@ -126,6 +123,22 @@
           <button class="btn" id="go">Заострить идею → 3 оффера</button>
           <p class="note">ИИ сместит акценты: другая грань боли, другая аудитория,
           другой момент. Уже здесь идея начнёт становиться продуктом.</p>
+          <div class="warn" id="gate" style="display:none;color:var(--ink);border-color:var(--line)">
+            <p style="margin-bottom:8px"><b>Создатель сейчас в закрытом режиме.</b></p>
+            <p style="color:var(--muted);font-size:14px;margin-bottom:10px">Есть ключ доступа — введите его.
+            Нет — оставьте контакт: откроем доступ волнами и напишем вам.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+              <input type="password" id="keyInput" placeholder="Ключ доступа"
+                style="flex:1;min-width:160px;padding:11px;border:1.5px solid var(--line);border-radius:9px;background:#081526;color:var(--ink);font:inherit">
+              <button type="button" class="copy" style="padding:11px 16px" onclick="applyKey()">Войти</button>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <input type="text" id="wlContact" placeholder="Email или @telegram — в лист ожидания"
+                style="flex:1;min-width:160px;padding:11px;border:1.5px solid var(--line);border-radius:9px;background:#081526;color:var(--ink);font:inherit">
+              <button type="button" class="copy" style="padding:11px 16px" onclick="joinWaitlist()">В список</button>
+            </div>
+            <p class="note" id="wlMsg" style="margin-top:8px"></p>
+          </div>
           <div class="warn" id="warn"></div>
           <div class="offers" id="offers"></div>
           <div class="launched" id="launched"></div>
@@ -162,8 +175,28 @@
    переменной (не в localStorage -- сознательно: закрыл вкладку, ввёл снова). */
 let OWNER_KEY = "";
 function ownerHeaders(){
-  if(!OWNER_KEY) OWNER_KEY = prompt("Ключ владельца Создателя:") || "";
+  if(!OWNER_KEY){
+    const gate = document.getElementById("gate");
+    gate.style.display = "block";
+    gate.scrollIntoView({behavior:"smooth", block:"center"});
+    throw new Error("Нужен ключ доступа — поле выше.");
+  }
   return {"Content-Type":"application/json","X-Owner-Key":OWNER_KEY};
+}
+function applyKey(){
+  OWNER_KEY = document.getElementById("keyInput").value.trim();
+  if(OWNER_KEY){ document.getElementById("gate").style.display = "none"; go.click(); }
+}
+async function joinWaitlist(){
+  const c = document.getElementById("wlContact").value.trim();
+  const msg = document.getElementById("wlMsg");
+  if(c.length < 4){ msg.textContent = "Оставьте email или @telegram."; return; }
+  try{
+    const r = await fetch("/api/waitlist", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify({contact:c})});
+    msg.textContent = r.ok ? "Вы в списке. Напишем, когда откроем доступ." : "Не получилось, попробуйте позже.";
+    if(r.ok) document.getElementById("wlContact").value = "";
+  }catch(e){ msg.textContent = "Не получилось, попробуйте позже."; }
 }
 async function ownerFetch(url, opts){
   const r = await fetch(url, Object.assign({headers: ownerHeaders()}, opts||{}));
@@ -215,7 +248,7 @@ async function addTracked(){
     body: JSON.stringify({name, stage, status_note: note, external_link: link})});
   loadCabinet();
 }
-document.getElementById("loadCab").addEventListener("click", loadCabinet);
+
 
 const ideaEl = document.getElementById("idea");
 const go = document.getElementById("go");
@@ -225,7 +258,16 @@ const launchedEl = document.getElementById("launched");
 
 go.addEventListener("click", async () => {
   offersEl.innerHTML = ""; warnEl.style.display = "none"; launchedEl.style.display = "none";
-  go.disabled = true; go.textContent = "Заостряю…";
+  go.disabled = true;
+  const phases = ["Изучаю боль…","Ищу, кто её уже гуглит…","Подбираю три угла атаки…",
+                  "Пишу офферы…","Собираю запросы для Директа…","Почти готово…"];
+  let t0 = Date.now(), ph = 0;
+  const ticker = setInterval(()=>{
+    const sec = Math.round((Date.now()-t0)/1000);
+    if(sec > 0 && sec % 12 === 0 && ph < phases.length-1) ph++;
+    go.textContent = `${phases[ph]} ${sec} c`;
+  }, 1000);
+  go.textContent = phases[0];
   try {
     const r = await ownerFetch("/api/offers", {method:"POST",
       body: JSON.stringify({idea: ideaEl.value})});
@@ -247,8 +289,10 @@ go.addEventListener("click", async () => {
       card.appendChild(b); offersEl.appendChild(card);
     });
   } catch(e) {
-    warnEl.textContent = "⚠ " + e.message; warnEl.style.display = "block";
-  } finally { go.disabled = false; go.textContent = "Заострить идею → 3 оффера"; }
+    if(!String(e.message).includes("ключ доступа")){
+      warnEl.textContent = "⚠ " + e.message; warnEl.style.display = "block";
+    }
+  } finally { clearInterval(ticker); go.disabled = false; go.textContent = "Заострить идею → 3 оффера"; }
 });
 
 async function launch(offer){
@@ -257,16 +301,7 @@ async function launch(offer){
     body: JSON.stringify({idea_text: ideaEl.value, offer})});
   const data = await r.json();
   if (!data.ok) { warnEl.textContent = "⚠ Не удалось запустить"; warnEl.style.display="block"; return; }
-  launchedEl.innerHTML = `<h4>Лендинг захощен ✓</h4>
-    <p>Адрес: <a href="${data.landing_url}" target="_blank"><code>${location.origin}${data.landing_url}</code></a></p>
-    <p class="queries">UTM для Директа: <code>${data.direct_utm}</code></p>
-    <p class="queries">Запросы для кампании: ${data.queries.join(" · ")}</p>
-    <ol>
-      <li>Создайте кампанию в Директе с этими запросами (300–400 ₽/день).</li>
-      <li>Ссылка объявления = адрес лендинга + UTM.</li>
-      <li>Вердикт: <a href="${data.verdict_url}?key=${encodeURIComponent(OWNER_KEY)}" target="_blank">по этой ссылке</a> — обновляйте раз в день, не чаще.</li>
-    </ol>`;
-  launchedEl.style.display = "block";
+  location.href = `/p/${data.idea_id}`;  // страница проекта: цель, цифры, инструкция Директа
 }
 </script>
 </body>

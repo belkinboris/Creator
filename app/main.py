@@ -99,7 +99,7 @@ class SmokeEvent(SQLModel, table=True):
 
 SQLModel.metadata.create_all(engine)
 
-app = FastAPI(title="Создатель", version="0.4")
+app = FastAPI(title="Создатель", version="0.7")
 
 # Ключ владельца: закрывает генерацию офферов, запуск и удаление лендингов.
 # Публичными остаются только /l/{id}, /api/smoke-event, /health -- им и
@@ -217,9 +217,33 @@ def serve_landing(idea_id: str):
 
 _MAX_FIELD = 300
 
+# Rate limit публичного endpoint'а: простое минутное окно по IP.
+# In-memory достаточно: один процесс, smoke-трафик — сотни визитов/день.
+_RL_WINDOW: dict[str, list[float]] = {}
+_RL_LIMIT = 30          # событий с одного IP в минуту
+_RL_SECONDS = 60.0
+
+
+def _rate_limited(ip: str) -> bool:
+    import time
+    now = time.monotonic()
+    bucket = _RL_WINDOW.setdefault(ip, [])
+    while bucket and now - bucket[0] > _RL_SECONDS:
+        bucket.pop(0)
+    if len(bucket) >= _RL_LIMIT:
+        return True
+    bucket.append(now)
+    if len(_RL_WINDOW) > 10000:   # защита памяти от рассеянных IP
+        _RL_WINDOW.clear()
+    return False
+
 
 @app.post("/api/smoke-event")
 async def smoke_event(request: Request):
+    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+        or (request.client.host if request.client else "?")
+    if _rate_limited(client_ip):
+        raise HTTPException(429, "слишком часто")
     try:
         data = await request.json()
     except Exception:
@@ -271,8 +295,15 @@ def verdict(idea_id: str, request: Request):
             SmokeEvent.idea == idea_id, SmokeEvent.event == "lead_submitted")).all()
     v = compute_verdict(views, len(leads_rows), proj.click_target,
                         proj.lead_rate_signal, proj.lead_rate_dead)
+    offer = json.loads(proj.offer_json or "{}")
     return {"ok": True, "idea_id": idea_id, "product_name": proj.product_name,
+            "h1": offer.get("h1", ""),
             "views": views, "leads": len(leads_rows), **v,
+            "target": proj.click_target,
+            "queries": offer.get("direct_queries", []),
+            "landing_url": f"/l/{idea_id}",
+            "direct_utm": (f"?utm_source=yandex_direct&utm_campaign={idea_id}"
+                           "&utm_content={ad_id}&utm_term={keyword}"),
             "contacts": [c for c, _ in leads_rows]}
 
 
@@ -381,12 +412,61 @@ def cabinet(request: Request):
                                  "views": views, "leads": leads,
                                  "target": p.click_target, "verdict": v["verdict"],
                                  "landing_url": f"/l/{p.idea_id}"})
+        wl = s.exec(select(SmokeEvent.contact).where(
+            SmokeEvent.idea == "sozdatel_waitlist",
+            SmokeEvent.event == "lead_submitted")).all()
+        out["waitlist"] = {"count": len(wl), "contacts": list(wl)}
     return out
+
+
+class WaitlistIn(BaseModel):
+    contact: str
+
+
+@app.post("/api/waitlist")
+async def waitlist(data: WaitlistIn, request: Request):
+    """Лист ожидания Создателя: контакты людей без ключа владельца.
+    Создатель smoke-тестит сам себя: та же механика лидов, своя idea-метка."""
+    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+        or (request.client.host if request.client else "?")
+    if _rate_limited(client_ip):
+        raise HTTPException(429, "слишком часто")
+    contact = data.contact.strip()[:_MAX_FIELD]
+    if len(contact) < 4:
+        raise HTTPException(400, "оставьте email или @telegram")
+    with Session(engine) as s:
+        s.add(SmokeEvent(idea="sozdatel_waitlist", event="lead_submitted", contact=contact))
+        s.commit()
+    return {"ok": True}
+
+
+@app.get("/favicon.ico")
+def favicon():
+    from fastapi.responses import Response
+    # оранжевый квадрат-чертёж 1x1 svg: не 404 в каждом визите
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%2311263F"/><rect x="3" y="3" width="10" height="10" fill="none" stroke="%23FF8A2A" stroke-width="2"/></svg>'
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 @app.get("/health")
 def health():
     return {"ok": True, "service": "sozdatel", "version": "0.1"}
+
+
+@app.get("/portfolio", response_class=HTMLResponse)
+def portfolio_page():
+    return HTMLResponse((BASE_DIR.parent / "static" / "portfolio.html").read_text())
+
+
+@app.get("/p/{idea_id}", response_class=HTMLResponse)
+def project_page(idea_id: str):
+    with Session(engine) as s:
+        proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
+    if proj is None:
+        raise HTTPException(404, "проект не найден")
+    tpl = (BASE_DIR.parent / "static" / "project.html").read_text()
+    return HTMLResponse(tpl.replace("{{IDEA_ID}}", idea_id)
+                           .replace("{{PRODUCT_NAME}}", proj.product_name))
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Портфель — Создатель</title>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Onest:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root{--blueprint:#11263F;--line:rgba(214,228,244,.16);--ink:#EAF2FB;
+    --muted:#8FA6BF;--accent:#FF8A2A;--ok:#4CC38A;--card:#0C1D31}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--blueprint);
+    background-image:linear-gradient(var(--line) 1px,transparent 1px),
+      linear-gradient(90deg,var(--line) 1px,transparent 1px);
+    background-size:28px 28px;color:var(--ink);
+    font:400 17px/1.55 "Onest",system-ui,sans-serif;min-height:100vh}
+  .wrap{max-width:760px;margin:0 auto;padding:40px 20px 80px}
+  a{color:var(--accent)}
+  .crumbs{font:400 13px "JetBrains Mono",monospace;color:var(--muted);margin-bottom:22px}
+  .strip{font:700 14px "JetBrains Mono",monospace;letter-spacing:4px;color:var(--muted);margin:6px 0 4px}
+  .strip b{color:var(--accent)}
+  h1{font:700 clamp(26px,5.4vw,38px)/1.15 "Unbounded",sans-serif;margin:6px 0 4px}
+  .stagename{color:var(--muted);margin-bottom:26px}
+
+  /* ЦЕЛЬ — большими цифрами, единственный фокус экрана */
+  .goal{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:22px;margin-bottom:14px}
+  .goal .label{font:400 12px "JetBrains Mono",monospace;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--muted)}
+  .big{font:700 clamp(44px,10vw,72px)/1.05 "Unbounded",sans-serif;margin:8px 0 2px}
+  .big small{font-size:.45em;color:var(--muted);font-weight:500}
+  .goal .next{margin-top:10px;color:var(--muted)}
+  .verdict{display:inline-block;margin-top:12px;padding:7px 12px;border-radius:99px;
+    border:1.5px solid var(--accent);color:var(--accent);
+    font:700 13px "JetBrains Mono",monospace}
+  .row{display:grid;gap:14px;grid-template-columns:1fr 1fr}
+  .mini{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .mini .label{font:400 11px "JetBrains Mono",monospace;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted)}
+  .mini .val{font:700 26px "Unbounded",sans-serif;margin-top:6px}
+
+  /* Инструкция этапа — подробная, шаг за шагом */
+  .howto{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:22px;margin-top:14px}
+  .howto h2{font:600 18px "Onest",sans-serif;margin-bottom:4px}
+  .howto .sub{color:var(--muted);font-size:15px;margin-bottom:14px}
+  .step{display:grid;grid-template-columns:34px 1fr;gap:12px;padding:12px 0;
+    border-top:1px solid var(--line)}
+  .step .n{font:700 15px "JetBrains Mono",monospace;color:var(--accent);
+    border:1.5px solid var(--accent);border-radius:50%;width:30px;height:30px;
+    display:grid;place-items:center}
+  .step h3{font:600 16px "Onest",sans-serif;margin-bottom:4px}
+  .step p{color:var(--muted);font-size:15px}
+  code{font:400 13px "JetBrains Mono",monospace;background:#081526;
+    padding:3px 7px;border-radius:6px;word-break:break-all;color:var(--ink)}
+  .copy{margin-left:8px;border:1px solid var(--line);background:transparent;
+    color:var(--muted);border-radius:7px;padding:4px 9px;font:500 13px "Onest";cursor:pointer}
+  .copy:hover{border-color:var(--accent);color:var(--accent)}
+  .dont{margin-top:14px;padding:12px 14px;border:1px dashed var(--line);
+    border-radius:10px;color:var(--muted);font-size:14px}
+  .contacts{margin-top:14px;font-size:14px;color:var(--muted)}
+</style>
+</head><body><div class="wrap">
+  <p class="crumbs"><a href="/">+ новая идея (этап ⓪)</a></p>
+  <h1>Портфель</h1>
+  <p class="stagename">Все проекты и их этапы. Кликни smoke-проект — попадёшь на его страницу цели.</p>
+  <div id="list"><button class="copy" id="loadBtn" style="padding:12px 18px;font-size:15px">Показать (ключ владельца)</button></div>
+  <div style="margin-top:14px"><button class="copy" id="addBtn" style="display:none;padding:12px 18px;font-size:15px">+ добавить внешний проект</button></div>
+<script>
+let OWNER_KEY = "";
+function ask(){ if(!OWNER_KEY) OWNER_KEY = prompt("Ключ владельца:") || ""; return OWNER_KEY; }
+function strip(active){ return [0,1,2,3,4,5,6,7].map(i=> i===active? `<b>[${i}]</b>`:i).join(" "); }
+async function load(){
+  const r = await fetch("/api/cabinet", {headers:{"X-Owner-Key": ask()}});
+  if(r.status===401){ OWNER_KEY=""; alert("Неверный ключ"); return; }
+  const d = await r.json();
+  const list = document.getElementById("list"); list.innerHTML = "";
+  d.tracked.forEach(t=>{
+    const el = document.createElement("div"); el.className = "goal";
+    el.innerHTML = `<div class="label">внешний проект</div>
+      <div style="font:700 22px Unbounded">${t.name}</div>
+      <div class="strip" style="margin:8px 0">${strip(t.stage)}</div>
+      <div class="next">Этап ${t.stage} · ${t.stage_name}${t.note? " — "+t.note:""}
+      ${t.link? ` · <a href="${t.link}" target="_blank">открыть</a>`:""}</div>`;
+    list.appendChild(el);
+  });
+  d.smoke.forEach(s=>{
+    const el = document.createElement("div"); el.className = "goal";
+    el.style.cursor = "pointer";
+    el.onclick = ()=>location.href = `/p/${s.idea_id}`;
+    el.innerHTML = `<div class="label">smoke-тест Создателя</div>
+      <div style="font:700 22px Unbounded">${s.name}</div>
+      <div class="strip" style="margin:8px 0">${strip(s.stage)}</div>
+      <div class="next">Этап ${s.stage} · ${s.stage_name} — ${s.views}/${s.target} визитов,
+      заявок ${s.leads} · <span style="color:var(--accent)">${s.verdict}</span>
+      · <a href="#" onclick="event.stopPropagation();delSmoke('${s.idea_id}');return false;"
+        style="color:var(--muted)">удалить</a></div>`;
+    list.appendChild(el);
+  });
+  document.getElementById("addBtn").style.display = "inline-block";
+}
+async function delSmoke(id){
+  if(!confirm(`Удалить лендинг «${id}» вместе с его событиями? Контакты заявок пропадут.`)) return;
+  await fetch(`/api/projects/${id}`,{method:"DELETE",headers:{"X-Owner-Key":ask()}});
+  load();
+}
+document.getElementById("loadBtn").onclick = load;
+document.getElementById("addBtn").onclick = async ()=>{
+  const name = prompt("Название проекта:"); if(!name) return;
+  const stage = parseInt(prompt("Этап 0-7 (0 Оффер · 1 Спрос · 2 Активация · 3 Первая ценность · 4 Мост · 5 Оплата · 6 Масштаб · 7 Удержание):","0")||"0");
+  const note = prompt("Что происходит сейчас (одной строкой):","")||"";
+  const link = prompt("Ссылка (бот/кабинет), можно пусто:","")||"";
+  await fetch("/api/tracked",{method:"POST",headers:{"Content-Type":"application/json","X-Owner-Key":ask()},
+    body:JSON.stringify({name,stage,status_note:note,external_link:link})});
+  load();
+};
+</script></body></html>

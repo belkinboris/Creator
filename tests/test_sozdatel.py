@@ -11,6 +11,15 @@ from app.main import app, compute_verdict, render_landing
 
 client = TestClient(app)
 import app.main as main_module
+
+import pytest as _pytest
+
+@_pytest.fixture(autouse=True)
+def _reset_rate_limit():
+    """Все тесты идут с одного IP тест-клиента — сбрасываем минутное окно,
+    чтобы rate limit тестировался только там, где тестируется он сам."""
+    main_module._RL_WINDOW.clear()
+    yield
 main_module.OWNER_KEY = "test-owner-key"
 OWNER = {"X-Owner-Key": "test-owner-key"}
 
@@ -81,7 +90,9 @@ class TestLandingAndLaunch:
 class TestEventsAndVerdict:
     def test_event_roundtrip_and_verdict(self):
         client.post("/api/launch", headers=OWNER, json={"idea_text": "т", "offer": dict(VALID_OFFER, idea_id="verd_v1")})
-        for _ in range(40):
+        for i in range(40):
+            if i % 20 == 0:
+                main_module._RL_WINDOW.clear()  # 40 событий одним махом с одного IP — только в тестах
             client.post("/api/smoke-event", json={"event": "page_view", "idea": "verd_v1",
                                                   "source": "yandex_direct"})
         for i in range(5):
@@ -256,3 +267,70 @@ class TestCabinet:
                            json={"name": "x", "stage": 9}).status_code == 400
         assert client.post("/api/tracked", headers=OWNER,
                            json={"name": "  ", "stage": 1}).status_code == 400
+
+
+class TestProjectPages:
+    def test_project_page_renders(self):
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="page_v1", product_name="ОтзоВик")})
+        r = client.get("/p/page_v1")
+        assert r.status_code == 200
+        assert "ОтзоВик" in r.text
+        assert "Цель этапа" in r.text
+        assert "Ключевые фразы" in r.text          # инструкция Директа на месте
+        assert "НЕ менять" in r.text               # правило одной переменной
+        assert 'IDEA_ID = "page_v1"' in r.text
+
+    def test_project_page_404(self):
+        assert client.get("/p/nope").status_code == 404
+
+    def test_portfolio_page_and_clean_index(self):
+        r = client.get("/portfolio")
+        assert r.status_code == 200 and "Портфель" in r.text
+        home = client.get("/").text
+        assert "Мои проекты" not in home            # кабинет ушёл с главной
+        assert "/portfolio" in home                 # но ссылка есть
+
+    def test_verdict_includes_launch_data(self):
+        r = client.get("/api/verdict/page_v1", headers=OWNER).json()
+        assert r["queries"] == VALID_OFFER["direct_queries"]
+        assert r["landing_url"] == "/l/page_v1"
+        assert "utm_source=yandex_direct" in r["direct_utm"]
+        assert r["target"] == 40
+
+
+class TestHardening:
+    def test_rate_limit_kicks_in(self):
+        import app.main as m
+        m._RL_WINDOW.clear()
+        codes = []
+        for _ in range(35):
+            r = client.post("/api/smoke-event",
+                            json={"event": "page_view", "idea": "rl_v1"})
+            codes.append(r.status_code)
+        assert codes[:30] == [200]*30
+        assert 429 in codes[30:]
+        m._RL_WINDOW.clear()  # не мешаем другим тестам
+
+    def test_favicon_not_404(self):
+        r = client.get("/favicon.ico")
+        assert r.status_code == 200
+        assert "svg" in r.headers["content-type"]
+
+
+class TestWaitlist:
+    def test_waitlist_public_and_stored(self):
+        r = client.post("/api/waitlist", json={"contact": "founder@test.ru"})
+        assert r.status_code == 200
+        cab = client.get("/api/cabinet", headers=OWNER).json()
+        assert cab["waitlist"]["count"] >= 1
+        assert "founder@test.ru" in cab["waitlist"]["contacts"]
+
+    def test_waitlist_validation(self):
+        assert client.post("/api/waitlist", json={"contact": "ab"}).status_code == 400
+
+    def test_gate_in_homepage(self):
+        home = client.get("/").text
+        assert "закрытом режиме" in home
+        assert "лист ожидания" in home.lower() or "В список" in home
+        assert 'prompt("Ключ владельца Создателя:")' not in home  # голого prompt больше нет
