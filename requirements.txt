@@ -3,4 +3,3 @@ uvicorn[standard]
 sqlmodel
 httpx
 python-dotenv
-psycopg2-binary
