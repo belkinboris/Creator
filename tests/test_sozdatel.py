@@ -334,3 +334,34 @@ class TestWaitlist:
         assert "закрытом режиме" in home
         assert "лист ожидания" in home.lower() or "В список" in home
         assert 'prompt("Ключ владельца Создателя:")' not in home  # голого prompt больше нет
+
+
+class TestPresets:
+    def test_presets_require_key_and_are_valid(self):
+        assert client.get("/api/presets").status_code == 401
+        r = client.get("/api/presets", headers=OWNER).json()
+        assert len(r["presets"]) == 2
+        for o in r["presets"]:
+            # каждый пресет валиден по схеме движка
+            _validate({"offers": [o, dict(o, idea_id=o["idea_id"]+"b"),
+                                  dict(o, idea_id=o["idea_id"]+"c")]})
+            assert 5 <= len(o["direct_queries"]) <= 12
+
+    def test_preset_launches_end_to_end(self):
+        pr = client.get("/api/presets", headers=OWNER).json()["presets"][0]
+        r = client.post("/api/launch", headers=OWNER,
+                        json={"idea_text": "preset:"+pr["idea_id"], "offer": pr})
+        assert r.status_code == 200
+        page = client.get(f"/l/{pr['idea_id']}")
+        assert page.status_code == 200
+        assert "следующих продаж" in page.text          # h1 пресета
+        assert "★☆☆☆☆" in page.text                     # демо-карточка отзыва
+
+    def test_dogovor_preset_landing(self):
+        pr = client.get("/api/presets", headers=OWNER).json()["presets"][1]
+        client.post("/api/launch", headers=OWNER,
+                    json={"idea_text": "preset:"+pr["idea_id"], "offer": pr})
+        page = client.get(f"/l/{pr['idea_id']}").text
+        assert "за 5 минут" in page
+        assert "договор готов · 12 пунктов" in page
+        assert "★" not in page.replace("★☆☆☆☆", "") or "★☆☆☆☆" not in page  # без звёзд отзывов

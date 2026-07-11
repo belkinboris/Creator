@@ -64,7 +64,9 @@
 <div class="wrap">
   <p class="crumbs"><a href="/portfolio">← портфель</a> · <a href="/">+ новая идея</a></p>
   <div class="strip" id="strip">0 1 2 3 4 5 6 7</div>
-  <h1>{{PRODUCT_NAME}}</h1>
+  <h1><span id="pname">{{PRODUCT_NAME}}</span>
+    <a href="#" onclick="rename();return false"
+       style="font:400 14px Onest;color:var(--muted);vertical-align:middle">✎ переименовать</a></h1>
   <p class="stagename" id="stagename">Этап ① · Спрос — проверяем живыми кликами</p>
 
   <div class="goal">
@@ -82,7 +84,7 @@
 
   <div class="howto" id="howto">
     <h2>Как запустить проверку — по шагам</h2>
-    <p class="sub">Один раз, 15 минут. Дальше этап работает сам, вердикт — автоматически.</p>
+    <p class="sub">Один раз, 15–20 минут. Дальше этап работает сам, вердикт — автоматически.</p>
 
     <div class="step"><span class="n">1</span><div>
       <h3>Проверь лендинг глазами</h3>
@@ -92,18 +94,28 @@
     </div></div>
 
     <div class="step"><span class="n">2</span><div>
-      <h3>Создай НОВУЮ кампанию в Яндекс Директе</h3>
-      <p>Отдельную — не трогай существующие. Тип «Текстово-графические объявления»,
-      только Поиск (РСЯ выключить). Бюджет: 300–400 ₽/день. Регион — РФ или твой целевой.</p>
+      <h3>Проверь, что лендинг открывается без VPN</h3>
+      <p>Открой его с телефона на мобильном интернете (не рабочий Wi-Fi). Если не открывается —
+      сначала подключи свой домен через Cloudflare, потом реклама. Платить за трафик на
+      недоступную страницу нельзя, и модерация Директа её не пропустит.</p>
     </div></div>
 
     <div class="step"><span class="n">3</span><div>
+      <h3>Создай НОВУЮ кампанию в Яндекс Директе</h3>
+      <p>Отдельную — не трогай существующие. Тип «Текстово-графические объявления»,
+      только Поиск (РСЯ выключить). Стратегия — <b>«Максимум кликов»</b> с ограничением
+      цены клика; цели конверсии НЕ настраивай: автостратегии нужно ~10 конверсий в неделю,
+      smoke-тест её не прокормит — заявки считает Создатель на своей стороне.
+      Бюджет: 300–400 ₽/день. Регион — РФ или твой целевой.</p>
+    </div></div>
+
+    <div class="step"><span class="n">4</span><div>
       <h3>Ключевые фразы — уже подобраны</h3>
       <p id="queries">…</p>
       <p><button class="copy" id="copyQ">скопировать фразы</button></p>
     </div></div>
 
-    <div class="step"><span class="n">4</span><div>
+    <div class="step"><span class="n">5</span><div>
       <h3>Ссылка объявления — с меткой</h3>
       <p>Вставь в объявление ровно эту ссылку (метка нужна, чтобы Создатель видел,
       что визит пришёл из Директа):</p>
@@ -112,7 +124,7 @@
       (например a1), <code>{keyword}</code> Директ подставит сам.</p>
     </div></div>
 
-    <div class="step"><span class="n">5</span><div>
+    <div class="step"><span class="n">6</span><div>
       <h3>Запусти и не смотри чаще раза в день</h3>
       <p>Вердикт появится на этой странице сам, когда наберётся цель. Дневная проверка —
       одна: открыл страницу, посмотрел цифры, закрыл.</p>
@@ -147,6 +159,15 @@ async function load(){
     contacts.innerHTML = "Контакты заявок (видны только тебе): " + d.contacts.join(", ");
   document.getElementById("strip").innerHTML =
     "0 <b>[1]</b> 2 3 4 5 6 7";
+}
+async function rename(){
+  const name = prompt("Новое имя проекта:", document.getElementById("pname").textContent.trim());
+  if(!name) return;
+  const r = await fetch(`/api/projects/${IDEA_ID}`, {method:"PATCH",
+    headers:{"Content-Type":"application/json","X-Owner-Key": ask()},
+    body: JSON.stringify({name})});
+  if(r.ok){ document.getElementById("pname").textContent = name; document.title = name + " — Создатель"; }
+  else alert("Не получилось переименовать.");
 }
 load();
 </script>

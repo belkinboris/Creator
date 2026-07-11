@@ -76,11 +76,16 @@ async function load(){
   const list = document.getElementById("list"); list.innerHTML = "";
   d.tracked.forEach(t=>{
     const el = document.createElement("div"); el.className = "goal";
+    el.style.cursor = "pointer";
+    el.onclick = ()=> t.link ? window.open(t.link, "_blank")
+                             : editTracked(t.id, t.name, t.stage);
     el.innerHTML = `<div class="label">внешний проект</div>
       <div style="font:700 22px Unbounded">${t.name}</div>
       <div class="strip" style="margin:8px 0">${strip(t.stage)}</div>
       <div class="next">Этап ${t.stage} · ${t.stage_name}${t.note? " — "+t.note:""}
-      ${t.link? ` · <a href="${t.link}" target="_blank">открыть</a>`:""}</div>`;
+      ${t.link? ` · <a href="${t.link}" target="_blank">открыть</a>`:""}
+      · <a href="#" onclick="event.stopPropagation();editTracked(${t.id},'${t.name.replace(/'/g,"")}',${t.stage});return false"
+        style="color:var(--muted)">изменить</a></div>`;
     list.appendChild(el);
   });
   d.smoke.forEach(s=>{
@@ -101,6 +106,16 @@ async function load(){
 async function delSmoke(id){
   if(!confirm(`Удалить лендинг «${id}» вместе с его событиями? Контакты заявок пропадут.`)) return;
   await fetch(`/api/projects/${id}`,{method:"DELETE",headers:{"X-Owner-Key":ask()}});
+  load();
+}
+async function editTracked(id, name, stage){
+  const nName = prompt("Название:", name); if(nName===null) return;
+  const nStage = parseInt(prompt("Этап 0-7:", stage)||stage);
+  const nNote = prompt("Что происходит сейчас:", "")||"";
+  const nLink = prompt("Ссылка:", "")||"";
+  await fetch(`/api/tracked/${id}`,{method:"PATCH",
+    headers:{"Content-Type":"application/json","X-Owner-Key":ask()},
+    body:JSON.stringify({name:nName,stage:nStage,status_note:nNote,external_link:nLink})});
   load();
 }
 document.getElementById("loadBtn").onclick = load;

@@ -111,6 +111,13 @@
   проверочный лендинг и вынесет вердикт по живому спросу. До того, как вы
   потратите на продукт полгода.</p>
 
+  <div class="cab" id="desk" style="display:none;margin:36px 0 8px">
+    <h2 style="font:600 13px 'JetBrains Mono',monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:12px">Рабочий стол · мои проекты</h2>
+    <div id="deskList"></div>
+    <h2 style="font:600 13px 'JetBrains Mono',monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:22px 0 12px">Запустить проверку в один клик · готовые офферы</h2>
+    <div id="deskPresets" style="display:grid;gap:12px"></div>
+  </div>
+
   <div class="path" id="path">
     <div class="stage active"><span class="num">0</span>
       <div style="grid-column:2">
@@ -173,7 +180,7 @@
 <script>
 /* Ключ владельца: спрашивается один раз за сессию вкладки, хранится в
    переменной (не в localStorage -- сознательно: закрыл вкладку, ввёл снова). */
-let OWNER_KEY = "";
+let OWNER_KEY = sessionStorage.getItem("sozdatel_key") || "";
 function ownerHeaders(){
   if(!OWNER_KEY){
     const gate = document.getElementById("gate");
@@ -185,7 +192,11 @@ function ownerHeaders(){
 }
 function applyKey(){
   OWNER_KEY = document.getElementById("keyInput").value.trim();
-  if(OWNER_KEY){ document.getElementById("gate").style.display = "none"; go.click(); }
+  if(OWNER_KEY){
+    sessionStorage.setItem("sozdatel_key", OWNER_KEY);
+    document.getElementById("gate").style.display = "none";
+    initDesk();
+  }
 }
 async function joinWaitlist(){
   const c = document.getElementById("wlContact").value.trim();
@@ -250,6 +261,61 @@ async function addTracked(){
 }
 
 
+function stageStripHome(active){
+  return [0,1,2,3,4,5,6,7].map(i=> i===active? `<b style="color:var(--accent)">[${i}]</b>`:i).join(" ");
+}
+async function initDesk(){
+  if(!OWNER_KEY) return;
+  try{
+    const r = await fetch("/api/cabinet", {headers:{"X-Owner-Key": OWNER_KEY}});
+    if(!r.ok) return;
+    const d = await r.json();
+    const list = document.getElementById("deskList"); list.innerHTML = "";
+    const card = (inner, onclick) => {
+      const el = document.createElement("div");
+      el.style.cssText = "background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:10px" + (onclick? ";cursor:pointer":"");
+      if(onclick) el.onclick = onclick;
+      el.innerHTML = inner; return el;
+    };
+    d.tracked.forEach(t => list.appendChild(card(
+      `<div style="font:600 17px Onest">${t.name}</div>
+       <div style="font:700 13px 'JetBrains Mono',monospace;letter-spacing:3px;color:var(--muted);margin:6px 0">${stageStripHome(t.stage)}</div>
+       <div style="font-size:14px;color:var(--muted)">Этап ${t.stage} · ${t.stage_name}${t.note? " — "+t.note:""}</div>`,
+      t.link ? ()=>window.open(t.link,"_blank") : null)));
+    d.smoke.forEach(s => list.appendChild(card(
+      `<div style="font:600 17px Onest">${s.name}</div>
+       <div style="font:700 13px 'JetBrains Mono',monospace;letter-spacing:3px;color:var(--muted);margin:6px 0">${stageStripHome(s.stage)}</div>
+       <div style="font-size:14px;color:var(--muted)">${s.views}/${s.target} визитов · заявок ${s.leads} · <span style="color:var(--accent)">${s.verdict}</span></div>`,
+      ()=>location.href=`/p/${s.idea_id}`)));
+    if(d.waitlist && d.waitlist.count)
+      list.appendChild(card(`<div style="font-size:14px;color:var(--muted)">Лист ожидания Создателя: <b style="color:var(--ink)">${d.waitlist.count}</b> контактов</div>`, null));
+
+    const pr = await fetch("/api/presets", {headers:{"X-Owner-Key": OWNER_KEY}});
+    if(pr.ok){
+      const pd = await pr.json();
+      const box = document.getElementById("deskPresets"); box.innerHTML = "";
+      pd.presets.forEach(o => {
+        const el = document.createElement("div"); el.className = "offer";
+        el.innerHTML = `<span class="angle">${o.angle}</span>
+          <h4>${o.product_name}</h4><p>${o.sub}</p>`;
+        const b = document.createElement("button");
+        b.textContent = `Запустить «${o.product_name}»`;
+        b.onclick = async () => {
+          b.disabled = true; b.textContent = "Запускаю…";
+          const r = await fetch("/api/launch", {method:"POST", headers: ownerHeaders(),
+            body: JSON.stringify({idea_text: "preset:"+o.idea_id, offer: o})});
+          const data = await r.json();
+          if(data.ok) location.href = `/p/${data.idea_id}`;
+          else { b.disabled = false; b.textContent = `Запустить «${o.product_name}»`; }
+        };
+        el.appendChild(b); box.appendChild(el);
+      });
+    }
+    document.getElementById("desk").style.display = "block";
+  }catch(e){ /* нет ключа/сети — остаёмся лендингом */ }
+}
+initDesk();
+
 const ideaEl = document.getElementById("idea");
 const go = document.getElementById("go");
 const offersEl = document.getElementById("offers");
@@ -282,10 +348,19 @@ go.addEventListener("click", async () => {
     data.offers.forEach(o => {
       const card = document.createElement("div"); card.className = "offer";
       card.innerHTML = `<span class="angle">${o.angle}</span>
-        <h4>${o.h1.replace(/<\/?em>/g,"")}</h4><p>${o.sub}</p>`;
+        <h4>${o.h1.replace(/<\/?em>/g,"")}</h4><p>${o.sub}</p>
+        <label style="font-size:12px;color:var(--muted)">Название проекта — можно поменять:</label>`;
+      const nameInput = document.createElement("input");
+      nameInput.type = "text"; nameInput.value = o.product_name;
+      nameInput.style.cssText = "width:100%;padding:9px;margin:4px 0 8px;border:1.5px solid var(--line);border-radius:8px;background:#081526;color:var(--ink);font:inherit";
+      card.appendChild(nameInput);
       const b = document.createElement("button");
       b.textContent = "Запустить этот лендинг";
-      b.onclick = () => launch(o);
+      b.onclick = () => {
+        const name = nameInput.value.trim();
+        if(name) o.product_name = name;
+        launch(o);
+      };
       card.appendChild(b); offersEl.appendChild(card);
     });
   } catch(e) {
