@@ -125,11 +125,11 @@
           <label for="idea" class="note" style="display:block;margin:0 0 8px">
             Кому и чем помогает ваш продукт? 2–5 предложений.</label>
           <textarea id="idea" placeholder="Например: сервис, который отвечает на отзывы покупателей за селлеров маркетплейсов — в их тоне, с учётом оценки и текста отзыва."></textarea>
-          <button class="btn" id="go">Разобрать идею → 3 варианта</button>
-          <p class="note">Что произойдёт: Создатель разберёт, кому это нужно и какую
-          боль решает, и вернёт три разных варианта — у каждого готовый заголовок,
-          текст страницы и слова для рекламы. Выберете один — проверочная страница
-          будет опубликована сразу, останется включить рекламу по инструкции.</p>
+          <button class="btn" id="go">Разобрать идею</button>
+          <p class="note">Создатель разберёт, кому это нужно и какую боль решает, и вернёт
+          три разных варианта — у каждого готовый заголовок, текст страницы и слова
+          для рекламы. Выберете один — проверочная страница будет опубликована сразу,
+          останется включить рекламу по инструкции.</p>
           <div class="warn" id="gate" style="display:none;color:var(--ink);border-color:var(--line)">
             <p style="margin-bottom:8px"><b>Создатель сейчас в закрытом режиме.</b></p>
             <p style="color:var(--muted);font-size:14px;margin-bottom:10px">Есть ключ доступа — введите его.
@@ -184,13 +184,15 @@
 /* Ключ владельца: спрашивается один раз за сессию вкладки, хранится в
    переменной (не в localStorage -- сознательно: закрыл вкладку, ввёл снова). */
 let OWNER_KEY = sessionStorage.getItem("sozdatel_key") || "";
+function needKey(){
+  if(OWNER_KEY) return false;
+  const gate = document.getElementById("gate");
+  gate.style.display = "block";
+  gate.scrollIntoView({behavior:"smooth", block:"center"});
+  document.getElementById("keyInput").focus();
+  return true;   // не бросаем исключение — просто показываем ворота
+}
 function ownerHeaders(){
-  if(!OWNER_KEY){
-    const gate = document.getElementById("gate");
-    gate.style.display = "block";
-    gate.scrollIntoView({behavior:"smooth", block:"center"});
-    throw new Error("Нужен ключ доступа — поле выше.");
-  }
   return {"Content-Type":"application/json","X-Owner-Key":OWNER_KEY};
 }
 function applyKey(){
@@ -214,110 +216,16 @@ async function joinWaitlist(){
 }
 async function ownerFetch(url, opts){
   const r = await fetch(url, Object.assign({headers: ownerHeaders()}, opts||{}));
-  if(r.status === 401){ OWNER_KEY = ""; throw new Error("Неверный ключ владельца — попробуйте ещё раз."); }
+  if(r.status === 401){
+    OWNER_KEY = ""; sessionStorage.removeItem("sozdatel_key");
+    throw new Error("Неверный ключ доступа — попробуйте ещё раз.");
+  }
   return r;
 }
 
-const STAGE_ICONS = ["0","1","2","3","4","5","6","7"];
-function stageStrip(active){
-  return STAGE_ICONS.map((s,i)=> i===active? `<b>[${s}]</b>` : s).join(" ");
-}
-async function loadCabinet(){
-  const list = document.getElementById("cabList");
-  try{
-    const r = await ownerFetch("/api/cabinet");
-    const data = await r.json();
-    list.innerHTML = "";
-    data.tracked.forEach(t => {
-      const d = document.createElement("div"); d.className = "proj";
-      d.innerHTML = `<span class="pname">${t.name}</span>
-        <span class="strip">${stageStrip(t.stage)}</span>
-        <span class="pnote">Этап ${t.stage} · ${t.stage_name}${t.note? " — "+t.note : ""}
-        ${t.link? ` · <a href="${t.link}" target="_blank">открыть</a>` : ""}</span>`;
-      list.appendChild(d);
-    });
-    data.smoke.forEach(sm => {
-      const d = document.createElement("div"); d.className = "proj";
-      d.innerHTML = `<span class="pname">${sm.name}</span>
-        <span class="strip">${stageStrip(sm.stage)}</span>
-        <span class="pnote">Этап ${sm.stage} · ${sm.stage_name} — ${sm.views}/${sm.target} визитов,
-        заявок ${sm.leads} · ${sm.verdict} · <a href="${sm.landing_url}" target="_blank">лендинг</a></span>`;
-      list.appendChild(d);
-    });
-    const add = document.createElement("button"); add.className = "add";
-    add.textContent = "+ добавить внешний проект (например, АвтоПост)";
-    add.onclick = addTracked;
-    list.appendChild(add);
-    document.getElementById("loadCab").style.display = "none";
-  }catch(e){
-    list.innerHTML = `<p class="note">⚠ ${e.message}</p>`;
-  }
-}
-
-
-/* Владелец с ключом идёт на рабочий стол, НО ?new=1 (кнопка «Проверить
-   идею» со стола) оставляет его здесь — иначе петля стол→главная→стол */
+/* Владелец с ключом идёт на рабочий стол; ?new=1 (кнопка «Проверить идею»
+   со стола) оставляет его здесь — иначе петля стол→главная→стол */
 if(sessionStorage.getItem("sozdatel_key") && !location.search.includes("new")) location.replace("/desk");
-  }
-}
-async function joinWaitlist(){
-  const c = document.getElementById("wlContact").value.trim();
-  const msg = document.getElementById("wlMsg");
-  if(c.length < 4){ msg.textContent = "Оставьте email или @telegram."; return; }
-  try{
-    const r = await fetch("/api/waitlist", {method:"POST",
-      headers:{"Content-Type":"application/json"}, body: JSON.stringify({contact:c})});
-    msg.textContent = r.ok ? "Вы в списке. Напишем, когда откроем доступ." : "Не получилось, попробуйте позже.";
-    if(r.ok) document.getElementById("wlContact").value = "";
-  }catch(e){ msg.textContent = "Не получилось, попробуйте позже."; }
-}
-async function ownerFetch(url, opts){
-  const r = await fetch(url, Object.assign({headers: ownerHeaders()}, opts||{}));
-  if(r.status === 401){ OWNER_KEY = ""; throw new Error("Неверный ключ владельца — попробуйте ещё раз."); }
-  return r;
-}
-
-const STAGE_ICONS = ["0","1","2","3","4","5","6","7"];
-function stageStrip(active){
-  return STAGE_ICONS.map((s,i)=> i===active? `<b>[${s}]</b>` : s).join(" ");
-}
-async function loadCabinet(){
-  const list = document.getElementById("cabList");
-  try{
-    const r = await ownerFetch("/api/cabinet");
-    const data = await r.json();
-    list.innerHTML = "";
-    data.tracked.forEach(t => {
-      const d = document.createElement("div"); d.className = "proj";
-      d.innerHTML = `<span class="pname">${t.name}</span>
-        <span class="strip">${stageStrip(t.stage)}</span>
-        <span class="pnote">Этап ${t.stage} · ${t.stage_name}${t.note? " — "+t.note : ""}
-        ${t.link? ` · <a href="${t.link}" target="_blank">открыть</a>` : ""}</span>`;
-      list.appendChild(d);
-    });
-    data.smoke.forEach(sm => {
-      const d = document.createElement("div"); d.className = "proj";
-      d.innerHTML = `<span class="pname">${sm.name}</span>
-        <span class="strip">${stageStrip(sm.stage)}</span>
-        <span class="pnote">Этап ${sm.stage} · ${sm.stage_name} — ${sm.views}/${sm.target} визитов,
-        заявок ${sm.leads} · ${sm.verdict} · <a href="${sm.landing_url}" target="_blank">лендинг</a></span>`;
-      list.appendChild(d);
-    });
-    const add = document.createElement("button"); add.className = "add";
-    add.textContent = "+ добавить внешний проект (например, АвтоПост)";
-    add.onclick = addTracked;
-    list.appendChild(add);
-    document.getElementById("loadCab").style.display = "none";
-  }catch(e){
-    list.innerHTML = `<p class="note">⚠ ${e.message}</p>`;
-  }
-}
-
-
-function stageStripHome(active){
-  return [0,1,2,3,4,5,6,7].map(i=> i===active? `<b style="color:var(--accent)">[${i}]</b>`:i).join(" ");
-}
-
 
 const ideaEl = document.getElementById("idea");
 const go = document.getElementById("go");
@@ -326,12 +234,17 @@ const warnEl = document.getElementById("warn");
 const launchedEl = document.getElementById("launched");
 
 go.addEventListener("click", async () => {
+  if(needKey()) return;                      // нет ключа -> ворота, кнопка живая
+  if(!ideaEl.value.trim() || ideaEl.value.trim().length < 20){
+    warnEl.textContent = "⚠ Опишите идею хотя бы парой предложений: кому и чем она помогает.";
+    warnEl.style.display = "block"; return;
+  }
   offersEl.innerHTML = ""; warnEl.style.display = "none"; launchedEl.style.display = "none";
   go.disabled = true;
   const phases = ["Изучаю боль…","Ищу, кто её уже гуглит…","Подбираю три угла атаки…",
                   "Пишу варианты…","Собираю запросы для Директа…","Почти готово…"];
-  let t0 = Date.now(), ph = 0;
-  const ticker = setInterval(()=>{
+  let t0 = Date.now(), ph = 0, ticker = null;
+  ticker = setInterval(()=>{
     const sec = Math.round((Date.now()-t0)/1000);
     if(sec > 0 && sec % 12 === 0 && ph < phases.length-1) ph++;
     go.textContent = `${phases[ph]} ${sec} c`;
@@ -370,7 +283,7 @@ go.addEventListener("click", async () => {
     if(!String(e.message).includes("ключ доступа")){
       warnEl.textContent = "⚠ " + e.message; warnEl.style.display = "block";
     }
-  } finally { clearInterval(ticker); go.disabled = false; go.textContent = "Разобрать идею → 3 варианта"; }
+  } finally { if(ticker) clearInterval(ticker); go.disabled = false; go.textContent = "Разобрать идею"; }
 });
 
 async function launch(offer){
