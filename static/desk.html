@@ -8,7 +8,7 @@
 <style>
   /* Та же система, что на главной: бумага, чернила, жёлтый маркер. */
   :root{--bg:#FBF6EA;--box:#FFFDF6;--line:#E9E1CB;--ink:#1B1C20;--muted:#6F6A5C;
-    --marker:#FFDE59;--btn:#1B1C20;--ok:#2E7D4F;--pad:22px}
+    --marker:#FFDE59;--btn:#1B1C20;--ok:#2E7D4F;--warn:#A87B00;--pad:22px}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--ink);
     font:400 16px/1.55 "IBM Plex Sans",system-ui,sans-serif;min-height:100vh;
@@ -36,6 +36,7 @@
   .stage-bar{display:flex;gap:3px}
   .stage-bar i{flex:1;height:4px;border-radius:99px;background:var(--line);font-style:normal}
   .stage-bar i.done{background:var(--ink)}
+  .spark{display:block;width:100%;height:28px;margin-top:2px}
 
   .nums{display:flex;gap:22px;margin-top:2px}
   .n .v{font:600 26px/1 "IBM Plex Mono",monospace}
@@ -60,6 +61,21 @@
   .new h2{font-size:17px;font-weight:600;color:var(--ink)}
   .new p{font-size:14px;color:var(--muted)}
   .wl{margin-top:22px;font-size:14px;color:var(--muted)}
+
+  .orders-head{margin-top:34px}
+  .orders-head h1{font-size:22px}
+  .orders{border:1px solid var(--line);background:var(--box);border-radius:8px;overflow:hidden;margin-top:14px}
+  .order-row{padding:14px 16px;border-top:1px solid var(--line)}
+  .order-row:first-child{border-top:0}
+  .order-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .order-status{font:600 12px "IBM Plex Mono",monospace;color:var(--muted)}
+  .order-status.paid{color:var(--ok)}
+  .order-status.pending{color:var(--warn)}
+  .order-date{font-size:12.5px;color:var(--muted)}
+  .order-idea{font-size:15px;margin-top:4px}
+  .order-contact{font-size:13.5px;color:var(--muted);margin-top:2px}
+  .order-offer{font-size:13.5px;color:var(--muted);margin-top:6px;padding-left:10px;border-left:2px solid var(--marker)}
+  .empty{color:var(--muted);font-size:14px;padding:14px 0}
   #gate{max-width:420px;margin:60px auto;background:var(--box);border:1px solid var(--line);
     border-radius:8px;padding:22px}
   #gate h2{font-size:19px;font-weight:600;margin-bottom:4px}
@@ -93,6 +109,11 @@
     <p class="sub">Каждый проект — где он на пути 0→7, что показывают цифры и что делать дальше.</p>
     <div class="grid" id="grid"></div>
 
+    <div class="orders-head">
+      <h1>Заявки на <span class="hl">живой тест</span></h1>
+    </div>
+    <div id="orders"></div>
+
     <div id="form">
       <h3 id="formTitle">Проект</h3>
       <input id="fName" placeholder="Название">
@@ -114,6 +135,54 @@ const STAGES = ["Идея","Спрос","Проверочная страница
 function stageBadge(stageIdx, name){
   const segs = Array.from({length:8}, (_,i)=> `<i class="${i<=stageIdx?'done':''}"></i>`).join('');
   return `<div class="stage-line"><span class="stage-txt">Этап ${stageIdx+1} из 8 — ${name}</span><div class="stage-bar">${segs}</div></div>`;
+}
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+const ORDER_STATUS = {new: ["", "новая заявка"], pending_payment: ["pending", "ожидает оплаты"], paid: ["paid", "оплачено"]};
+async function drawSpark(canvas, ideaId){
+  if(!canvas) return;
+  try{
+    const r = await fetch(`/api/series/${ideaId}`, {headers:{"X-Owner-Key": KEY}});
+    if(!r.ok) return;
+    const {days} = await r.json();
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+    const maxV = Math.max(1, ...days.map(d => d.views));
+    const bw = W / days.length;
+    days.forEach((d, i) => {
+      const vh = Math.round(d.views / maxV * (H - 4));
+      ctx.fillStyle = "#1B1C20";
+      ctx.fillRect(i * bw + 1, H - 2 - vh, Math.max(1, bw - 2), vh);
+      if (d.leads) {
+        const lh = Math.round(d.leads / maxV * (H - 4));
+        ctx.fillStyle = "#FFDE59";
+        ctx.fillRect(i * bw + 1 + Math.max(1, bw - 2) / 2, H - 2 - lh, Math.max(1, (bw - 2) / 2), lh);
+      }
+    });
+  }catch(e){ /* графика — не критично, цифры на карточке остаются */ }
+}
+async function loadOrders(){
+  const box = document.getElementById("orders");
+  const r = await fetch("/api/orders", {headers:{"X-Owner-Key": KEY}});
+  if(!r.ok){ return; }
+  const {orders} = await r.json();
+  if(!orders.length){ box.innerHTML = '<p class="empty">Пока нет заявок на живой тест.</p>'; return; }
+  box.innerHTML = '<div class="orders">' + orders.map(o => {
+    const [cls, label] = ORDER_STATUS[o.status] || ["", o.status];
+    const parsed = new Date(o.created_at.replace(" ", "T") + "Z");
+    const date = isNaN(parsed) ? o.created_at
+      : parsed.toLocaleString("ru", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"});
+    return `<div class="order-row">
+      <div class="order-top">
+        <span class="order-status ${cls}">${escapeHtml(label)}</span>
+        <span class="order-date">${date} · ${o.amount} ₽</span>
+      </div>
+      <div class="order-idea">${escapeHtml(o.idea || "—")}</div>
+      <div class="order-contact">${escapeHtml(o.contact)}</div>
+      ${o.chosen_offer ? `<div class="order-offer">Выбрано позиционирование: ${escapeHtml(o.chosen_offer.h1 || "")}</div>` : ""}
+    </div>`;
+  }).join('') + '</div>';
 }
 function enter(){
   KEY = document.getElementById("key").value.trim();
@@ -139,6 +208,7 @@ async function load(){
         <div class="n"><div class="v">${s.rate}%</div><div class="l">конверсия</div></div>
       </div>
       <div class="bar"><i style="width:${s.progress}%"></i></div>
+      <canvas class="spark" width="240" height="28"></canvas>
       <div class="verdict">${s.verdict}</div>
       <div class="next"><span>следующий шаг</span>${s.next_step}</div>
       <div class="acts">
@@ -147,6 +217,7 @@ async function load(){
         <button class="btn ghost" onclick="del('${s.idea_id}')">Удалить</button>
       </div>`;
     g.appendChild(el);
+    drawSpark(el.querySelector('.spark'), s.idea_id);
   });
 
   d.tracked.forEach(t => {
@@ -198,6 +269,8 @@ async function load(){
   document.getElementById("wl").textContent = d.waitlist && d.waitlist.count
     ? `Лист ожидания Создателя: ${d.waitlist.count} контактов`
     : "";
+
+  loadOrders();
 }
 async function del(id){
   if(!confirm(`Удалить проверку «${id}» вместе с событиями?`)) return;

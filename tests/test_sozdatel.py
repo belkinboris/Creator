@@ -318,6 +318,41 @@ class TestCabinet:
                            json={"name": "  ", "stage": 1}).status_code == 400
 
 
+class TestDeskOrders:
+    """Кабинет: заявки на живой тест были видны только как сырой JSON
+    в /api/orders -- теперь есть страница, плюс мини-график динамики
+    на карточке проекта вместо только сегодняшних цифр."""
+
+    def test_desk_page_has_orders_section(self):
+        text = client.get("/desk").text
+        assert "Заявки на" in text and "живой тест" in text
+        assert "/api/orders" in text
+        assert "loadOrders" in text
+
+    def test_desk_page_has_sparkline(self):
+        text = client.get("/desk").text
+        assert 'class="spark"' in text
+        assert "drawSpark" in text and "/api/series/" in text
+
+    def test_desk_renders_chosen_offer_when_present(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [], "best_phrase": "", "verdict": {"level": "unknown", "text": ""},
+                    "competitors": {"found": None, "top": []}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея достаточно длинная для заказа с оффером"}).json().get("id")
+        finally:
+            m.check_demand = orig
+        r = client.post("/api/live-test", json={"check_id": rid, "contact": "@offer_owner_view",
+                        "chosen_offer": {"angle": "a", "h1": "Заголовок для владельца", "sub": "s"}})
+        assert r.status_code == 200
+        orders = client.get("/api/orders", headers=OWNER).json()["orders"]
+        mine = next(o for o in orders if o["contact"] == "@offer_owner_view")
+        assert mine["chosen_offer"]["h1"] == "Заголовок для владельца"
+
+
 class TestProjectPages:
     def test_project_page_renders(self):
         client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
