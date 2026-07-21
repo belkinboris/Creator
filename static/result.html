@@ -88,6 +88,9 @@
     .score-grid{grid-template-columns:1fr 1fr}
     .btn{width:100%;text-align:center}
   }
+  footer{border-top:1px solid var(--line);margin-top:30px;padding:22px 0;color:var(--muted);font-size:13px}
+  footer a{color:var(--muted)}
+  footer a:hover{color:var(--ink)}
 </style>
 </head>
 <body>
@@ -140,6 +143,12 @@
     <p class="okmsg" id="order-ok"></p>
   </div>
 </main>
+
+<footer>
+  <div class="wrap">
+    <span>© Создатель</span> · <a href="/oferta">Публичная оферта</a> · <a href="/agreement">Соглашение</a> · <a href="/privacy">Конфиденциальность</a> · <a href="/contacts">Реквизиты</a>
+  </div>
+</footer>
 
 <script>
 const DATA = __RESULT_JSON__;

@@ -1,91 +1,75 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Политика персональных данных и условия — Создатель</title>
-<meta name="robots" content="noindex">
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@700;800&family=Onest:wght@400;500;600&display=swap" rel="stylesheet">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Правовые документы — Создатель</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
 <style>
-  :root{--blueprint:#11263F;--line:rgba(214,228,244,.16);--ink:#EAF2FB;--muted:#8FA6BF;--accent:#FF8A2A;--card:#0C1D31}
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--blueprint);color:var(--ink);font:400 16px/1.65 "Onest",system-ui,sans-serif}
-  .wrap{max-width:720px;margin:0 auto;padding:40px 20px 80px}
-  a{color:var(--accent)}
-  h1{font:800 26px/1.2 "Manrope",sans-serif;margin-bottom:6px}
-  h2{font:700 18px "Manrope",sans-serif;margin:28px 0 8px}
-  p,li{color:var(--muted);margin-bottom:8px}
-  ul{padding-left:20px}
-  .note{background:var(--card);border:1px solid var(--accent);border-radius:10px;
-    padding:12px 14px;font-size:14px;color:var(--accent);margin:16px 0}
+  body{background:#FBF6EA;color:#1B1C20;font:400 16px/1.65 "IBM Plex Sans",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:760px;margin:0 auto;padding:40px 22px 80px}
+  a{color:#1B1C20}
+  .back{display:inline-block;margin-bottom:28px;color:#6F6A5C;text-decoration:none;font-size:14px}
+  .back:hover{color:#1B1C20}
+  h1{font-size:clamp(22px,3.8vw,30px);font-weight:600;letter-spacing:-.015em;margin-bottom:10px}
+  .sub{color:#6F6A5C;font-size:15px;margin-bottom:32px}
+  .doc-list{display:flex;flex-direction:column;gap:1px;background:#E9E1CB;
+    border:1px solid #E9E1CB;border-radius:8px;overflow:hidden}
+  .doc-item{display:flex;align-items:center;justify-content:space-between;gap:16px;
+    background:#FFFDF6;padding:18px 22px;text-decoration:none;color:#1B1C20}
+  .doc-item:hover{background:#FBF6EA}
+  .doc-title{font-weight:600;font-size:16px}
+  .doc-desc{color:#6F6A5C;font-size:14px;margin-top:3px}
+  .doc-arrow{color:#6F6A5C;font-size:18px;flex-shrink:0}
+  footer{border-top:1px solid #E9E1CB;margin-top:40px;padding:22px 0;color:#6F6A5C;font-size:13px}
+  footer a{color:#6F6A5C;text-decoration:none}
+  footer a:hover{color:#1B1C20}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <p><a href="/">← на главную</a></p>
-  <h1>Политика обработки персональных данных<br>и условия использования</h1>
-  <p>Редакция от 12 июля 2026 г.</p>
+<a href="/" class="back">← Создатель</a>
+<h1>Правовые документы</h1>
+<p class="sub">Все документы, регулирующие использование сервиса</p>
 
-  <div class="note">ПРОЕКТ ДОКУМЕНТА. Перед публичным запуском: вставить
-  реквизиты оператора (ФИО/ИП/ООО, ИНН, e-mail для обращений), сверить
-  текст и удалить эту плашку. Основа подготовлена под проверку юристом.</div>
-
-  <h2>1. Кто оператор</h2>
-  <p>Оператор персональных данных — [УКАЗАТЬ: ФИО / ИП / ООО, ИНН, адрес,
-  e-mail для обращений субъектов данных] (далее — «Оператор», «мы»).
-  Сервис «Создатель» (далее — «Сервис») доступен по адресу этого сайта.</p>
-
-  <h2>2. Какие данные и зачем мы обрабатываем</h2>
-  <ul>
-    <li><b>Контакт из листа ожидания</b> (e-mail или имя пользователя
-    Telegram) — чтобы один раз сообщить об открытии доступа к Сервису.
-    Правовое основание — согласие субъекта (ч. 1 ст. 6 152-ФЗ),
-    выраженное отправкой формы.</li>
-    <li><b>Контакт из формы на проверочных страницах</b> — чтобы владелец
-    проверяемой идеи сообщил вам о запуске продукта, ранний доступ к
-    которому вы запросили. Основание — согласие, выраженное отправкой формы.</li>
-    <li><b>Технические данные</b> (обезличенные события посещения страниц:
-    факт визита, метки источника рекламы) — для подсчёта статистики
-    спроса. Профили посетителей не строятся, cookies для отслеживания
-    личности не используются.</li>
-  </ul>
-
-  <h2>3. Что мы НЕ делаем</h2>
-  <ul>
-    <li>Не передаём контакты третьим лицам, кроме случая, прямо описанного
-    в п. 2 (контакт с проверочной страницы доступен владельцу этой
-    страницы — в этом и состоит цель его сбора).</li>
-    <li>Не рассылаем рекламу и не продаём базы.</li>
-    <li>Не собираем специальные категории данных.</li>
-  </ul>
-
-  <h2>4. Хранение и защита</h2>
-  <p>Данные хранятся в базе данных Сервиса с ограниченным доступом
-  (доступ по ключу владельца). Срок хранения контакта — до достижения
-  цели (уведомление о запуске) либо до отзыва согласия, в зависимости
-  от того, что наступит раньше.</p>
-
-  <h2>5. Ваши права</h2>
-  <p>Вы вправе запросить сведения об обработке, потребовать уточнения,
-  блокирования или уничтожения ваших данных, отозвать согласие. Для этого
-  напишите на [E-MAIL ОПЕРАТОРА] с адреса/аккаунта, который вы оставляли.
-  Срок ответа — 10 рабочих дней.</p>
-
-  <h2>6. Условия использования Сервиса</h2>
-  <ul>
-    <li>Сервис помогает проверять спрос на идеи: создаёт проверочные
-    страницы и считает статистику. Вердикты Сервиса — статистическая
-    оценка, а не гарантия коммерческого результата.</li>
-    <li>Запрещено использовать Сервис для сбора персональных данных
-    без законного основания, для идей, связанных с медицинскими услугами
-    без лицензии, азартными играми, а также направленных на аудиторию
-    младше 18 лет.</li>
-    <li>Владелец проверочной страницы самостоятельно отвечает за
-    содержание своей идеи и за законность обещаний на странице.</li>
-  </ul>
-
-  <h2>7. Изменения</h2>
-  <p>Актуальная редакция всегда доступна на этой странице. Существенные
-  изменения вступают в силу с момента публикации.</p>
+<div class="doc-list">
+  <a href="/oferta" class="doc-item">
+    <div>
+      <div class="doc-title">Публичная оферта</div>
+      <div class="doc-desc">Условия и стоимость услуги «живой тест идеи», порядок оплаты и возврата</div>
+    </div>
+    <span class="doc-arrow">→</span>
+  </a>
+  <a href="/agreement" class="doc-item">
+    <div>
+      <div class="doc-title">Пользовательское соглашение</div>
+      <div class="doc-desc">Правила использования сервиса, права и обязательства сторон</div>
+    </div>
+    <span class="doc-arrow">→</span>
+  </a>
+  <a href="/privacy" class="doc-item">
+    <div>
+      <div class="doc-title">Политика конфиденциальности</div>
+      <div class="doc-desc">Какие данные собираются, как их отозвать согласие на обработку · 152-ФЗ</div>
+    </div>
+    <span class="doc-arrow">→</span>
+  </a>
+  <a href="/contacts" class="doc-item">
+    <div>
+      <div class="doc-title">Реквизиты и контакты</div>
+      <div class="doc-desc">ИНН, ОГРНИП и способы связи с оператором</div>
+    </div>
+    <span class="doc-arrow">→</span>
+  </a>
 </div>
+</div>
+
+<footer>
+  <div class="wrap" style="padding-top:0;padding-bottom:0">
+    <span>© Создатель</span> · <a href="/oferta">Публичная оферта</a> · <a href="/agreement">Соглашение</a> · <a href="/privacy">Конфиденциальность</a> · <a href="/contacts">Реквизиты</a>
+  </div>
+</footer>
 </body>
 </html>

@@ -822,3 +822,83 @@ class TestPayments:
         r = client.post("/api/yookassa/webhook",
                         json={"event": "payment.succeeded", "object": {"id": "fake"}})
         assert r.status_code == 200   # молча принимаем, ничего не меняем
+
+
+class TestLegalPages:
+    """Юридические страницы доступны и содержат ожидаемый контент."""
+
+    def test_oferta_page(self):
+        r = client.get("/oferta")
+        assert r.status_code == 200
+        assert "Публичная оферта" in r.text
+        assert "ИП Белкин Борис Ильич" in r.text
+        assert "1 490" in r.text or "1490" in r.text
+        assert "ЮKassa" in r.text or "ЮКасса" in r.text
+
+    def test_privacy_page(self):
+        r = client.get("/privacy")
+        assert r.status_code == 200
+        assert "конфиденциальност" in r.text.lower()
+        assert "152" in r.text
+        assert "771387918350" in r.text
+
+    def test_agreement_page(self):
+        r = client.get("/agreement")
+        assert r.status_code == 200
+        assert "соглашение" in r.text.lower()
+
+    def test_contacts_page(self):
+        r = client.get("/contacts")
+        assert r.status_code == 200
+        assert "771387918350" in r.text
+        assert "324774600432188" in r.text
+        assert "Белкин Борис Ильич" in r.text
+
+    def test_legal_hub_links_to_all_pages(self):
+        r = client.get("/legal")
+        assert r.status_code == 200
+        for path in ("/oferta", "/agreement", "/privacy", "/contacts"):
+            assert path in r.text, f"/legal не содержит ссылку на {path}"
+
+    def test_legal_pages_no_jargon(self):
+        for path in ("/oferta", "/agreement", "/privacy", "/contacts"):
+            text = client.get(path).text
+            assert "оффер" not in text.lower(), f"слово «оффер» на {path}"
+            assert "лендинг" not in text.lower(), f"слово «лендинг» на {path}"
+
+
+class TestFooterLinks:
+    """Футер с ссылками на юридические страницы присутствует на всех публичных страницах."""
+
+    LINKS = ["/oferta", "/agreement", "/privacy", "/contacts"]
+
+    def _assert_footer(self, text, page_name):
+        for link in self.LINKS:
+            assert f'href="{link}"' in text, f"Нет ссылки {link} в футере {page_name}"
+
+    def test_index_has_footer(self):
+        self._assert_footer(client.get("/").text, "главной")
+
+    def test_desk_has_footer(self):
+        self._assert_footer(client.get("/desk").text, "кабинета")
+
+    def test_result_has_footer(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест", "count": 100}],
+                    "best_phrase": "тест", "verdict": {"level": "unknown", "text": "Нет данных"},
+                    "competitors": {"found": 0, "top": []},
+                    "scores": [], "overall": {"value": 0, "weakest": ""}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand",
+                              json={"idea": "Достаточно длинная идея для проверки футера страницы"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        self._assert_footer(client.get(f"/r/{rid}").text, "результата")
+
+    def test_project_has_footer(self):
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="foot_proj_v1", product_name="ФутерПроект")})
+        self._assert_footer(client.get("/p/foot_proj_v1").text, "проекта")

@@ -780,6 +780,26 @@ def legal_page():
     return HTMLResponse(_static("legal.html"))
 
 
+@app.get("/oferta", response_class=HTMLResponse)
+def oferta_page():
+    return HTMLResponse(_static("oferta.html"))
+
+
+@app.get("/agreement", response_class=HTMLResponse)
+def agreement_page():
+    return HTMLResponse(_static("agreement.html"))
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy_page():
+    return HTMLResponse(_static("privacy.html"))
+
+
+@app.get("/contacts", response_class=HTMLResponse)
+def contacts_page():
+    return HTMLResponse(_static("contacts.html"))
+
+
 @app.get("/robots.txt")
 def robots():
     from fastapi.responses import PlainTextResponse

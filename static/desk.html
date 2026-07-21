@@ -68,6 +68,9 @@
     border:1px solid var(--ink);border-radius:8px;padding:18px;max-width:520px}
   #form h3{font-size:16px;font-weight:600;margin-bottom:4px}
   #form .row{display:flex;gap:8px;margin-top:12px}
+  footer{border-top:1px solid var(--line);margin-top:30px;padding:22px 0;color:var(--muted);font-size:13px}
+  footer a{color:var(--muted)}
+  footer a:hover{color:var(--ink)}
 </style>
 </head>
 <body>
@@ -233,5 +236,11 @@ async function addTracked(){
 }
 if(KEY) load();
 </script>
+
+<footer>
+  <div class="wrap" style="padding-top:0;padding-bottom:0">
+    <span>© Создатель</span> · <a href="/oferta">Публичная оферта</a> · <a href="/agreement">Соглашение</a> · <a href="/privacy">Конфиденциальность</a> · <a href="/contacts">Реквизиты</a>
+  </div>
+</footer>
 </body>
 </html>
