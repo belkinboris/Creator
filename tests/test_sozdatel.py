@@ -809,6 +809,14 @@ class TestOverallAndStats:
         assert 'id="press"' in home and "Мы в медиа" in home
         assert "href=" not in home.split('id="press"')[1].split("</section>")[0]  # пресса пока без ссылок
 
+    def test_homepage_has_single_social_proof_number(self):
+        """Одна честная живая цифра вместо пустоты — не выдуманный счётчик,
+        подтягивается из /api/stats и не показывается при малых значениях."""
+        home = client.get("/").text
+        assert 'id="social-proof"' in home
+        assert "/api/stats" in home
+        assert "ideas_checked >= 10" in home
+
 
 class TestResultPageAndOrders:
     def _make_check(self):
@@ -920,6 +928,14 @@ class TestResultFunnel:
         text = client.get(f"/r/{self._make_check()}").text
         assert 'openStep(STEP_ORDER[0])' in text
         assert 'function advance(' in text and 'function reopen(' in text
+
+    def test_score_detail_hidden_behind_toggle(self):
+        """Разбор по 4 шкалам не должен идти полотном -- прячется за
+        «Почему такая оценка?» и раскрывается по клику."""
+        text = client.get(f"/r/{self._make_check()}").text
+        assert 'id="scores" hidden' in text
+        assert "Почему такая оценка?" in text
+        assert "score-detail-toggle" in text
 
     def test_skip_link_present_for_sharpen_step(self):
         text = client.get(f"/r/{self._make_check()}").text
