@@ -286,8 +286,8 @@ class TestCabinet:
 
         cab = client.get("/api/cabinet", headers=OWNER).json()
         tracked = [t for t in cab["tracked"] if t["id"] == tp_id][0]
-        assert tracked["stage_name"] == "Первая ценность"
-        assert cab["stages"][0] == "Формулировка" and len(cab["stages"]) == 8
+        assert tracked["stage_name"] == "Реклама"
+        assert cab["stages"][0] == "Идея" and cab["stages"][2] == "Проверочная страница" and len(cab["stages"]) == 8
 
         r = client.patch(f"/api/tracked/{tp_id}", headers=OWNER, json={
             "name": "АвтоПост", "stage": 4, "status_note": "мост подтверждается"})
@@ -824,6 +824,32 @@ class TestPayments:
         assert r.status_code == 200   # молча принимаем, ничего не меняем
 
 
+class TestGuideDirect:
+    def test_guide_page_serves(self):
+        r = client.get("/guide/direct")
+        assert r.status_code == 200
+        t = r.text
+        assert "Простой старт" in t and "нельзя выключить первые 30 дней" in t
+        assert "режим эксперта" in t.lower()
+        assert "только Поиск" in t
+        assert "Ступень 3" in t
+        assert "оффер" not in t.lower() and "лендинг" not in t.lower()
+
+    def test_result_page_links_to_guide(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 1}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""}, "competitors": {"found": None, "top": []},
+                    "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Достаточно длинная идея для ссылки на гайд"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        assert "/guide/direct" in client.get(f"/r/{rid}").text
+
+
 class TestLegalPages:
     """Юридические страницы доступны и содержат ожидаемый контент."""
 
@@ -902,3 +928,6 @@ class TestFooterLinks:
         client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
             "offer": dict(VALID_OFFER, idea_id="foot_proj_v1", product_name="ФутерПроект")})
         self._assert_footer(client.get("/p/foot_proj_v1").text, "проекта")
+
+    def test_guide_direct_has_footer(self):
+        self._assert_footer(client.get("/guide/direct").text, "гайда по Директу")

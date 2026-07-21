@@ -83,8 +83,9 @@ class SmokeProject(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
-STAGE_NAMES = ["Формулировка", "Спрос", "Активация", "Первая ценность",
-               "Мост к деньгам", "Оплата", "Масштаб", "Удержание"]
+# Единая шкала пути 0..7 -- те же названия на главной, в кабинете и в API.
+STAGE_NAMES = ["Идея", "Спрос", "Проверочная страница", "Реклама",
+               "Заявки", "Первые продажи", "Повторяемость", "Удержание"]
 
 
 class TrackedProject(SQLModel, table=True):
@@ -629,7 +630,7 @@ def delete_tracked(tp_id: int, request: Request):
 @app.get("/api/cabinet")
 def cabinet(request: Request):
     """Портфель целиком: внешние проекты + smoke-тесты Создателя.
-    Smoke-этап определяется данными: есть клики -> ① Спрос, иначе ⓪ Формулировка."""
+    Smoke-этап определяется данными: есть клики -> ① Спрос, иначе ⓪ Идея."""
     _check_owner(request)
     out = {"stages": STAGE_NAMES, "tracked": [], "smoke": []}
     with Session(engine) as s:
@@ -651,7 +652,7 @@ def cabinet(request: Request):
                                 p.lead_rate_signal, p.lead_rate_dead)
             rate = (leads / views) if views else 0.0
             if views == 0:
-                next_step = "Запустить Директ на лендинг — инструкция на странице проекта"
+                next_step = "Запустить Директ на страницу — инструкция: /guide/direct"
             elif views < p.click_target:
                 next_step = f"Копим клики: {p.click_target - views} до вердикта. Ничего не менять."
             elif v["verdict"] == "СИГНАЛ ЕСТЬ":
@@ -768,7 +769,7 @@ def _warm_up() -> None:
             s.exec(select(SmokeProject.id).limit(1)).first()
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
-    for name in ("index.html", "portfolio.html", "project.html"):
+    for name in ("index.html", "portfolio.html", "project.html", "guide-direct.html", "result.html"):
         try:
             _static(name)
         except Exception:
@@ -778,6 +779,12 @@ def _warm_up() -> None:
 @app.get("/legal", response_class=HTMLResponse)
 def legal_page():
     return HTMLResponse(_static("legal.html"))
+
+
+@app.get("/guide/direct", response_class=HTMLResponse)
+def guide_direct():
+    """Ступень 3: пошаговый запуск Директа без ям (режим эксперта, только Поиск)."""
+    return HTMLResponse(_static("guide-direct.html"))
 
 
 @app.get("/oferta", response_class=HTMLResponse)

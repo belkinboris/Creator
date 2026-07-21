@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Как запустить Яндекс Директ без ям — инструкция Создателя</title>
+<meta name="description" content="Пошаговый запуск рекламы на проверочную страницу: режим эксперта, только Поиск, ключевые фразы из проверки спроса. Без ловушек, в которые падают новички.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2712%27 fill=%27%23FFDE59%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-family=%27Arial,sans-serif%27 font-size=%2736%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%231B1C20%27%3EС%3C/text%3E%3C/svg%3E">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#FBF6EA;--box:#FFFDF6;--line:#E9E1CB;--ink:#1B1C20;--muted:#6F6A5C;
+    --marker:#FFDE59;--btn:#1B1C20;--ok:#2E7D4F;--bad:#B23A3A}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);
+    font:400 16px/1.55 "IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:760px;margin:0 auto;padding-left:22px;padding-right:22px}
+  a{color:var(--ink)}
+  .hl{background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
+  header{border-bottom:1px solid var(--line)}
+  .nav{display:flex;align-items:baseline;justify-content:space-between;padding:14px 0;flex-wrap:wrap;gap:6px}
+  .logo{font-weight:700;font-size:17px;color:var(--ink);text-decoration:none}
+  .nav a.link{color:var(--muted);text-decoration:none;font-size:14px}
+  .nav a.link:hover{color:var(--ink);text-decoration:underline}
+  .head{padding:34px 0 8px}
+  h1{font-size:clamp(23px,4.2vw,30px);font-weight:600;letter-spacing:-.015em;max-width:22em}
+  .sub{color:var(--muted);font-size:16px;max-width:38em;margin-top:10px}
+  .crumbs{font:600 13px "IBM Plex Mono",monospace;color:var(--muted);padding-top:16px}
+  .crumbs .cur{color:var(--ink);background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
+
+  .danger{border:1px solid var(--line);border-left:4px solid var(--bad);background:var(--box);
+    border-radius:8px;padding:16px 18px;margin:22px 0 6px;font-size:15px}
+  .danger b{font-weight:600}
+
+  .step{display:grid;grid-template-columns:34px 1fr;column-gap:14px;padding:20px 0;border-top:1px solid var(--line)}
+  .step:first-of-type{border-top:0}
+  .step .n{font:600 15px/1.5 "IBM Plex Mono",monospace;color:var(--muted)}
+  .step h2{font-size:17px;font-weight:600;margin-bottom:6px}
+  .step p{color:var(--muted);font-size:15px;max-width:42em;margin-top:4px}
+  .step .do{color:var(--ink);font-size:15px;max-width:42em}
+  .step .do b{font-weight:600;background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
+  .kv{font:600 11px "IBM Plex Mono",monospace;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--muted);display:block;margin:10px 0 2px}
+  ul{margin:6px 0 0 18px;color:var(--muted);font-size:15px}
+  li{margin:3px 0}
+  .fine{color:var(--muted);font-size:13px;margin:26px 0 40px;max-width:42em}
+  .cta{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:20px;margin:8px 0 40px}
+  .cta p{color:var(--muted);font-size:15px;margin-bottom:12px}
+  .btn{appearance:none;border:0;cursor:pointer;border-radius:6px;display:inline-block;
+    background:var(--btn);color:#fff;font:600 15px "IBM Plex Sans";padding:11px 18px;text-decoration:none}
+  .btn:hover{background:#000}
+  footer{border-top:1px solid var(--line);padding:22px 0;color:var(--muted);font-size:13px}
+  footer a{color:var(--muted);text-decoration:none}
+  footer a:hover{color:var(--ink)}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="logo" href="/">Созда<span class="hl">тель</span></a>
+    <a class="link" href="/">На главную →</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="crumbs">Путь 0→7 · <span class="cur">Ступень 3 · Реклама</span></div>
+  <div class="head">
+    <h1>Запускаем Яндекс Директ на проверочную страницу — <span class="hl">без ям</span></h1>
+    <p class="sub">Одна кампания, только Поиск, ключевые фразы из вашей проверки спроса. На каждом шаге — что нажать, что увидите и что дальше. Интерфейс Яндекса иногда меняет названия кнопок — ориентируйтесь на смысл шага.</p>
+  </div>
+
+  <div class="danger">
+    <b>Главная яма — «Простой старт».</b> На первом же экране Яндекс предложит быстрый путь. Не соглашайтесь: такую кампанию <b>нельзя выключить первые 30 дней</b> — она тратит деньги, даже если вы передумали, а где показывать объявления, Яндекс решает сам. Остановить её раньше можно только через переписку с поддержкой. Всегда выбирайте режим эксперта.
+  </div>
+
+  <div class="step"><span class="n">1</span><div>
+    <h2>Что понадобится до старта</h2>
+    <div class="do">Аккаунт Яндекса, банковская карта и ссылка на вашу проверочную страницу. Тестовый бюджет — от 3–5 тысяч ₽: этого хватает на первые ~100 визитов в большинстве ниш.</div>
+  </div></div>
+
+  <div class="step"><span class="n">2</span><div>
+    <h2>Создаём кампанию в режиме эксперта</h2>
+    <div class="do">Зайдите на <b>direct.yandex.ru</b> → «Запустить рекламу». Когда предложат выбрать способ — ищите вариант для самостоятельной настройки: <b>«Режим эксперта»</b> (он же Директ Про). Всё «простое» и «за пару минут» — мимо, см. предупреждение выше.</div>
+    <span class="kv">Что увидите</span>
+    <p>Список типов кампаний. Выбирайте вариант про конверсии и трафик на сайт.</p>
+  </div></div>
+
+  <div class="step"><span class="n">3</span><div>
+    <h2>Только Поиск — выключаем сети</h2>
+    <div class="do">В местах показа оставьте <b>только Поиск</b>. Показы в сетях (на сайтах-партнёрах) отключите — этот трафик дешевле, но для проверки идеи он грязный: много случайных кликов, цифры завышаются, вердикт врёт.</div>
+  </div></div>
+
+  <div class="step"><span class="n">4</span><div>
+    <h2>Регион и бюджет</h2>
+    <div class="do">Регион показа — вся Россия, либо города, где реально сможете оказать услугу. Недельный бюджет поставьте равным половине тестового — чтобы тест шёл около двух недель, а не сгорел за день.</div>
+  </div></div>
+
+  <div class="step"><span class="n">5</span><div>
+    <h2>Ключевые фразы — из вашей проверки спроса</h2>
+    <div class="do">Возьмите <b>формулировки со страницы результата</b> — те самые, по которым мы считали спрос. Это и есть слова, которыми клиенты ищут вашу идею.</div>
+    <span class="kv">Сразу добавьте минус-слова</span>
+    <ul>
+      <li>бесплатно, скачать, своими руками, самостоятельно</li>
+      <li>вакансии, работа, обучение, курсы (если вы не про это)</li>
+      <li>что это, отзывы — ищут информацию, а не услугу</li>
+    </ul>
+  </div></div>
+
+  <div class="step"><span class="n">6</span><div>
+    <h2>Объявление</h2>
+    <div class="do">Заголовок — лучшая формулировка спроса, почти дословно: человек должен увидеть в объявлении свои же слова из поиска. Текст — ваше предложение одной фразой. Ссылка — на проверочную страницу.</div>
+  </div></div>
+
+  <div class="step"><span class="n">7</span><div>
+    <h2>Модерация и запуск</h2>
+    <div class="do">Отправьте кампанию на модерацию и пополните счёт. Проверка обычно занимает от часа до суток. После одобрения показы начнутся сами.</div>
+    <span class="kv">Если отклонили</span>
+    <p>Чаще всего дело в отсутствии контактов или реквизитов на странице — в проверочных страницах Создателя нужный блок уже есть.</p>
+  </div></div>
+
+  <div class="step"><span class="n">8</span><div>
+    <h2>Как читать цифры и когда останавливаться</h2>
+    <div class="do">Смотрите на счётчик визитов и заявок в кабинете Создателя. Правило вердикта: <b>дождитесь ~100 визитов</b>, раньше цифры врут. Конверсия выше 2,5% — сигнал есть, идея живая. Ниже — остановите кампанию (в режиме эксперта это одна кнопка, в любой момент) и поменяйте предложение или аудиторию — переформулировка бесплатна.</div>
+  </div></div>
+
+  <div class="cta">
+    <p>Ещё нет проверочной страницы? Начните со ступени 1 — бесплатной проверки спроса: она даст и формулировки для этой инструкции.</p>
+    <a class="btn" href="/">Проверить спрос — бесплатно</a>
+  </div>
+
+  <p class="fine">Инструкция описывает запуск через полный интерфейс Директа (режим эксперта). Названия кнопок и экранов Яндекс периодически меняет; если экран выглядит иначе — держитесь смысла шага, он не меняется.</p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© Создатель</span> · <a href="/oferta">Публичная оферта</a> · <a href="/agreement">Соглашение</a> · <a href="/privacy">Конфиденциальность</a> · <a href="/contacts">Реквизиты</a>
+  </div>
+</footer>
+</body>
+</html>
