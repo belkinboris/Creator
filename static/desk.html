@@ -31,9 +31,11 @@
   .p .kind{font:600 11px "IBM Plex Mono",monospace;letter-spacing:.08em;
     text-transform:uppercase;color:var(--muted)}
   .p h2{font-size:19px;font-weight:600;letter-spacing:-.01em}
-  .stage{font:600 12px "IBM Plex Mono",monospace;letter-spacing:2px;color:var(--muted)}
-  .stage b{color:var(--ink);background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 2px}
-  .stage .nm{letter-spacing:0;font-family:"IBM Plex Sans";font-weight:600;color:var(--ink);margin-left:8px}
+  .stage-line{display:flex;flex-direction:column;gap:6px}
+  .stage-txt{font:600 12px "IBM Plex Mono",monospace;color:var(--muted)}
+  .stage-bar{display:flex;gap:3px}
+  .stage-bar i{flex:1;height:4px;border-radius:99px;background:var(--line);font-style:normal}
+  .stage-bar i.done{background:var(--ink)}
 
   .nums{display:flex;gap:22px;margin-top:2px}
   .n .v{font:600 26px/1 "IBM Plex Mono",monospace}
@@ -109,7 +111,10 @@
 <script>
 let KEY = sessionStorage.getItem("sozdatel_key") || "";
 const STAGES = ["Идея","Спрос","Проверочная страница","Реклама","Заявки","Первые продажи","Повторяемость","Удержание"];
-function strip(a){ return [0,1,2,3,4,5,6,7].map(i=> i===a? `<b>[${i}]</b>`:i).join(" "); }
+function stageBadge(stageIdx, name){
+  const segs = Array.from({length:8}, (_,i)=> `<i class="${i<=stageIdx?'done':''}"></i>`).join('');
+  return `<div class="stage-line"><span class="stage-txt">Этап ${stageIdx+1} из 8 — ${name}</span><div class="stage-bar">${segs}</div></div>`;
+}
 function enter(){
   KEY = document.getElementById("key").value.trim();
   if(KEY){ sessionStorage.setItem("sozdatel_key", KEY); load(); }
@@ -127,7 +132,7 @@ async function load(){
     el.innerHTML = `
       <div class="kind">проверка спроса · Создатель</div>
       <h2>${s.name}</h2>
-      <div class="stage">${strip(s.stage)}<span class="nm">${s.stage_name}</span></div>
+      ${stageBadge(s.stage, s.stage_name)}
       <div class="nums">
         <div class="n"><div class="v">${s.views}<span style="font-size:.5em;color:var(--muted)">/${s.target}</span></div><div class="l">визитов</div></div>
         <div class="n"><div class="v">${s.leads}</div><div class="l">заявок</div></div>
@@ -149,7 +154,7 @@ async function load(){
     el.innerHTML = `
       <div class="kind">внешний проект · ведётся отдельно</div>
       <h2>${t.name}</h2>
-      <div class="stage">${strip(t.stage)}<span class="nm">${t.stage_name}</span></div>
+      ${stageBadge(t.stage, t.stage_name)}
       <div class="next"><span>что происходит</span>${t.note || "—"}</div>
       <div class="acts">
         ${t.link? `<button class="btn" onclick="window.open('${t.link}','_blank')">Открыть</button>`:""}

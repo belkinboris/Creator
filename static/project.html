@@ -16,10 +16,16 @@
   .wrap{max-width:760px;margin:0 auto;padding:40px 20px 80px}
   a{color:var(--accent)}
   .crumbs{font:400 13px "JetBrains Mono",monospace;color:var(--muted);margin-bottom:22px}
-  .strip{font:700 14px "JetBrains Mono",monospace;letter-spacing:4px;color:var(--muted);margin:6px 0 4px}
-  .strip b{color:var(--accent)}
   h1{font:700 clamp(26px,5.4vw,38px)/1.15 "Manrope",sans-serif;margin:6px 0 4px}
-  .stagename{color:var(--muted);margin-bottom:26px}
+
+  /* Преемственность: где проект на пути 0..7 и что дальше — без жаргона и без цифровых полосок */
+  .path{margin:10px 0 26px}
+  .path-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .path-stage{font:700 13px "JetBrains Mono",monospace;color:var(--accent)}
+  .path-name{font-size:14px;color:var(--muted)}
+  .path-bar{display:flex;gap:4px;margin-top:8px}
+  .path-bar i{flex:1;height:5px;border-radius:99px;background:var(--line);font-style:normal}
+  .path-bar i.done{background:var(--accent)}
 
   /* ЦЕЛЬ — большими цифрами, единственный фокус экрана */
   .goal{background:var(--card);border:1px solid var(--line);border-radius:14px;
@@ -63,11 +69,18 @@
 <body>
 <div class="wrap">
   <p class="crumbs"><a href="/portfolio">← портфель</a> · <a href="/">+ новая идея</a></p>
-  <div class="strip" id="strip">0 1 2 3 4 5 6 7</div>
   <h1><span id="pname">{{PRODUCT_NAME}}</span>
     <a href="#" onclick="rename();return false"
        style="font:400 14px Onest;color:var(--muted);vertical-align:middle">✎ переименовать</a></h1>
-  <p class="stagename" id="stagename">Этап ① · Спрос — проверяем живыми кликами</p>
+  <div class="path">
+    <div class="path-top">
+      <span class="path-stage" id="path-stage">Этап 1 из 8</span>
+      <span class="path-name" id="path-name">Идея — набираем первые визиты</span>
+    </div>
+    <div class="path-bar" id="path-bar">
+      <i class="done"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+    </div>
+  </div>
 
   <div class="goal">
     <div class="label">Цель этапа</div>
@@ -149,6 +162,7 @@
 
 <script>
 const IDEA_ID = "{{IDEA_ID}}";
+const STAGES = ["Идея","Спрос","Проверочная страница","Реклама","Заявки","Первые продажи","Повторяемость","Удержание"];
 let OWNER_KEY = sessionStorage === undefined ? "" : ""; /* ключ живёт в переменной */
 function ask(){ if(!OWNER_KEY) OWNER_KEY = prompt("Ключ владельца:") || ""; return OWNER_KEY; }
 async function load(){
@@ -167,8 +181,13 @@ async function load(){
   copyU.onclick = ()=>navigator.clipboard.writeText(url + d.direct_utm);
   if(d.contacts && d.contacts.length)
     contacts.innerHTML = "Контакты заявок (видны только тебе): " + d.contacts.join(", ");
-  document.getElementById("strip").innerHTML =
-    "0 <b>[1]</b> 2 3 4 5 6 7";
+
+  const stage = d.views > 0 ? 1 : 0;
+  document.getElementById("path-stage").textContent = `Этап ${stage+1} из 8`;
+  document.getElementById("path-name").textContent =
+    STAGES[stage] + (stage === 0 ? " — набираем первые визиты" : " — проверяем живыми кликами");
+  document.getElementById("path-bar").innerHTML =
+    Array.from({length:8}, (_,i)=> `<i class="${i<=stage?'done':''}"></i>`).join('');
 }
 async function rename(){
   const name = prompt("Новое имя проекта:", document.getElementById("pname").textContent.trim());

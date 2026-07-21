@@ -24,11 +24,18 @@
   .nav a.link{color:var(--muted);text-decoration:none;font-size:14px}
   .nav a.link:hover{color:var(--ink);text-decoration:underline}
 
-  /* Полоска преемственности: где я на пути и что дальше — вместо всей витрины */
-  .crumbs{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-    font:600 13px "IBM Plex Mono",monospace;color:var(--muted);padding:16px 0 0}
-  .crumbs .done{color:var(--ok)}
-  .crumbs .cur{color:var(--ink);background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
+  /* Преемственность: где я на пути 0..7 и что дальше — всегда видно, без жаргона */
+  .path{padding:16px 0 6px}
+  .path-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .path-stage{font:700 13px "IBM Plex Mono",monospace;color:var(--ink);
+    background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
+  .path-name{font-size:14px;color:var(--muted)}
+  .path-bar{display:flex;gap:4px;margin-top:10px}
+  .path-bar i{flex:1;height:5px;border-radius:99px;background:var(--line);font-style:normal}
+  .path-bar i.done{background:var(--ink)}
+  .path-next{margin-top:10px;padding-left:12px;border-left:3px solid var(--marker);font-size:14px;color:var(--muted)}
+  .path-next-tag{display:block;font:600 10px "IBM Plex Mono",monospace;text-transform:uppercase;
+    letter-spacing:.1em;color:var(--muted);margin-bottom:2px}
 
   .head{padding:14px 0 6px}
   h1{font-size:clamp(21px,3.8vw,27px);font-weight:600;letter-spacing:-.015em}
@@ -61,15 +68,49 @@
   .score-cell{background:var(--box);padding:14px 12px}
   .score-val{font:600 24px/1 "IBM Plex Mono",monospace;display:inline-block;
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
+  .score-val.na{font:600 14px "IBM Plex Sans";background:none;padding:0;color:var(--muted)}
   .score-max{font:500 12px "IBM Plex Mono",monospace;color:var(--muted);margin-left:2px}
   .score-label{font-size:13px;font-weight:600;margin-top:7px}
   .score-note{font-size:12.5px;color:var(--muted);margin-top:2px;line-height:1.4}
-  .comp-item{display:flex;gap:10px;padding:8px 0;font-size:15px}
+
+  /* Конкуренты: имя сервиса — кликабельно и понятно, заголовок — мелкой строкой под ним */
+  .comp-item{padding:10px 0}
   .comp-item + .comp-item{border-top:1px solid var(--line)}
-  .comp-domain{font:500 13px "IBM Plex Mono",monospace;color:var(--muted);white-space:nowrap;padding-top:2px}
+  .comp-name{display:inline-flex;align-items:baseline;gap:5px;font:600 15px "IBM Plex Sans";
+    color:var(--ink);text-decoration:none}
+  .comp-name:hover{text-decoration:underline}
+  .comp-name .arrow{font-size:12px;color:var(--muted)}
+  .comp-title{color:var(--muted);font-size:13.5px;margin-top:2px}
   .fine{color:var(--muted);font-size:13px}
 
-  /* Ступень 2: заказ живого теста */
+  /* Заострение идеи: бесплатно, по кнопке — не грузим LLM на каждый визит */
+  .sharpen-head p{color:var(--muted);font-size:15px;max-width:40em;margin-top:4px}
+  .sharpen-cards{display:none;grid-template-columns:1fr;gap:12px;margin-top:14px}
+  .sharpen-cards.show{display:grid}
+  @media (min-width:680px){.sharpen-cards.show{grid-template-columns:1fr 1fr 1fr}}
+  .sharp-card{border:1px solid var(--line);background:var(--box);border-radius:8px;
+    padding:16px;display:flex;flex-direction:column;gap:8px}
+  .sharp-card.picked{border-color:var(--ink)}
+  .sharp-angle{font:600 11px "IBM Plex Mono",monospace;text-transform:uppercase;
+    letter-spacing:.06em;color:var(--muted)}
+  .sharp-card h4{font-size:16px;font-weight:600;letter-spacing:-.01em}
+  .sharp-card h4 em{font-style:normal;background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
+  .sharp-card p{color:var(--muted);font-size:14px}
+  .sharp-pain{color:var(--ink) !important}
+  .sharp-pain b{font-weight:600}
+  .sharp-pick{appearance:none;cursor:pointer;border-radius:6px;margin-top:auto;align-self:flex-start;
+    background:transparent;border:1px solid var(--line);color:var(--ink);
+    font:500 14px "IBM Plex Sans";padding:9px 14px}
+  .sharp-pick:hover{border-color:var(--ink)}
+  .btn-ghost{appearance:none;cursor:pointer;border-radius:6px;display:inline-block;
+    background:transparent;border:1px solid var(--line);color:var(--ink);
+    font:500 15px "IBM Plex Sans";padding:10px 16px}
+  .btn-ghost:hover{border-color:var(--ink)}
+  .btn-ghost[disabled]{opacity:.55;cursor:wait}
+  .chosen-note{display:none;border-left:3px solid var(--ok);padding:2px 0 2px 12px;margin-bottom:14px;font-size:14px}
+  .chosen-note.show{display:block}
+
+  /* Живой тест: заказ страницы + рекламы + подсчёта заявок */
   .next{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:20px;margin:16px 0 40px}
   .next h3{font-size:18px;font-weight:600;margin-bottom:6px}
   .next p{color:var(--muted);font-size:15px;margin-bottom:14px;max-width:38em}
@@ -87,7 +128,7 @@
     :root{--pad:20px}
     .freq-row{flex-direction:column;align-items:flex-start;gap:3px}
     .score-grid{grid-template-columns:1fr 1fr}
-    .btn{width:100%;text-align:center}
+    .btn,.sharp-pick,#sharpen-btn{width:100%;text-align:center}
   }
   footer{border-top:1px solid var(--line);margin-top:30px;padding:22px 0;color:var(--muted);font-size:13px}
   footer a{color:var(--muted)}
@@ -104,10 +145,15 @@
 </header>
 
 <main class="wrap">
-  <div class="crumbs">
-    <span class="done">✓ Ступень 1 · Спрос</span>
-    <span>→</span>
-    <span class="cur">Ступень 2 · Проверка на живых людях</span>
+  <div class="path">
+    <div class="path-top">
+      <span class="path-stage">Этап 2 из 8</span>
+      <span class="path-name">Спрос — бесплатно, уже готово</span>
+    </div>
+    <div class="path-bar">
+      <i class="done"></i><i class="done"></i><i></i><i></i><i></i><i></i><i></i><i></i>
+    </div>
+    <div class="path-next"><span class="path-next-tag">Дальше</span>Этап 3 — соберём проверочную страницу под вашу идею и запустим первую рекламу</div>
   </div>
 
   <div class="head">
@@ -135,9 +181,20 @@
     <div id="comps"></div>
   </div>
 
+  <div class="res-block" id="sharpen-block">
+    <div class="res-title">Заострим идею — бесплатно</div>
+    <div class="sharpen-head">
+      <p>Одна идея — три разных предложения: другая боль, другая аудитория, другой момент обращения. Посмотрите на 3 варианта и выберите тот, который хотите протестировать живым трафиком.</p>
+    </div>
+    <button class="btn-ghost" id="sharpen-btn" type="button">Показать 3 варианта позиционирования</button>
+    <p class="err" id="sharpen-err" role="alert"></p>
+    <div class="sharpen-cards" id="sharpen-cards"></div>
+  </div>
+
   <div class="next" id="order">
-    <h3>Ступень 2 — узнаем, <span class="hl">оставят ли заявку</span></h3>
-    <p>Соберём проверочную страницу под вашу идею, запустим рекламу в Яндексе по <a href="/guide/direct">пошаговой инструкции без ям</a> и посчитаем живые заявки. Поиск показал интерес — живой тест покажет готовность платить.</p>
+    <h3>Что дальше: узнаем, <span class="hl">оставят ли заявку</span></h3>
+    <p>Соберём проверочную страницу под вашу идею, запустим рекламу в Яндексе по <a href="/guide/direct">понятной инструкции</a> — она обходит типичные ошибки новичков — и посчитаем живые заявки. Поиск показал интерес — живой тест покажет готовность платить.</p>
+    <p class="chosen-note" id="chosen-note"></p>
     <input id="contact" placeholder="Телеграм или почта — куда вернуться с результатом">
     <button class="btn" id="order-btn" type="button"></button>
     <p class="err" id="order-err" role="alert"></p>
@@ -156,10 +213,15 @@ const DATA = __RESULT_JSON__;
 const CHECK_ID = __CHECK_ID__;
 const PRICE = __PRICE__;
 const PAY_ENABLED = __PAY_ENABLED__;
+const IDEA = __IDEA_JSON__;
 
 function fmt(n){ return n.toLocaleString('ru-RU'); }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function serviceName(domain){
+  const base = String(domain).replace(/^www\./, '').split('.')[0] || domain;
+  return base.charAt(0).toUpperCase() + base.slice(1);
 }
 
 document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
@@ -187,9 +249,11 @@ if (sc.length) {
   }
   document.getElementById('scores').innerHTML = sc.map(s => `
     <div class="score-cell">
-      <div><span class="score-val">${s.value === null ? '—' : escapeHtml(String(s.value))}</span><span class="score-max">/10</span></div>
+      ${s.value === null
+        ? `<div class="score-val na">нет данных</div>`
+        : `<div><span class="score-val">${escapeHtml(String(s.value))}</span><span class="score-max">/10</span></div>`}
       <div class="score-label">${escapeHtml(s.label)}</div>
-      ${s.note ? `<div class="score-note">${escapeHtml(s.note)}</div>` : ''}
+      <div class="score-note">${escapeHtml(s.note || (s.value === null ? 'Частотность недоступна — проверьте формулировки в Вордстате вручную.' : ''))}</div>
     </div>`).join('');
 }
 
@@ -198,12 +262,70 @@ if (comp.top && comp.top.length) {
   document.getElementById('comp-card').style.display = '';
   const found = comp.found ? `<div class="fine" style="margin-bottom:8px">В выдаче по запросу «${escapeHtml(DATA.best_phrase||'')}» — ${fmt(comp.found)} страниц. Топ сейчас занимают:</div>` : '';
   document.getElementById('comps').innerHTML = found + comp.top.map(c => `
-    <div class="comp-item"><span class="comp-domain">${escapeHtml(c.domain)}</span><span>${escapeHtml(c.title)}</span></div>`).join('');
+    <div class="comp-item">
+      <a class="comp-name" href="https://${encodeURI(c.domain)}" target="_blank" rel="noopener">${escapeHtml(serviceName(c.domain))} <span class="arrow">↗</span></a>
+      <div class="comp-title">${escapeHtml(c.title)}</div>
+    </div>`).join('');
 }
 
 if (new URLSearchParams(location.search).get('paid') === '1') {
   document.getElementById('paid-note').classList.add('show');
 }
+
+// Заострение идеи — по кнопке, LLM-вызов тяжёлый и не нужен на каждый визит
+const sharpenBtn = document.getElementById('sharpen-btn');
+const sharpenErr = document.getElementById('sharpen-err');
+const sharpenCards = document.getElementById('sharpen-cards');
+const chosenNote = document.getElementById('chosen-note');
+let chosenOffer = null;
+
+function stripTags(s){ return String(s || '').replace(/<[^>]+>/g, ''); }
+
+function pickOffer(offer, btn){
+  chosenOffer = {angle: offer.angle || '', h1: stripTags(offer.h1), sub: offer.sub || ''};
+  sharpenCards.querySelectorAll('.sharp-card').forEach(c => c.classList.remove('picked'));
+  sharpenCards.querySelectorAll('.sharp-pick').forEach(b => { b.textContent = 'Выбрать этот вариант'; });
+  btn.closest('.sharp-card').classList.add('picked');
+  btn.textContent = 'Выбрано ✓';
+  chosenNote.textContent = 'Тестируем: ' + chosenOffer.h1;
+  chosenNote.classList.add('show');
+  document.getElementById('order').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function renderSharpen(offers){
+  sharpenCards.innerHTML = offers.map((o, i) => `
+    <div class="sharp-card" data-i="${i}">
+      <div class="sharp-angle">${escapeHtml(o.angle || '')}</div>
+      <h4>${o.h1 || ''}</h4>
+      <p>${escapeHtml(o.sub || '')}</p>
+      ${o.pains && o.pains[0] ? `<p class="sharp-pain"><b>${escapeHtml(o.pains[0].h2 || '')}</b> — ${escapeHtml(o.pains[0].p || '')}</p>` : ''}
+      <button class="sharp-pick" type="button">Выбрать этот вариант</button>
+    </div>`).join('');
+  sharpenCards.classList.add('show');
+  sharpenCards.querySelectorAll('.sharp-pick').forEach((btn, i) => {
+    btn.addEventListener('click', () => pickOffer(offers[i], btn));
+  });
+}
+
+sharpenBtn.addEventListener('click', async () => {
+  sharpenErr.classList.remove('show');
+  sharpenBtn.disabled = true;
+  const label = sharpenBtn.textContent;
+  sharpenBtn.textContent = 'Заостряем… это может занять минуту';
+  try {
+    const r = await fetch('/api/sharpen', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({idea: IDEA})
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || 'Не получилось заострить идею. Попробуйте ещё раз.');
+    renderSharpen(data.offers || []);
+    sharpenBtn.style.display = 'none';
+  } catch (e) {
+    sharpenErr.textContent = e.message; sharpenErr.classList.add('show');
+    sharpenBtn.disabled = false; sharpenBtn.textContent = label;
+  }
+});
 
 const orderBtn = document.getElementById('order-btn');
 orderBtn.textContent = PAY_ENABLED
@@ -219,7 +341,7 @@ orderBtn.addEventListener('click', async () => {
   try {
     const r = await fetch('/api/live-test', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({check_id: CHECK_ID, contact: document.getElementById('contact').value})
+      body: JSON.stringify({check_id: CHECK_ID, contact: document.getElementById('contact').value, chosen_offer: chosenOffer})
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || data.detail || 'Не получилось. Попробуйте ещё раз.');
@@ -239,7 +361,7 @@ document.getElementById('share-btn').addEventListener('click', async () => {
   const btn = document.getElementById('share-btn');
   const url = location.origin + location.pathname;
   if (navigator.share) { try { await navigator.share({title: 'Проверка спроса — Создатель', url}); } catch(e){} return; }
-  try { await navigator.clipboard.writeText(url); btn.textContent = 'Ссылка скопирована'; 
+  try { await navigator.clipboard.writeText(url); btn.textContent = 'Ссылка скопирована';
     setTimeout(()=>{btn.textContent='Поделиться результатом';}, 1600); } catch(e){}
 });
 </script>
