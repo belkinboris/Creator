@@ -24,7 +24,9 @@
   .nav a.link{color:var(--muted);text-decoration:none;font-size:14px}
   .nav a.link:hover{color:var(--ink);text-decoration:underline}
 
-  /* Преемственность: где я на пути 0..7 и что дальше — всегда видно, без жаргона */
+  /* Преемственность: где я на пути 0..7 и что дальше — всегда видно, без жаргона.
+     Единственное место, где нарочно используем моно-шрифт для не-числа --
+     это метка этапа, остальные подписи в ленте ниже — обычный Sans. */
   .path{padding:16px 0 6px}
   .path-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
   .path-stage{font:700 13px "IBM Plex Mono",monospace;color:var(--ink);
@@ -34,8 +36,7 @@
   .path-bar i{flex:1;height:5px;border-radius:99px;background:var(--line);font-style:normal}
   .path-bar i.done{background:var(--ink)}
   .path-next{margin-top:10px;padding-left:12px;border-left:3px solid var(--marker);font-size:14px;color:var(--muted)}
-  .path-next-tag{display:block;font:600 10px "IBM Plex Mono",monospace;text-transform:uppercase;
-    letter-spacing:.1em;color:var(--muted);margin-bottom:2px}
+  .path-next-tag{display:block;font:600 12px "IBM Plex Sans";color:var(--muted);margin-bottom:2px}
 
   .head{padding:14px 0 6px}
   h1{font-size:clamp(21px,3.8vw,27px);font-weight:600;letter-spacing:-.015em}
@@ -48,8 +49,25 @@
     margin-top:14px;font-size:15px}
   .paid-note.show{display:block}
 
-  .res-block{border-top:1px solid var(--line);padding:18px 0}
-  .res-title{font-size:13px;font-weight:600;color:var(--muted);margin-bottom:12px}
+  /* Лента: один активный фокус, пройденные шаги сжимаются в одну строку итога.
+     Шаг без .active и без .done не отрисован вовсе -- нет данных, нет блока. */
+  .step{border-top:1px solid var(--line);padding:20px 0}
+  .step:not(.active):not(.done){display:none}
+  .step-title{font-size:18px;font-weight:600;letter-spacing:-.01em;margin-bottom:4px}
+  .step-sub{font-size:13px;color:var(--muted);margin-bottom:14px}
+  .step-body{display:none}
+  .step.active .step-body,.step.done.expanded .step-body{display:block}
+  .step-summary{display:none;align-items:baseline;justify-content:space-between;gap:12px;
+    cursor:pointer;padding:2px 0}
+  .step.done .step-summary{display:flex}
+  .step.done.expanded .step-summary{display:none}
+  .step-summary-title{font-size:15px;font-weight:600}
+  .step-summary-title .ok-mark{color:var(--ok);margin-right:6px}
+  .step-summary-detail{color:var(--muted);font-size:13.5px;text-align:right;max-width:60%}
+  .step-next{margin-top:18px}
+  .skip-link{display:inline-block;margin-top:12px;color:var(--muted);font-size:14px;text-decoration:underline}
+  .skip-link:hover{color:var(--ink)}
+
   .freq-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:9px 0}
   .freq-row + .freq-row{border-top:1px solid var(--line)}
   .freq-num{font:600 18px/1 "IBM Plex Mono",monospace;white-space:nowrap;
@@ -84,15 +102,13 @@
   .fine{color:var(--muted);font-size:13px}
 
   /* Заострение идеи: бесплатно, по кнопке — не грузим LLM на каждый визит */
-  .sharpen-head p{color:var(--muted);font-size:15px;max-width:40em;margin-top:4px}
   .sharpen-cards{display:none;grid-template-columns:1fr;gap:12px;margin-top:14px}
   .sharpen-cards.show{display:grid}
   @media (min-width:680px){.sharpen-cards.show{grid-template-columns:1fr 1fr 1fr}}
   .sharp-card{border:1px solid var(--line);background:var(--box);border-radius:8px;
     padding:16px;display:flex;flex-direction:column;gap:8px}
   .sharp-card.picked{border-color:var(--ink)}
-  .sharp-angle{font:600 11px "IBM Plex Mono",monospace;text-transform:uppercase;
-    letter-spacing:.06em;color:var(--muted)}
+  .sharp-angle{font:600 12px "IBM Plex Sans";color:var(--muted);margin-bottom:2px}
   .sharp-card h4{font-size:16px;font-weight:600;letter-spacing:-.01em}
   .sharp-card h4 em{font-style:normal;background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
   .sharp-card p{color:var(--muted);font-size:14px}
@@ -110,8 +126,8 @@
   .chosen-note{display:none;border-left:3px solid var(--ok);padding:2px 0 2px 12px;margin-bottom:14px;font-size:14px}
   .chosen-note.show{display:block}
 
-  /* Живой тест: заказ страницы + рекламы + подсчёта заявок */
-  .next{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:20px;margin:16px 0 40px}
+  /* Живой тест: финальный шаг ленты — заказ страницы + рекламы + подсчёта заявок */
+  .next{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:20px;margin:0 0 40px}
   .next h3{font-size:18px;font-weight:600;margin-bottom:6px}
   .next p{color:var(--muted);font-size:15px;margin-bottom:14px;max-width:38em}
   .next input{width:100%;padding:11px 12px;border:1px solid var(--line);
@@ -128,7 +144,8 @@
     :root{--pad:20px}
     .freq-row{flex-direction:column;align-items:flex-start;gap:3px}
     .score-grid{grid-template-columns:1fr 1fr}
-    .btn,.sharp-pick,#sharpen-btn{width:100%;text-align:center}
+    .btn,.sharp-pick,#sharpen-btn,.step-next .btn{width:100%;text-align:center}
+    .step-summary-detail{max-width:100%}
   }
   footer{border-top:1px solid var(--line);margin-top:30px;padding:22px 0;color:var(--muted);font-size:13px}
   footer a{color:var(--muted)}
@@ -163,43 +180,74 @@
     <p class="paid-note" id="paid-note">Оплата принята. Мы запускаем живой тест вашей идеи — вернёмся с первыми цифрами.</p>
   </div>
 
-  <div class="res-block">
-    <div class="res-title">Сколько ищут в Яндексе · Россия · в месяц</div>
-    <div id="freqs"></div>
-    <div id="verdict-wrap"></div>
-  </div>
-  <div class="res-block" id="score-card" style="display:none">
-    <div class="res-title">Оценка идеи</div>
-    <div class="overall" id="overall" style="display:none">
-      <span class="overall-val" id="overall-val"></span>
-      <span class="overall-note" id="overall-note"></span>
+  <section class="step" data-step="1" id="step-1">
+    <div class="step-summary" onclick="reopen(1)">
+      <span class="step-summary-title"><span class="ok-mark">✓</span>Сколько ищут в Яндексе</span>
+      <span class="step-summary-detail" id="sum-1"></span>
     </div>
-    <div class="score-grid" id="scores"></div>
-  </div>
-  <div class="res-block" id="comp-card" style="display:none">
-    <div class="res-title">Кто уже отвечает на этот спрос</div>
-    <div id="comps"></div>
-  </div>
-
-  <div class="res-block" id="sharpen-block">
-    <div class="res-title">Заострим идею — бесплатно</div>
-    <div class="sharpen-head">
-      <p>Одна идея — три разных предложения: другая боль, другая аудитория, другой момент обращения. Посмотрите на 3 варианта и выберите тот, который хотите протестировать живым трафиком.</p>
+    <div class="step-body">
+      <div class="step-title">Сколько ищут в Яндексе</div>
+      <div class="step-sub">Россия · запросов в месяц</div>
+      <div id="freqs"></div>
+      <div id="verdict-wrap"></div>
+      <div class="step-next"><button class="btn" type="button" onclick="advance(1)" id="step1-next"></button></div>
     </div>
-    <button class="btn-ghost" id="sharpen-btn" type="button">Показать 3 варианта позиционирования</button>
-    <p class="err" id="sharpen-err" role="alert"></p>
-    <div class="sharpen-cards" id="sharpen-cards"></div>
-  </div>
+  </section>
 
-  <div class="next" id="order">
-    <h3>Что дальше: узнаем, <span class="hl">оставят ли заявку</span></h3>
-    <p>Соберём проверочную страницу под вашу идею, запустим рекламу в Яндексе по <a href="/guide/direct">понятной инструкции</a> — она обходит типичные ошибки новичков — и посчитаем живые заявки. Поиск показал интерес — живой тест покажет готовность платить.</p>
-    <p class="chosen-note" id="chosen-note"></p>
-    <input id="contact" placeholder="Телеграм или почта — куда вернуться с результатом">
-    <button class="btn" id="order-btn" type="button"></button>
-    <p class="err" id="order-err" role="alert"></p>
-    <p class="okmsg" id="order-ok"></p>
-  </div>
+  <section class="step" data-step="2" id="step-2">
+    <div class="step-summary" onclick="reopen(2)">
+      <span class="step-summary-title"><span class="ok-mark">✓</span>Оценка идеи</span>
+      <span class="step-summary-detail" id="sum-2"></span>
+    </div>
+    <div class="step-body">
+      <div class="step-title">Оценка идеи</div>
+      <div class="overall" id="overall" style="display:none">
+        <span class="overall-val" id="overall-val"></span>
+        <span class="overall-note" id="overall-note"></span>
+      </div>
+      <div class="score-grid" id="scores"></div>
+      <div class="step-next"><button class="btn" type="button" onclick="advance(2)" id="step2-next"></button></div>
+    </div>
+  </section>
+
+  <section class="step" data-step="3" id="step-3">
+    <div class="step-summary" onclick="reopen(3)">
+      <span class="step-summary-title"><span class="ok-mark">✓</span>Кто уже отвечает на этот спрос</span>
+      <span class="step-summary-detail" id="sum-3"></span>
+    </div>
+    <div class="step-body">
+      <div class="step-title">Кто уже отвечает на этот спрос</div>
+      <div id="comps"></div>
+      <div class="step-next"><button class="btn" type="button" onclick="advance(3)">Дальше — заострим идею →</button></div>
+    </div>
+  </section>
+
+  <section class="step" data-step="4" id="step-4">
+    <div class="step-summary" onclick="reopen(4)">
+      <span class="step-summary-title"><span class="ok-mark">✓</span>Заострим идею</span>
+      <span class="step-summary-detail" id="sum-4"></span>
+    </div>
+    <div class="step-body">
+      <div class="step-title">Заострим идею — бесплатно</div>
+      <div class="step-sub">Одна идея — три разных предложения: другая боль, другая аудитория, другой момент обращения. Выберите вариант, который хотите протестировать живым трафиком.</div>
+      <button class="btn-ghost" id="sharpen-btn" type="button">Показать 3 варианта позиционирования</button>
+      <p class="err" id="sharpen-err" role="alert"></p>
+      <div class="sharpen-cards" id="sharpen-cards"></div>
+      <div><a href="#" class="skip-link" id="skip-sharpen" onclick="skipSharpen();return false">Пропустить — сразу к живому тесту</a></div>
+    </div>
+  </section>
+
+  <section class="step" data-step="5" id="step-5">
+    <div class="next" id="order">
+      <h3>Что дальше: узнаем, <span class="hl">оставят ли заявку</span></h3>
+      <p>Соберём проверочную страницу под вашу идею, запустим рекламу в Яндексе по <a href="/guide/direct">понятной инструкции</a> — она обходит типичные ошибки новичков — и посчитаем живые заявки. Поиск показал интерес — живой тест покажет готовность платить.</p>
+      <p class="chosen-note" id="chosen-note"></p>
+      <input id="contact" placeholder="Телеграм или почта — куда вернуться с результатом">
+      <button class="btn" id="order-btn" type="button"></button>
+      <p class="err" id="order-err" role="alert"></p>
+      <p class="okmsg" id="order-ok"></p>
+    </div>
+  </section>
 </main>
 
 <footer>
@@ -224,6 +272,8 @@ function serviceName(domain){
   return base.charAt(0).toUpperCase() + base.slice(1);
 }
 
+// --- Заполняем содержимое всех шагов сразу (дёшево); видимость управляет лента ---
+
 document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
   <div class="freq-row">
     <span>${escapeHtml(f.phrase)}</span>
@@ -238,8 +288,8 @@ document.getElementById('verdict-wrap').innerHTML =
   `<div class="verdict ${v.level || 'unknown'}">${escapeHtml(v.text || '')}</div>`;
 
 const sc = DATA.scores || [];
-if (sc.length) {
-  document.getElementById('score-card').style.display = '';
+const hasScores = sc.length > 0;
+if (hasScores) {
   const ov = DATA.overall;
   if (ov && ov.value !== null) {
     document.getElementById('overall').style.display = '';
@@ -258,8 +308,8 @@ if (sc.length) {
 }
 
 const comp = DATA.competitors || {};
-if (comp.top && comp.top.length) {
-  document.getElementById('comp-card').style.display = '';
+const hasComp = !!(comp.top && comp.top.length);
+if (hasComp) {
   const found = comp.found ? `<div class="fine" style="margin-bottom:8px">В выдаче по запросу «${escapeHtml(DATA.best_phrase||'')}» — ${fmt(comp.found)} страниц. Топ сейчас занимают:</div>` : '';
   document.getElementById('comps').innerHTML = found + comp.top.map(c => `
     <div class="comp-item">
@@ -272,7 +322,65 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
   document.getElementById('paid-note').classList.add('show');
 }
 
-// Заострение идеи — по кнопке, LLM-вызов тяжёлый и не нужен на каждый визит
+// --- Лента: один активный фокус, шаги без данных пропускаются целиком ---
+
+const ARRIVAL = {2: 'оценка идеи', 3: 'кто уже на этом рынке', 4: 'заострим идею', 5: 'живой тест'};
+const STEP_ORDER = [1, hasScores ? 2 : null, hasComp ? 3 : null, 4, 5].filter(Boolean);
+
+function nextLabel(afterStep){
+  const pos = STEP_ORDER.indexOf(afterStep);
+  const next = STEP_ORDER[pos + 1];
+  return next ? `Дальше — ${ARRIVAL[next]} →` : 'Дальше →';
+}
+document.getElementById('step1-next').textContent = nextLabel(1);
+if (hasScores) document.getElementById('step2-next').textContent = nextLabel(2);
+
+function summarizeStep1(){
+  const known = (DATA.formulations||[]).filter(f => f.count !== null);
+  const top = known.length ? Math.max(...known.map(f => f.count)) : null;
+  const label = {strong:'спрос есть', niche:'нишевый спрос', weak:'спроса почти нет', unknown:'частотность недоступна'}[v.level] || '';
+  return top !== null ? `${fmt(top)} запросов/мес — ${label}` : label;
+}
+function summarizeStep2(){
+  const ov = DATA.overall;
+  return ov && ov.value !== null ? `${ov.value}/10${ov.weakest ? ', слабое место — ' + ov.weakest.toLowerCase() : ''}` : '';
+}
+function summarizeStep3(){
+  if (!hasComp) return '';
+  const names = comp.top.slice(0, 2).map(c => serviceName(c.domain)).join(', ');
+  return comp.found ? `${fmt(comp.found)} страниц, топ — ${names}` : `топ — ${names}`;
+}
+
+function openStep(n){
+  document.querySelectorAll('.step').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.step) === n);
+  });
+  const el = document.getElementById('step-' + n);
+  if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function advance(fromStep, summaryHtml){
+  const cur = document.getElementById('step-' + fromStep);
+  cur.classList.remove('active', 'expanded');
+  cur.classList.add('done');
+  const sumEl = document.getElementById('sum-' + fromStep);
+  const auto = {1: summarizeStep1, 2: summarizeStep2, 3: summarizeStep3}[fromStep];
+  if (sumEl) sumEl.textContent = summaryHtml !== undefined ? summaryHtml : (auto ? auto() : '');
+  const pos = STEP_ORDER.indexOf(fromStep);
+  const next = STEP_ORDER[pos + 1];
+  if (next) openStep(next);
+}
+
+function reopen(n){
+  const el = document.getElementById('step-' + n);
+  if (!el.classList.contains('done')) return;
+  el.classList.toggle('expanded');
+}
+
+openStep(STEP_ORDER[0]);
+
+// --- Заострение идеи — по кнопке, LLM-вызов тяжёлый и не нужен на каждый визит ---
+
 const sharpenBtn = document.getElementById('sharpen-btn');
 const sharpenErr = document.getElementById('sharpen-err');
 const sharpenCards = document.getElementById('sharpen-cards');
@@ -280,6 +388,10 @@ const chosenNote = document.getElementById('chosen-note');
 let chosenOffer = null;
 
 function stripTags(s){ return String(s || '').replace(/<[^>]+>/g, ''); }
+
+function skipSharpen(){
+  advance(4, 'Пропущено');
+}
 
 function pickOffer(offer, btn){
   chosenOffer = {angle: offer.angle || '', h1: stripTags(offer.h1), sub: offer.sub || ''};
@@ -289,7 +401,7 @@ function pickOffer(offer, btn){
   btn.textContent = 'Выбрано ✓';
   chosenNote.textContent = 'Тестируем: ' + chosenOffer.h1;
   chosenNote.classList.add('show');
-  document.getElementById('order').scrollIntoView({behavior:'smooth', block:'start'});
+  advance(4, 'Выбрано: ' + chosenOffer.h1);
 }
 
 function renderSharpen(offers){

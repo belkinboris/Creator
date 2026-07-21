@@ -53,7 +53,7 @@ else:
 engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 from app.offer_engine import OfferEngineError, sharpen_idea  # noqa: E402
-from app.demand import DemandError, check_demand, generate_idea  # noqa: E402
+from app.demand import DemandError, check_demand, generate_idea, diagnose  # noqa: E402
 from app import payments  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -343,6 +343,16 @@ def public_stats():
         ideas = len(s.exec(select(DemandCheck)).all())
         events = len(s.exec(select(SmokeEvent)).all())
     return {"ideas_checked": ideas, "events": events}
+
+
+@app.get("/api/diag/yandex")
+async def diag_yandex(request: Request, phrase: str = "купить слона"):
+    """Owner-only: сырая диагностика интеграции с Яндексом -- оба пути
+    Вордстата (официальный OAuth API и прокси внутри Cloud Search API),
+    без глотания ошибок. Открыть в браузере с ?key=... при жалобе
+    «нет данных», чтобы увидеть точную причину, а не гадать."""
+    _check_owner(request)
+    return await diagnose(phrase)
 
 
 # ---------------------------------------------------------------------------

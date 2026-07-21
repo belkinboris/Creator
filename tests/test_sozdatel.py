@@ -532,6 +532,7 @@ class TestMorningPass:
 
 from app.demand import (  # noqa: E402
     DemandError, check_demand, generate_formulations, _parse_search_xml, _verdict,
+    wordstat_count, diagnose,
 )
 
 
@@ -607,7 +608,7 @@ class TestDemand:
         """Роут /api/demand не требует owner-ключа (вход воронки)."""
         import app.main as m
         async def fake_check(idea):
-            return {"formulations": [], "best_phrase": "", 
+            return {"formulations": [], "best_phrase": "",
                     "verdict": {"level": "unknown", "text": ""},
                     "competitors": {"found": None, "top": []}}
         orig = m.check_demand
@@ -617,6 +618,78 @@ class TestDemand:
             assert r.status_code == 200 and r.json()["ok"] is True
         finally:
             m.check_demand = orig
+
+
+class TestWordstatDualPath:
+    """Два независимых источника частотности: официальный Wordstat API
+    (Bearer OAuth) и прежний прокси внутри Cloud Search API."""
+
+    def test_without_oauth_token_only_cloud_path_is_tried(self, monkeypatch):
+        """Без YANDEX_WORDSTAT_OAUTH_TOKEN oauth-путь не трогает сеть вовсе --
+        существующие тесты/прод без токена ведут себя как раньше."""
+        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
+        async def post(provider, payload):
+            assert provider == "wordstat"   # "wordstat_oauth" никогда не вызовется
+            return {"totalCount": 4200}
+        out = asyncio.run(wordstat_count("тест фраза", _post=post))
+        assert out == 4200
+
+    def test_oauth_path_tried_first_when_token_set(self, monkeypatch):
+        monkeypatch.setenv("YANDEX_WORDSTAT_OAUTH_TOKEN", "test-oauth-token")
+        async def post(provider, payload):
+            if provider == "wordstat_oauth":
+                return {"totalCount": 9000}
+            raise AssertionError("cloud path не должен вызываться, если oauth уже дал ответ")
+        out = asyncio.run(wordstat_count("тест фраза", _post=post))
+        assert out == 9000
+
+    def test_oauth_path_falls_back_to_cloud_on_empty_data(self, monkeypatch):
+        monkeypatch.setenv("YANDEX_WORDSTAT_OAUTH_TOKEN", "test-oauth-token")
+        async def post(provider, payload):
+            if provider == "wordstat_oauth":
+                return {}   # oauth ответил, но без totalCount -- пробуем cloud
+            if provider == "wordstat":
+                return {"totalCount": 700}
+            raise AssertionError(f"unexpected provider {provider}")
+        out = asyncio.run(wordstat_count("тест фраза", _post=post))
+        assert out == 700
+
+
+class TestDiagYandex:
+    def test_requires_owner_key(self):
+        r = client.get("/api/diag/yandex")
+        assert r.status_code in (401, 403)
+
+    def test_reports_both_paths(self, monkeypatch):
+        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
+        d = asyncio.run(diagnose("тест", _post=lambda provider, payload: _diag_fake(provider)))
+        assert d["env"]["wordstat_oauth_token_set"] is False
+        assert d["wordstat_oauth_api"]["ok"] is False
+        assert "skipped" in d["wordstat_oauth_api"]
+        assert d["wordstat_cloud_api"]["ok"] is True
+
+    def test_endpoint_returns_diagnostic_structure(self, monkeypatch):
+        import app.main as m
+        async def fake_diagnose(phrase):
+            return {"env": {"yandex_api_key_set": True, "yandex_folder_id_set": True,
+                            "wordstat_oauth_token_set": False},
+                    "wordstat_oauth_api": {"ok": False, "skipped": "..."},
+                    "wordstat_cloud_api": {"ok": True, "data": {"totalCount": 10}}}
+        orig = m.diagnose
+        m.diagnose = fake_diagnose
+        try:
+            r = client.get("/api/diag/yandex", headers=OWNER)
+            assert r.status_code == 200
+            d = r.json()
+            assert "wordstat_oauth_api" in d and "wordstat_cloud_api" in d
+        finally:
+            m.diagnose = orig
+
+
+async def _diag_fake(provider):
+    if provider == "wordstat":
+        return {"totalCount": 10}
+    raise AssertionError(f"unexpected provider {provider}")
 
 
 class TestIdeaSuggest:
@@ -814,6 +887,49 @@ class TestResultPageAndOrders:
         orders = r.json()["orders"]
         assert any(o["contact"] == "@boris_test" and o["status"] == "new" for o in orders)
         assert any(o["chosen_offer"] is None for o in orders)  # заказ без выбора оффера — поле пустое, не падает
+
+
+class TestResultFunnel:
+    """Лента с прогрессивным раскрытием: один фокус на экране вместо полотна."""
+
+    def _make_check(self, **overrides):
+        import app.main as m
+        base = {"formulations": [{"phrase": "тест фраза", "count": 4200}],
+                "best_phrase": "тест фраза",
+                "verdict": {"level": "strong", "text": "Спрос есть"},
+                "competitors": {"found": 100, "top": [{"title": "Т", "domain": "t.ru"}]},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 8, "note": ""}],
+                "overall": {"value": 8, "weakest": "Спрос"}}
+        base.update(overrides)
+        async def fake_check(idea):
+            return base
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            r = client.post("/api/demand", json={"idea": "Идея достаточно длинная для теста ленты"})
+            return r.json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def test_steps_present_in_order(self):
+        text = client.get(f"/r/{self._make_check()}").text
+        positions = [text.index(f'data-step="{n}"') for n in (1, 2, 3, 4, 5)]
+        assert positions == sorted(positions)          # шаги идут по порядку в разметке
+
+    def test_only_first_step_active_on_load(self):
+        text = client.get(f"/r/{self._make_check()}").text
+        assert 'openStep(STEP_ORDER[0])' in text
+        assert 'function advance(' in text and 'function reopen(' in text
+
+    def test_skip_link_present_for_sharpen_step(self):
+        text = client.get(f"/r/{self._make_check()}").text
+        assert "Пропустить" in text and "skipSharpen" in text
+
+    def test_steps_without_data_excluded_from_order(self):
+        """Пустые scores/competitors не рисуют шаг вовсе -- STEP_ORDER их не включает."""
+        text = client.get(f"/r/{self._make_check(scores=[], overall=None, competitors={'found': None, 'top': []})}").text
+        assert "hasScores ? 2 : null" in text            # логика исключения шага в разметке присутствует
+        assert "hasComp ? 3 : null" in text
 
 
 class TestPayments:
@@ -1029,3 +1145,17 @@ class TestFooterLinks:
 
     def test_guide_direct_has_footer(self):
         self._assert_footer(client.get("/guide/direct").text, "гайда по Директу")
+
+
+class TestProjectPage:
+    """Страница /p/ переведена со старого тёмного «чертёжного» стиля на
+    светлую дизайн-систему проекта."""
+
+    def test_project_page_uses_light_design_system(self):
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="light_proj_v1", product_name="СветлыйПроект")})
+        text = client.get("/p/light_proj_v1").text
+        assert text.count("Этап") >= 1
+        assert "Manrope" not in text and "Onest" not in text and "JetBrains Mono" not in text
+        assert "IBM Plex" in text
+        assert "#FBF6EA" in text   # фон бумаги, а не --blueprint

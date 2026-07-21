@@ -6,15 +6,20 @@
 
 1. Формулировки -- LLM (llm_adapter) переводит описание идеи в 3 коротких
    поисковых запроса, как их набрал бы клиент в Яндексе.
-2. Частотность -- Wordstat API внутри Yandex Cloud Search API v2
-   (searchapi.api.cloud.yandex.net/v2/wordstat/topRequests). ВАЖНО: старый
-   отдельный OAuth-доступ к Вордстату (oauth.yandex.ru, ClientID/secret,
-   заявка в поддержку) Яндекс упразднил -- функциональность перенесена
-   в Search API и авторизуется тем же YANDEX_API_KEY + YANDEX_FOLDER_ID,
-   что и остальные Yandex-вызовы. Отдельный токен заводить не нужно.
-3. Конкуренты -- тот же Yandex Search API v2, только /v2/web/search;
-   сервисному аккаунту нужна роль search-api.webSearch.user -- тот же
-   паттерн, что в yandex_search.py АвтоПоста.
+2. Частотность -- ДВА независимых пути, пробуются по очереди (2026-07):
+   а) официальный Wordstat API (api.wordstat.yandex.net, Bearer OAuth-токен
+      из приложения на oauth.yandex.ru с доступом «Вордстат» + одобрение
+      Яндекса) -- отдельный продукт, включается через YANDEX_WORDSTAT_OAUTH_TOKEN;
+   б) прокси внутри Yandex Cloud Search API v2
+      (searchapi.api.cloud.yandex.net/v2/wordstat/topRequests), авторизация
+      YANDEX_API_KEY + YANDEX_FOLDER_ID -- прежний путь, оставлен как есть.
+   Раньше здесь было написано, что путь (а) упразднён и слит в (б) -- это
+   не подтвердилось на практике (см. /api/diag/yandex): похоже, это два
+   разных продукта Яндекса, и уверенности в эквивалентности нет. Поэтому
+   оба пути живут параллельно, а не взаимоисключают друг друга.
+3. Конкуренты -- Yandex Search API v2, /v2/web/search; сервисному аккаунту
+   нужна роль search-api.webSearch.user -- тот же паттерн, что в
+   yandex_search.py АвтоПоста.
 """
 
 from __future__ import annotations
@@ -38,6 +43,14 @@ WORDSTAT_URL = os.environ.get(
 SEARCH_URL = os.environ.get(
     "YANDEX_SEARCH_URL", "https://searchapi.api.cloud.yandex.net/v2/web/search"
 )
+# Официальный Wordstat API (не Cloud Search API) -- отдельная авторизация,
+# см. docstring модуля. Путь эндпоинта не подтверждён официальной докой
+# (недоступна для чтения на момент написания) -- если Яндекс вернёт 404,
+# поправить YANDEX_WORDSTAT_OAUTH_PATH без переката кода.
+WORDSTAT_OAUTH_URL = os.environ.get(
+    "YANDEX_WORDSTAT_OAUTH_URL", "https://api.wordstat.yandex.net"
+)
+WORDSTAT_OAUTH_PATH = os.environ.get("YANDEX_WORDSTAT_OAUTH_PATH", "/v1/topRequests")
 RUSSIA_REGION = "225"  # geo-код России (строкой -- см. примеры в доке Wordstat API)
 
 MAX_IDEA_CHARS = 300
@@ -109,33 +122,94 @@ async def generate_formulations(idea: str, *, _post=None) -> list[str]:
         raise DemandError("Не получилось разобрать идею. Попробуйте переформулировать и повторить.")
 
 
-async def wordstat_count(phrase: str, *, _post=None) -> int | None:
-    """Месячная частотность фразы по России. None = сервис недоступен
-    (нет ключа/папки, нет квоты, сеть) -- это штатная деградация, не ошибка."""
+async def _wordstat_oauth_raw(phrase: str, *, _post=None) -> dict:
+    """Сырой вызов официального Wordstat API (Bearer OAuth) -- отдельный
+    продукт от Cloud Search API, см. docstring модуля. Включается только
+    если задан YANDEX_WORDSTAT_OAUTH_TOKEN -- иначе штатно пропускается,
+    вообще не трогая сеть (и не трогая инъекцию _post в тестах)."""
+    token = os.environ.get("YANDEX_WORDSTAT_OAUTH_TOKEN")
+    if not token:
+        return {"ok": False, "skipped": "YANDEX_WORDSTAT_OAUTH_TOKEN не задан"}
+    payload = {"phrase": phrase, "regions": [RUSSIA_REGION]}
+    try:
+        if _post is not None:
+            data = await _post("wordstat_oauth", payload)
+            return {"ok": True, "data": data}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            resp = await client.post(
+                f"{WORDSTAT_OAUTH_URL}{WORDSTAT_OAUTH_PATH}", json=payload,
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"},
+            )
+            if resp.status_code != 200:
+                return {"ok": False, "status": resp.status_code, "body": resp.text[:500]}
+            return {"ok": True, "data": resp.json()}
+    except Exception as exc:
+        return {"ok": False, "error": repr(exc)}
+
+
+async def _wordstat_cloud_raw(phrase: str, *, _post=None) -> dict:
+    """Сырой вызов прежнего пути -- Wordstat-прокси внутри Yandex Cloud
+    Search API v2, авторизация Api-Key сервисного аккаунта."""
     api_key = os.environ.get("YANDEX_API_KEY")
     folder_id = os.environ.get("YANDEX_FOLDER_ID")
     if (not api_key or not folder_id) and _post is None:
-        return None
+        return {"ok": False, "skipped": "YANDEX_API_KEY/YANDEX_FOLDER_ID не заданы"}
     payload = {"phrase": phrase, "regions": [RUSSIA_REGION], "folderId": folder_id}
     try:
         if _post is not None:
             data = await _post("wordstat", payload)
-        else:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
-                resp = await client.post(
-                    WORDSTAT_URL, json=payload,
-                    headers={"Authorization": f"Api-Key {api_key}",
-                             "Content-Type": "application/json"},
-                )
-                if resp.status_code != 200:
-                    logger.warning("wordstat HTTP %s: %s", resp.status_code, resp.text[:200])
-                    return None
-                data = resp.json()
-        count = data.get("totalCount")
+            return {"ok": True, "data": data}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            resp = await client.post(
+                WORDSTAT_URL, json=payload,
+                headers={"Authorization": f"Api-Key {api_key}",
+                         "Content-Type": "application/json"},
+            )
+            if resp.status_code != 200:
+                return {"ok": False, "status": resp.status_code, "body": resp.text[:200]}
+            return {"ok": True, "data": resp.json()}
+    except Exception as exc:
+        return {"ok": False, "error": repr(exc)}
+
+
+async def wordstat_count(phrase: str, *, _post=None) -> int | None:
+    """Месячная частотность фразы по России. Пробует официальный Wordstat
+    API первым (если сконфигурирован), при неуспехе -- прежний Cloud Search
+    API путь. None = оба пути недоступны/без данных -- штатная деградация,
+    не ошибка."""
+    oauth = await _wordstat_oauth_raw(phrase, _post=_post)
+    if oauth.get("ok"):
+        count = (oauth.get("data") or {}).get("totalCount")
+        if count is not None:
+            return int(count)
+    elif "status" in oauth or "error" in oauth:
+        logger.warning("wordstat oauth path failed for %r: %s", phrase, oauth)
+
+    cloud = await _wordstat_cloud_raw(phrase, _post=_post)
+    if cloud.get("ok"):
+        count = (cloud.get("data") or {}).get("totalCount")
         return int(count) if count is not None else None
-    except Exception:
-        logger.warning("wordstat_count failed for %r", phrase, exc_info=True)
-        return None
+    if "status" in cloud or "error" in cloud:
+        logger.warning("wordstat cloud path failed for %r: %s", phrase, cloud)
+    return None
+
+
+async def diagnose(phrase: str = "купить слона", *, _post=None) -> dict:
+    """Отладка интеграции с Яндексом для владельца (owner-only ручка
+    /api/diag/yandex): сырые ответы ОБОИХ путей Вордстата, без глотания
+    ошибок -- чтобы увидеть точную причину «нет данных» вместо гадания."""
+    oauth = await _wordstat_oauth_raw(phrase, _post=_post)
+    cloud = await _wordstat_cloud_raw(phrase, _post=_post)
+    return {
+        "env": {
+            "yandex_api_key_set": bool(os.environ.get("YANDEX_API_KEY")),
+            "yandex_folder_id_set": bool(os.environ.get("YANDEX_FOLDER_ID")),
+            "wordstat_oauth_token_set": bool(os.environ.get("YANDEX_WORDSTAT_OAUTH_TOKEN")),
+        },
+        "wordstat_oauth_api": oauth,
+        "wordstat_cloud_api": cloud,
+    }
 
 
 def _parse_search_xml(xml_text: str) -> dict:
