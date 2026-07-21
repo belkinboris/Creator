@@ -57,6 +57,30 @@ _FORMULATIONS_SYSTEM = (
     "Ответь ТОЛЬКО JSON-массивом из 3 строк, без пояснений."
 )
 
+_IDEA_SYSTEM = (
+    "Придумай одну конкретную бизнес-идею для России: понятная услуга или продукт "
+    "для ясной аудитории. Одно-два предложения, обычными словами, без названий брендов, "
+    "без слов «стартап», «платформа», «экосистема». Каждый раз — другая ниша: "
+    "быт, малый бизнес, здоровье, дети, ремонт, еда, обучение, питомцы, авто и т.д. "
+    "Ответь ТОЛЬКО текстом идеи, без кавычек и пояснений."
+)
+
+
+async def generate_idea(*, _post=None) -> str:
+    """Одна идея для тех, кто пришёл без своей. Немного повышенная температура
+    задана на уровне LLM-конфига; разнообразие ниш просим в промпте."""
+    try:
+        text = await llm_adapter.call(_IDEA_SYSTEM, "Придумай идею.", 300, _post=_post)
+        idea = text.strip().strip('"«»').strip()
+        if len(idea) < 15:
+            raise ValueError("too short")
+        return idea[:MAX_IDEA_CHARS]
+    except llm_adapter.LLMAdapterError as exc:
+        raise DemandError(str(exc))
+    except Exception:
+        logger.warning("generate_idea failed", exc_info=True)
+        raise DemandError("Не получилось придумать идею. Попробуйте ещё раз.")
+
 
 class DemandError(Exception):
     """Человекочитаемая ошибка -- показывается пользователю как есть."""
