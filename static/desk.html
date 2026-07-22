@@ -60,7 +60,10 @@
     display:flex;flex-direction:column;justify-content:center;gap:8px;min-height:150px}
   .new h2{font-size:17px;font-weight:600;color:var(--ink)}
   .new p{font-size:14px;color:var(--muted)}
-  .wl{margin-top:22px;font-size:14px;color:var(--muted)}
+  .wl-block{margin-top:22px}
+  .wl-head{font-size:14px;color:var(--muted);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .wl-head b{color:var(--ink);font:600 14px "IBM Plex Mono",monospace}
+  .wl-list{margin-top:8px;font-size:13.5px;color:var(--muted);line-height:1.8}
 
   .orders-head{margin-top:34px}
   .orders-head h1{font-size:22px}
@@ -125,7 +128,12 @@
         <button class="btn ghost" onclick="closeForm()">Отмена</button>
       </div>
     </div>
-    <p class="wl" id="wl"></p>
+    <div class="wl-block" id="wl-block" style="display:none">
+      <div class="wl-head">Лист ожидания Создателя: <b id="wl-count"></b> контактов
+        <button class="btn ghost" id="wl-copy" type="button" style="padding:5px 10px;font-size:13px">скопировать все</button>
+      </div>
+      <div class="wl-list" id="wl-list"></div>
+    </div>
   </div>
 </div>
 
@@ -266,9 +274,15 @@ async function load(){
     });
   }
 
-  document.getElementById("wl").textContent = d.waitlist && d.waitlist.count
-    ? `Лист ожидания Создателя: ${d.waitlist.count} контактов`
-    : "";
+  if(d.waitlist && d.waitlist.count){
+    document.getElementById("wl-block").style.display = "block";
+    document.getElementById("wl-count").textContent = d.waitlist.count;
+    document.getElementById("wl-list").textContent = d.waitlist.contacts.join(" · ");
+    document.getElementById("wl-copy").onclick = () =>
+      navigator.clipboard.writeText(d.waitlist.contacts.join("\n"));
+  } else {
+    document.getElementById("wl-block").style.display = "none";
+  }
 
   loadOrders();
 }

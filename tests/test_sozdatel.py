@@ -166,6 +166,8 @@ class TestEventsAndVerdict:
         r = client.get("/api/projects", headers=OWNER).json()
         ids = [p["idea_id"] for p in r["projects"]]
         assert "verd_v1" in ids
+        proj = next(p for p in r["projects"] if p["idea_id"] == "verd_v1")
+        assert proj["views"] == 40 and proj["leads"] == 5   # агрегация одним запросом, не N+1
 
 
 class TestTruncationRetry:
@@ -333,6 +335,14 @@ class TestDeskOrders:
         text = client.get("/desk").text
         assert 'class="spark"' in text
         assert "drawSpark" in text and "/api/series/" in text
+
+    def test_desk_shows_actual_waitlist_contacts_not_just_count(self):
+        """Раньше кабинет показывал только число контактов -- реальные
+        контакты для связи были не видны нигде в интерфейсе."""
+        text = client.get("/desk").text
+        assert "wl-count" in text and "wl-list" in text
+        assert "d.waitlist.contacts.join" in text   # список, не только count
+        assert "скопировать все" in text
 
     def test_desk_renders_chosen_offer_when_present(self):
         import app.main as m
@@ -984,6 +994,33 @@ class TestResultFunnel:
 
 
 class TestPayments:
+    def test_live_test_return_url_falls_back_without_check_id(self, monkeypatch):
+        """/r/{check_id} без check_id — битая ссылка (404). Без check_id
+        оплата должна возвращать на главную, а не на несуществующую /r/."""
+        import app.main as m
+        captured = {}
+        async def fake_create_payment(order_id, amount, description, return_url):
+            captured["return_url"] = return_url
+            return "pay_x", "https://yookassa.example/pay"
+        monkeypatch.setattr(m.payments, "configured", lambda: True)
+        monkeypatch.setattr(m.payments, "create_payment", fake_create_payment)
+        r = client.post("/api/live-test", json={"contact": "@no_check_id"})
+        assert r.status_code == 200
+        assert captured["return_url"].endswith("/?paid=1")
+        assert "/r/" not in captured["return_url"]
+
+    def test_live_test_return_url_uses_check_id_when_present(self, monkeypatch):
+        import app.main as m
+        captured = {}
+        async def fake_create_payment(order_id, amount, description, return_url):
+            captured["return_url"] = return_url
+            return "pay_y", "https://yookassa.example/pay"
+        monkeypatch.setattr(m.payments, "configured", lambda: True)
+        monkeypatch.setattr(m.payments, "create_payment", fake_create_payment)
+        r = client.post("/api/live-test", json={"check_id": 42, "contact": "@with_check_id"})
+        assert r.status_code == 200
+        assert captured["return_url"].endswith("/r/42?paid=1")
+
     def test_create_payment_via_injection(self):
         from app.payments import create_payment
         captured = {}
