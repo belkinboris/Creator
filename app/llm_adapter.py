@@ -89,7 +89,7 @@ def _extract_yandex_text(data: dict) -> str:
     return "\n".join(parts)
 
 
-async def call(system: str, user: str, max_tokens: int, *, _post=None) -> str:
+async def call(system: str, user: str, max_tokens: int, *, provider: str | None = None, _post=None) -> str:
     """
     Единая точка вызова LLM для всего приложения.
 
@@ -97,10 +97,15 @@ async def call(system: str, user: str, max_tokens: int, *, _post=None) -> str:
     остаются на вызывающей стороне (это бизнес-логика конкретного движка,
     не транспорт).
 
+    provider -- необязательный оверрайд глобального LLM_PROVIDER для одного
+    конкретного вызова (например, report_engine.py форсирует "anthropic"
+    для платного отчёта, где качество текста определяет ценность покупки,
+    даже если весь остальной проект работает на более дешёвом Yandex/DeepSeek).
+
     _post(provider, payload) -> raw_response_dict -- инъекция для тестов:
     подставляет то, что вернул бы соответствующий API, без сети.
     """
-    provider = LLM_PROVIDER
+    provider = provider or LLM_PROVIDER
 
     if provider == "anthropic":
         api_key = os.environ.get("ANTHROPIC_API_KEY")

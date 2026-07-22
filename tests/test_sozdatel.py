@@ -7,6 +7,10 @@ os.environ["DATABASE_URL"] = "sqlite://"
 # даже когда сеть не используется (_post инъекция).
 os.environ.setdefault("YANDEX_FOLDER_ID", "test-folder")
 os.environ.setdefault("YANDEX_API_KEY", "test-yandex-key")
+# report_engine.py форсирует Anthropic, когда ключ настроен -- по умолчанию
+# в тестах считаем его настроенным (как и предполагается в бою для платного
+# отчёта); один тест явно делает monkeypatch.delenv, чтобы проверить откат.
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-anthropic-key")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -121,38 +125,84 @@ DEMAND_DATA_FIXTURE = {
 }
 
 
+def _anthropic_text_response(body: dict) -> dict:
+    """Отчёт форсирует provider="anthropic" -- фейк-ответ должен быть в форме
+    Anthropic Messages API, не Yandex Responses API."""
+    return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}]}
+
+
+def _report_body(keys, risk_count=2) -> dict:
+    return {
+        "viability_score": 62,
+        "viability_summary": "Спрос подтверждён, но ниша уже занята двумя игроками.",
+        "top_risks": [{"title": f"Риск {i}", "body": f"Объяснение риска {i}."} for i in range(risk_count)],
+        "sections": {k: "Абзац один.\n\nАбзац два." for k in keys},
+    }
+
+
 class TestReportEngine:
     """Движок платного отчёта -- та же дисциплина, что offer_engine.py:
-    честный LLM-вызов, строго провалидированный выход."""
+    честный LLM-вызов, строго провалидированный выход. Форсирует Anthropic
+    (см. _call_llm) -- платный продукт, где важно качество аналитики."""
 
     def test_short_idea_rejected(self):
         from app.report_engine import generate_report, ReportEngineError
         with pytest.raises(ReportEngineError):
             asyncio.run(generate_report("коротко", DEMAND_DATA_FIXTURE, "quick"))
 
-    def test_quick_tier_returns_four_sections(self):
+    def test_forces_anthropic_provider(self):
+        from app.report_engine import generate_report, QUICK_KEYS
+        seen_providers = []
+        async def fake_post(provider, payload):
+            seen_providers.append(provider)
+            return _anthropic_text_response(_report_body(QUICK_KEYS, 2))
+        asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
+                                    DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
+        assert seen_providers == ["anthropic"]
+
+    def test_quick_tier_returns_four_sections_and_two_risks(self):
         from app.report_engine import generate_report, QUICK_KEYS
         async def fake_post(provider, payload):
-            body = {"sections": {k: "Абзац один.\n\nАбзац два." for k in QUICK_KEYS}}
-            return _yandex_response(json.dumps(body, ensure_ascii=False))
+            return _anthropic_text_response(_report_body(QUICK_KEYS, 2))
         out = asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
                                           DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
         assert [s["key"] for s in out["sections"]] == QUICK_KEYS
+        assert len(out["top_risks"]) == 2
+        assert out["viability_score"] == 62
 
-    def test_full_tier_returns_all_eight_sections(self):
+    def test_full_tier_returns_all_eight_sections_and_three_risks(self):
         from app.report_engine import generate_report, ALL_SECTIONS
+        keys = [k for k, _ in ALL_SECTIONS]
         async def fake_post(provider, payload):
-            body = {"sections": {k: "Абзац один.\n\nАбзац два." for k, _ in ALL_SECTIONS}}
-            return _yandex_response(json.dumps(body, ensure_ascii=False))
+            return _anthropic_text_response(_report_body(keys, 3))
         out = asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
                                           DEMAND_DATA_FIXTURE, "full", _post=fake_post))
         assert len(out["sections"]) == 8
+        assert len(out["top_risks"]) == 3
 
     def test_missing_section_rejected(self):
         from app.report_engine import generate_report, ReportEngineError, QUICK_KEYS
         async def fake_post(provider, payload):
-            body = {"sections": {k: "текст" for k in QUICK_KEYS[:-1]}}   # не хватает одной секции
-            return _yandex_response(json.dumps(body, ensure_ascii=False))
+            body = _report_body(QUICK_KEYS[:-1], 2)   # не хватает одной секции
+            return _anthropic_text_response(body)
+        with pytest.raises(ReportEngineError):
+            asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
+                                        DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
+
+    def test_missing_viability_score_rejected(self):
+        from app.report_engine import generate_report, ReportEngineError, QUICK_KEYS
+        async def fake_post(provider, payload):
+            body = _report_body(QUICK_KEYS, 2)
+            del body["viability_score"]
+            return _anthropic_text_response(body)
+        with pytest.raises(ReportEngineError):
+            asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
+                                        DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
+
+    def test_too_few_risks_rejected(self):
+        from app.report_engine import generate_report, ReportEngineError, QUICK_KEYS
+        async def fake_post(provider, payload):
+            return _anthropic_text_response(_report_body(QUICK_KEYS, 1))   # нужно 2 для quick
         with pytest.raises(ReportEngineError):
             asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
                                         DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
@@ -163,9 +213,8 @@ class TestReportEngine:
         async def fake_post(provider, payload):
             calls["n"] += 1
             if calls["n"] == 1:
-                return _yandex_response('{"sections": {"summary": "обрыв')   # битый JSON
-            body = {"sections": {k: "текст секции" for k in QUICK_KEYS}}
-            return _yandex_response(json.dumps(body, ensure_ascii=False))
+                return {"content": [{"type": "text", "text": '{"sections": {"summary": "обрыв'}]}   # битый JSON
+            return _anthropic_text_response(_report_body(QUICK_KEYS, 2))
         out = asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
                                           DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
         assert calls["n"] == 2 and len(out["sections"]) == 4
@@ -176,12 +225,29 @@ class TestReportEngine:
         captured = {}
         async def fake_post(provider, payload):
             captured.update(payload)
-            body = {"sections": {k: "текст" for k in QUICK_KEYS}}
-            return _yandex_response(json.dumps(body, ensure_ascii=False))
+            return _anthropic_text_response(_report_body(QUICK_KEYS, 2))
         asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
                                     DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
-        assert "5200" in captured["input"] or "5 200" in captured["input"]
-        assert "t.ru" in captured["input"]
+        user_content = captured["messages"][0]["content"]
+        assert "5200" in user_content or "5 200" in user_content
+        assert "t.ru" in user_content
+
+    def test_falls_back_to_default_provider_without_anthropic_key(self, monkeypatch):
+        """Нет ANTHROPIC_API_KEY -- используем дефолтного провайдера проекта,
+        а не отказ фичи целиком. Решение принимается до сети (см. _call_llm),
+        поэтому тестируем через прямую подмену llm_adapter.call, не через
+        _post-инъекцию (она обходит проверку ключа)."""
+        import app.report_engine as re
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        seen_providers = []
+        async def fake_call(system, user, max_tokens, *, provider=None, _post=None):
+            seen_providers.append(provider)
+            return json.dumps(_report_body(re.QUICK_KEYS, 2), ensure_ascii=False)
+        monkeypatch.setattr(re.llm_adapter, "call", fake_call)
+        out = asyncio.run(re.generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
+                                             DEMAND_DATA_FIXTURE, "quick"))
+        assert seen_providers == [None]   # не форсируем anthropic без ключа
+        assert len(out["sections"]) == 4
 
 
 class TestLandingAndLaunch:

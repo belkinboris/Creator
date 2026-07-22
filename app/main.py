@@ -473,7 +473,7 @@ async def report_page(rid: int):
 
     demand_data = json.loads(rec.result_json)
     preview = _report_preview(demand_data)
-    report_sections = None
+    report_full = None
     gen_error = ""
 
     if purchase:
@@ -488,14 +488,14 @@ async def report_page(rid: int):
             except ReportEngineError as e:
                 gen_error = str(e)
         if purchase.report_json:
-            report_sections = json.loads(purchase.report_json)["sections"]
+            report_full = json.loads(purchase.report_json)
 
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rid))
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__PREVIEW_JSON__", json.dumps(preview, ensure_ascii=False))
-        .replace("__REPORT_JSON__", json.dumps(report_sections, ensure_ascii=False) if report_sections else "null")
+        .replace("__REPORT_JSON__", json.dumps(report_full, ensure_ascii=False) if report_full else "null")
         .replace("__UNLOCKED_TIER__", json.dumps(purchase.tier if purchase else None))
         .replace("__ORDER_STATUS__", json.dumps(purchase.status if purchase else None))
         .replace("__GEN_ERROR__", json.dumps(gen_error, ensure_ascii=False))

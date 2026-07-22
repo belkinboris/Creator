@@ -34,6 +34,22 @@
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px;width:fit-content}
   .preview .stat span{display:block;color:var(--muted);font-size:13px;margin-top:5px;max-width:16em}
 
+  /* Балл жизнеспособности + топ-риски -- появляются сразу после разблокировки,
+     до подробных секций, как самый весомый вывод отчёта */
+  .score-card{border:1px solid var(--line);border-left:4px solid var(--line);background:var(--box);
+    border-radius:8px;padding:20px;margin:18px 0;display:flex;gap:20px;align-items:baseline;flex-wrap:wrap}
+  .score-card.ok{border-left-color:var(--ok)}
+  .score-card.warn{border-left-color:var(--warn)}
+  .score-card.bad{border-left-color:var(--bad)}
+  .score-card .num{font:600 44px "IBM Plex Mono",monospace;white-space:nowrap}
+  .score-card .num small{font-size:.4em;color:var(--muted)}
+  .score-card .note{color:var(--muted);font-size:15px;max-width:40em}
+  .risks{display:grid;gap:14px;margin:0 0 22px}
+  @media (min-width:640px){.risks{grid-template-columns:repeat(auto-fit, minmax(220px,1fr))}}
+  .risk{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:16px}
+  .risk h4{font-size:15px;font-weight:600;margin-bottom:6px}
+  .risk p{color:var(--muted);font-size:14px}
+
   .report-layout{display:grid;grid-template-columns:200px 1fr;gap:28px;margin-top:22px}
   @media (max-width:720px){.report-layout{grid-template-columns:1fr}}
 
@@ -41,12 +57,14 @@
   @media (max-width:720px){.report-nav{position:static;display:flex;overflow-x:auto;gap:14px;padding-bottom:10px;border-bottom:1px solid var(--line)}}
   .report-nav-label{font:600 12px "IBM Plex Sans";color:var(--muted);margin-bottom:10px}
   @media (max-width:720px){.report-nav-label{display:none}}
-  .report-nav ul{list-style:none;display:flex;flex-direction:column;gap:2px}
+  .report-nav ul{list-style:none;display:flex;flex-direction:column;gap:2px;min-width:0}
   @media (max-width:720px){.report-nav ul{flex-direction:row;gap:16px}}
-  .report-nav a{display:block;padding:6px 0;font-size:14px;color:var(--muted);text-decoration:none;white-space:nowrap}
+  .report-nav a{display:block;padding:6px 0;font-size:14px;color:var(--muted);text-decoration:none;
+    overflow-wrap:break-word;line-height:1.35}
+  @media (max-width:720px){.report-nav a{white-space:nowrap}}
   .report-nav a.unlocked{color:var(--ink);font-weight:600}
   .report-nav a:hover{color:var(--ink)}
-  .report-nav .lockmark{font-size:12px;color:var(--muted);margin-left:4px}
+  .report-nav .lockmark{font-size:12px;color:var(--muted);margin-left:4px;display:block}
 
   .section{border-top:1px solid var(--line);padding:20px 0}
   .section:first-child{border-top:0}
@@ -113,6 +131,7 @@
   </div>
 
   <div class="preview" id="preview"></div>
+  <div id="score-section"></div>
   <div class="pdf-row no-print" id="pdf-row" style="display:none">
     <button class="btn-ghost" onclick="window.print()" type="button">Скачать PDF</button>
   </div>
@@ -174,9 +193,23 @@ const TEASER = {
   document.getElementById('preview').innerHTML = items.join('');
 })();
 
+// --- Балл жизнеспособности + топ-риски -- видны сразу после разблокировки ---
+if (REPORT && typeof REPORT.viability_score === 'number') {
+  const score = REPORT.viability_score;
+  const cls = score >= 70 ? 'ok' : (score >= 40 ? 'warn' : 'bad');
+  document.getElementById('score-section').innerHTML = `
+    <div class="score-card ${cls}">
+      <div class="num">${score}<small>/100</small></div>
+      <div class="note">${escapeHtml(REPORT.viability_summary || '')}</div>
+    </div>
+    <div class="risks">${(REPORT.top_risks || []).map(r => `
+      <div class="risk"><h4>${escapeHtml(r.title)}</h4><p>${escapeHtml(r.body)}</p></div>`).join('')}
+    </div>`;
+}
+
 // --- Секции: разблокированные из REPORT, остальные заперты с тизером ---
 const unlockedMap = {};
-(REPORT || []).forEach(s => { unlockedMap[s.key] = s; });
+(REPORT ? REPORT.sections : []).forEach(s => { unlockedMap[s.key] = s; });
 
 const nav = document.getElementById('section-nav');
 const sectionsEl = document.getElementById('sections');
@@ -198,7 +231,7 @@ sectionsEl.innerHTML = SECTIONS.map(s => {
   </section>`;
 }).join('');
 
-if (REPORT && REPORT.length) {
+if (REPORT && REPORT.sections && REPORT.sections.length) {
   document.getElementById('pdf-row').style.display = 'block';
 }
 
