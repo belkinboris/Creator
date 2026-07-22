@@ -1923,3 +1923,15 @@ class TestCustomerDevPass:
         home = client.get("/").text
         assert 'href="/account"' in home
         assert 'href="/desk"' not in home
+
+    def test_ad_setup_copy_does_not_overpromise_managed_service(self):
+        """Владелец подтвердил: рекламу пока никому не настраивают -- клиент
+        запускает Директ сам по инструкции. "Мы... сами запустим рекламу"
+        обещало управляемую услугу, которой нет; текст не должен утверждать,
+        что Создатель лично запускает кампанию."""
+        home = client.get("/").text
+        assert "Запускаем Яндекс Директ" not in home
+
+        rid = TestReportFlow()._make_check()
+        result_text = client.get(f"/r/{rid}").text
+        assert "сами запустим рекламу" not in result_text
