@@ -1476,6 +1476,44 @@ class TestFooterLinks:
     def test_guide_direct_has_footer(self):
         self._assert_footer(client.get("/guide/direct").text, "гайда по Директу")
 
+    def test_social_contract_has_footer(self):
+        self._assert_footer(client.get("/social-contract").text, "соцконтракт-страницы")
+
+
+class TestSocialContractPage:
+    """Отдельная посадочная страница под рекламу на аудиторию социального
+    контракта -- не часть общего позиционирования сайта (см. CLAUDE.md),
+    доступна только по прямой ссылке /social-contract."""
+
+    def test_page_loads_and_mentions_social_contract(self):
+        r = client.get("/social-contract")
+        assert r.status_code == 200
+        assert "социального контракта" in r.text.lower() or "социальн" in r.text.lower()
+
+    def test_no_jargon(self):
+        text = client.get("/social-contract").text
+        assert "оффер" not in text.lower()
+        assert "лендинг" not in text.lower()
+
+    def test_shares_free_demand_check_funnel(self):
+        """Ведёт в тот же бесплатный /api/demand, что и главная -- не отдельный
+        продукт с собственным бэкендом."""
+        text = client.get("/social-contract").text
+        assert "/api/demand" in text
+        assert 'id="idea"' in text
+
+    def test_not_linked_from_homepage(self):
+        """Страница не часть общего позиционирования -- не должна светиться
+        в навигации главной, чтобы не отпугивать массового пользователя
+        упоминанием соцконтракта/грантов."""
+        assert "/social-contract" not in client.get("/").text
+
+    def test_uses_light_design_system(self):
+        text = client.get("/social-contract").text
+        assert "IBM Plex" in text
+        assert "#FBF6EA" in text
+        assert "Manrope" not in text and "Onest" not in text
+
 
 class TestProjectPage:
     """Страница /p/ переведена со старого тёмного «чертёжного» стиля на

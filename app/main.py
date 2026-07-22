@@ -174,7 +174,8 @@ async def _lifespan(_app: FastAPI):
             s.exec(select(SmokeProject.id).limit(1)).first()
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
-    for name in ("index.html", "portfolio.html", "project.html", "guide-direct.html", "result.html", "report.html"):
+    for name in ("index.html", "portfolio.html", "project.html", "guide-direct.html", "result.html", "report.html",
+                 "social-contract.html"):
         try:
             _static(name)
         except Exception:
@@ -989,6 +990,16 @@ def legal_page():
 def guide_direct():
     """Этап 4 из 8 — пошаговый запуск Директа (режим эксперта, только Поиск)."""
     return HTMLResponse(_static("guide-direct.html"))
+
+
+@app.get("/social-contract", response_class=HTMLResponse)
+def social_contract_page():
+    """Отдельная посадочная страница под рекламу на аудиторию социального
+    контракта -- специально НЕ часть общего позиционирования сайта (см.
+    CLAUDE.md), чтобы не отпугивать массового пользователя упоминанием
+    грантов/соцконтракта. Ведёт в тот же бесплатный /api/demand -> /r/{id},
+    что и главная страница."""
+    return HTMLResponse(_static("social-contract.html"))
 
 
 @app.get("/oferta", response_class=HTMLResponse)
