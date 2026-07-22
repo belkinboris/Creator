@@ -36,15 +36,18 @@ def _auth() -> tuple[str, str]:
 
 
 async def create_payment(order_id: int, amount_rub: int, description: str,
-                         return_url: str, *, _post=None) -> tuple[str, str]:
+                         return_url: str, *, kind: str = "livetest", _post=None) -> tuple[str, str]:
     """Создаёт платёж -> (payment_id, confirmation_url). Idempotence-Key
-    привязан к заказу: повторный клик не создаст второй платёж."""
+    привязан к заказу: повторный клик не создаст второй платёж.
+
+    kind различает таблицы заказов (livetest / report) в вебхуке -- id из
+    LiveTestOrder и ReportPurchase не глобально уникальны между собой."""
     payload = {
         "amount": {"value": f"{amount_rub}.00", "currency": "RUB"},
         "capture": True,
         "confirmation": {"type": "redirect", "return_url": return_url},
         "description": description[:128],
-        "metadata": {"order_id": str(order_id)},
+        "metadata": {"order_id": str(order_id), "kind": kind},
     }
     try:
         if _post is not None:
@@ -53,7 +56,7 @@ async def create_payment(order_id: int, amount_rub: int, description: str,
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
                 resp = await client.post(
                     API_URL, json=payload, auth=_auth(),
-                    headers={"Idempotence-Key": f"sozdatel-order-{order_id}",
+                    headers={"Idempotence-Key": f"sozdatel-{kind}-{order_id}",
                              "Content-Type": "application/json"},
                 )
                 if resp.status_code not in (200, 201):

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Отчёт по идее — Создатель</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2712%27 fill=%27%23FFDE59%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-family=%27Arial,sans-serif%27 font-size=%2736%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%231B1C20%27%3EС%3C/text%3E%3C/svg%3E">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#FBF6EA;--box:#FFFDF6;--line:#E9E1CB;--ink:#1B1C20;--muted:#6F6A5C;
+    --marker:#FFDE59;--btn:#1B1C20;--ok:#2E7D4F;--warn:#A87B00;--bad:#B23A3A;--pad:22px}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);
+    font:400 16px/1.55 "IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:980px;margin:0 auto;padding-left:22px;padding-right:22px}
+  a{color:var(--ink)}
+  .hl{background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
+  header{border-bottom:1px solid var(--line)}
+  .nav{display:flex;align-items:baseline;justify-content:space-between;
+    padding-top:14px;padding-bottom:14px;flex-wrap:wrap;gap:6px}
+  .logo{font-weight:700;font-size:17px;color:var(--ink);text-decoration:none}
+  .nav a.link{color:var(--muted);text-decoration:none;font-size:14px}
+  .nav a.link:hover{color:var(--ink);text-decoration:underline}
+
+  .head{padding:24px 0 6px}
+  h1{font-size:clamp(22px,3.8vw,28px);font-weight:600;letter-spacing:-.015em}
+  .idea{color:var(--muted);font-size:15px;margin-top:6px;max-width:46em}
+
+  /* Бесплатный тизер — виден всегда, посчитан на бесплатных данных проверки спроса */
+  .preview{border:1px solid var(--line);background:var(--box);border-radius:8px;
+    padding:18px;margin:18px 0;display:flex;gap:28px;flex-wrap:wrap}
+  .preview .stat b{font:600 24px "IBM Plex Mono",monospace;display:block;
+    background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px;width:fit-content}
+  .preview .stat span{display:block;color:var(--muted);font-size:13px;margin-top:5px;max-width:16em}
+
+  .report-layout{display:grid;grid-template-columns:200px 1fr;gap:28px;margin-top:22px}
+  @media (max-width:720px){.report-layout{grid-template-columns:1fr}}
+
+  .report-nav{position:sticky;top:18px;align-self:start}
+  @media (max-width:720px){.report-nav{position:static;display:flex;overflow-x:auto;gap:14px;padding-bottom:10px;border-bottom:1px solid var(--line)}}
+  .report-nav-label{font:600 12px "IBM Plex Sans";color:var(--muted);margin-bottom:10px}
+  @media (max-width:720px){.report-nav-label{display:none}}
+  .report-nav ul{list-style:none;display:flex;flex-direction:column;gap:2px}
+  @media (max-width:720px){.report-nav ul{flex-direction:row;gap:16px}}
+  .report-nav a{display:block;padding:6px 0;font-size:14px;color:var(--muted);text-decoration:none;white-space:nowrap}
+  .report-nav a.unlocked{color:var(--ink);font-weight:600}
+  .report-nav a:hover{color:var(--ink)}
+  .report-nav .lockmark{font-size:12px;color:var(--muted);margin-left:4px}
+
+  .section{border-top:1px solid var(--line);padding:20px 0}
+  .section:first-child{border-top:0}
+  .section h2{font-size:19px;font-weight:600;letter-spacing:-.01em;margin-bottom:10px}
+  .section p{color:var(--ink);font-size:15px;max-width:52em;margin-top:10px}
+  .section p:first-of-type{margin-top:0}
+  .section.locked p{color:var(--muted);filter:blur(3px);user-select:none}
+  .section.locked h2::after{content:"— в отчёте";font-size:13px;font-weight:500;color:var(--muted);margin-left:8px}
+  .section .teaser{color:var(--muted);font-size:14px;margin-top:8px;filter:none !important}
+
+  .pricing{border:1px solid var(--ink);background:var(--box);border-radius:8px;padding:22px;margin:22px 0 40px}
+  .pricing h3{font-size:18px;font-weight:600;margin-bottom:6px}
+  .pricing > p{color:var(--muted);font-size:15px;margin-bottom:16px;max-width:44em}
+  .tiers{display:grid;gap:14px}
+  @media (min-width:640px){.tiers{grid-template-columns:1fr 1fr}}
+  .tier{border:1px solid var(--line);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px}
+  .tier .name{font-size:16px;font-weight:600}
+  .tier .price{font:600 26px "IBM Plex Mono",monospace}
+  .tier .was{font-size:14px;color:var(--muted);text-decoration:line-through;margin-left:8px}
+  .tier .desc{color:var(--muted);font-size:13.5px}
+  .tier button{margin-top:auto}
+  .contact-row{margin-top:16px}
+  .contact-row input{width:100%;max-width:360px;padding:11px 12px;border:1px solid var(--line);
+    border-radius:6px;background:#fff;color:var(--ink);font:inherit}
+  .btn{appearance:none;border:0;cursor:pointer;border-radius:6px;display:inline-block;
+    background:var(--btn);color:#fff;font:600 15px "IBM Plex Sans";padding:11px 18px}
+  .btn:hover{background:#000}
+  .btn[disabled]{opacity:.55;cursor:wait}
+  .btn-ghost{appearance:none;cursor:pointer;border-radius:6px;display:inline-block;
+    background:transparent;border:1px solid var(--line);color:var(--ink);
+    font:500 15px "IBM Plex Sans";padding:10px 16px}
+  .btn-ghost:hover{border-color:var(--ink)}
+  .err{display:none;margin-top:10px;color:var(--bad);font-size:15px}
+  .err.show{display:block}
+  .status-note{border-left:3px solid var(--marker);padding:2px 0 2px 12px;margin:18px 0;font-size:15px;color:var(--muted)}
+  .status-note.ok{border-color:var(--ok)}
+  .pdf-row{margin:18px 0}
+
+  footer{border-top:1px solid var(--line);margin-top:30px;padding:22px 0;color:var(--muted);font-size:13px}
+  footer a{color:var(--muted)}
+  footer a:hover{color:var(--ink)}
+
+  @media print{
+    header, .report-nav, .pricing, footer, .no-print{display:none !important}
+    body{background:#fff}
+    .report-layout{grid-template-columns:1fr;margin-top:0}
+    .section.locked{display:none}
+  }
+</style>
+</head>
+<body>
+
+<header class="no-print">
+  <div class="wrap nav">
+    <a class="logo" href="/">Созда<span class="hl">тель</span></a>
+    <a class="link" href="/">← Проверить другую идею</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="head">
+    <h1>Отчёт по идее</h1>
+    <p class="idea" id="idea">__IDEA__</p>
+  </div>
+
+  <div class="preview" id="preview"></div>
+  <div class="pdf-row no-print" id="pdf-row" style="display:none">
+    <button class="btn-ghost" onclick="window.print()" type="button">Скачать PDF</button>
+  </div>
+  <div class="status-note no-print" id="status-note" style="display:none"></div>
+
+  <div class="report-layout">
+    <aside class="report-nav no-print">
+      <div class="report-nav-label">Разделы отчёта</div>
+      <ul id="section-nav"></ul>
+    </aside>
+    <div>
+      <div id="sections"></div>
+      <div class="pricing no-print" id="pricing"></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© Создатель</span> · <a href="/oferta">Публичная оферта</a> · <a href="/agreement">Соглашение</a> · <a href="/privacy">Конфиденциальность</a> · <a href="/contacts">Реквизиты</a>
+  </div>
+</footer>
+
+<script>
+const CHECK_ID = __CHECK_ID__;
+const PREVIEW = __PREVIEW_JSON__;
+const REPORT = __REPORT_JSON__;
+const UNLOCKED_TIER = __UNLOCKED_TIER__;
+const ORDER_STATUS = __ORDER_STATUS__;
+const GEN_ERROR = __GEN_ERROR__;
+const PRICES = __PRICES_JSON__;
+const SECTIONS = __SECTIONS_JSON__;
+const QUICK_KEYS = __QUICK_KEYS_JSON__;
+
+function fmt(n){ return n.toLocaleString('ru-RU'); }
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+const TEASER = {
+  summary: "Собранное резюме идеи, аудитории и сути предложения — в одном месте.",
+  market: "Разбор спроса и рынка на основе реальных цифр Вордстата и конкурентов из выдачи.",
+  competitors: "Кто уже отвечает на этот спрос и как от них отстроиться.",
+  verdict: "Честный вывод: запускать, дорабатывать или не запускать — с обоснованием.",
+  audience: "Кому именно продавать в первую очередь и почему.",
+  finance: "Оценка выручки, затрат и точки безубыточности.",
+  risks: "Что может пойти не так и как это снизить заранее.",
+  launch: "Пошаговый план — что делать дальше по пути 0→7.",
+};
+
+// --- Бесплатный тизер ---
+(function renderPreview(){
+  const p = PREVIEW;
+  const items = [];
+  items.push(`<div class="stat"><b>${p.best_count !== null ? fmt(p.best_count) + '/мес' : 'нет данных'}</b><span>частотность лучшей формулировки</span></div>`);
+  if (p.overall_value !== null && p.overall_value !== undefined)
+    items.push(`<div class="stat"><b>${p.overall_value}/10</b><span>общая оценка идеи${p.weakest ? ', слабое место — ' + escapeHtml(p.weakest.toLowerCase()) : ''}</span></div>`);
+  items.push(`<div class="stat"><b>${p.competitors_count}</b><span>конкурентов уже в выдаче</span></div>`);
+  document.getElementById('preview').innerHTML = items.join('');
+})();
+
+// --- Секции: разблокированные из REPORT, остальные заперты с тизером ---
+const unlockedMap = {};
+(REPORT || []).forEach(s => { unlockedMap[s.key] = s; });
+
+const nav = document.getElementById('section-nav');
+const sectionsEl = document.getElementById('sections');
+nav.innerHTML = SECTIONS.map(s => {
+  const unlocked = !!unlockedMap[s.key];
+  return `<li><a href="#sec-${s.key}" class="${unlocked ? 'unlocked' : ''}">${escapeHtml(s.title)}${unlocked ? '' : '<span class="lockmark">— в отчёте</span>'}</a></li>`;
+}).join('');
+
+sectionsEl.innerHTML = SECTIONS.map(s => {
+  const got = unlockedMap[s.key];
+  if (got) {
+    const paragraphs = String(got.body || '').split(/\n\n+/).map(p => `<p>${escapeHtml(p)}</p>`).join('');
+    return `<section class="section" id="sec-${s.key}"><h2>${escapeHtml(s.title)}</h2>${paragraphs}</section>`;
+  }
+  return `<section class="section locked" id="sec-${s.key}">
+    <h2>${escapeHtml(s.title)}</h2>
+    <p>Полный текст этой секции открывается в отчёте — реальные данные, а не общие слова.</p>
+    <div class="teaser">${escapeHtml(TEASER[s.key] || '')}</div>
+  </section>`;
+}).join('');
+
+if (REPORT && REPORT.length) {
+  document.getElementById('pdf-row').style.display = 'block';
+}
+
+// --- Статус заказа / ошибка генерации ---
+const statusEl = document.getElementById('status-note');
+if (GEN_ERROR) {
+  statusEl.textContent = 'Не получилось собрать отчёт: ' + GEN_ERROR + ' Обновите страницу через минуту.';
+  statusEl.style.display = 'block';
+} else if (ORDER_STATUS === 'new') {
+  statusEl.textContent = 'Заявка принята. Мы соберём отчёт вручную и пришлём в течение дня.';
+  statusEl.classList.add('ok'); statusEl.style.display = 'block';
+} else if (ORDER_STATUS === 'pending_payment') {
+  statusEl.textContent = 'Ждём подтверждения оплаты — обычно занимает несколько секунд.';
+  statusEl.style.display = 'block';
+}
+
+// --- Тарифы (если нечего/не всё разблокировано) ---
+const pricing = document.getElementById('pricing');
+function tierCard(key){
+  const t = PRICES[key];
+  return `<div class="tier">
+    <div class="name">${escapeHtml(t.label)}</div>
+    <div><span class="price">${fmt(t.price)} ₽</span><span class="was">${fmt(t.was)} ₽</span></div>
+    <div class="desc">${key === 'quick' ? '4 ключевых раздела: резюме, рынок, конкуренты, вердикт' : 'Все 8 разделов: + аудитория, финансы, риски, план запуска'}</div>
+    <button class="btn" type="button" onclick="order('${key}')">Получить отчёт</button>
+  </div>`;
+}
+if (UNLOCKED_TIER === 'full') {
+  pricing.style.display = 'none';
+} else if (UNLOCKED_TIER === 'quick') {
+  pricing.innerHTML = `<h3>Докупить <span class="hl">полный отчёт</span></h3>
+    <p>У вас есть быстрый разбор. Полный отчёт добавляет аудиторию, финансовую модель, риски и план запуска.</p>
+    <div class="tiers">${tierCard('full')}</div>
+    <div class="contact-row"><input id="contact" placeholder="Телеграм или почта — куда вернуться с отчётом"></div>
+    <p class="err" id="order-err" role="alert"></p>`;
+} else {
+  pricing.innerHTML = `<h3>Получите <span class="hl">отчёт по идее</span></h3>
+    <p>Не общие слова — разбор на данных, которые мы уже честно посчитали на бесплатной проверке спроса.</p>
+    <div class="tiers">${tierCard('quick')}${tierCard('full')}</div>
+    <div class="contact-row"><input id="contact" placeholder="Телеграм или почта — куда вернуться с отчётом"></div>
+    <p class="err" id="order-err" role="alert"></p>`;
+}
+
+async function order(tier){
+  const errEl = document.getElementById('order-err');
+  const contact = document.getElementById('contact').value;
+  errEl.classList.remove('show');
+  try {
+    const r = await fetch('/api/report', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({check_id: CHECK_ID, tier, contact})
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || 'Не получилось. Попробуйте ещё раз.');
+    if (data.paid && data.confirmation_url) { location.href = data.confirmation_url; return; }
+    statusEl.textContent = data.message; statusEl.classList.add('ok'); statusEl.style.display = 'block';
+    statusEl.scrollIntoView({behavior:'smooth', block:'center'});
+  } catch (e) {
+    errEl.textContent = e.message; errEl.classList.add('show');
+  }
+}
+
+// --- После редиректа с оплаты: поллим статус, пока вебхук не подтвердит ---
+if (new URLSearchParams(location.search).get('paid') === '1' && UNLOCKED_TIER !== 'full') {
+  let tries = 0;
+  const poll = setInterval(async () => {
+    tries++;
+    try {
+      const r = await fetch(`/api/report/${CHECK_ID}/status`);
+      const d = await r.json();
+      if (d.paid) { clearInterval(poll); location.reload(); }
+    } catch (e) {}
+    if (tries >= 10) clearInterval(poll);
+  }, 2000);
+}
+</script>
+</body>
+</html>

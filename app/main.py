@@ -55,6 +55,9 @@ engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 from app.offer_engine import OfferEngineError, sharpen_idea  # noqa: E402
 from app.demand import DemandError, check_demand, generate_idea, diagnose  # noqa: E402
+from app.report_engine import (  # noqa: E402
+    ReportEngineError, generate_report, ALL_SECTIONS, QUICK_KEYS,
+)
 from app import payments  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -124,6 +127,22 @@ class LiveTestOrder(SQLModel, table=True):
     chosen_offer: str = ""    # JSON: вариант позиционирования, выбранный на /r/{id}
 
 
+class ReportPurchase(SQLModel, table=True):
+    """Заказ отчёта/бизнес-плана: quick (990₽) или full (2990₽). Отчёт
+    генерируется лениво при первом открытии /report/{id} после оплаты --
+    без фоновых воркеров, тот же принцип, что и весь проект."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    check_id: Optional[int] = None
+    idea: str = ""
+    tier: str = "quick"       # quick | full
+    contact: str = ""
+    status: str = "new"       # new | pending_payment | paid
+    payment_id: str = ""
+    amount: int = 0
+    report_json: str = ""     # заполняется лениво после оплаты
+
+
 class SmokeEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     idea: str = Field(index=True)
@@ -155,7 +174,7 @@ async def _lifespan(_app: FastAPI):
             s.exec(select(SmokeProject.id).limit(1)).first()
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
-    for name in ("index.html", "portfolio.html", "project.html", "guide-direct.html", "result.html"):
+    for name in ("index.html", "portfolio.html", "project.html", "guide-direct.html", "result.html", "report.html"):
         try:
             _static(name)
         except Exception:
@@ -312,7 +331,7 @@ async def live_test_order(data: LiveTestIn, request: Request):
         return_url = f"{base}/r/{data.check_id}?paid=1" if data.check_id else f"{base}/?paid=1"
         pid, url = await payments.create_payment(
             order_id, LIVE_TEST_PRICE, f"Создатель · живой тест идеи (заказ {order_id})",
-            return_url)
+            return_url, kind="livetest")
         with Session(engine) as s:
             order = s.get(LiveTestOrder, order_id)
             order.payment_id = pid; s.add(order); s.commit()
@@ -335,15 +354,155 @@ async def yookassa_webhook(request: Request):
     payment = await payments.fetch_payment(pid)
     if payment.get("status") != "succeeded":
         return {"ok": True}
-    order_id = (payment.get("metadata") or {}).get("order_id")
+    meta = payment.get("metadata") or {}
+    order_id = meta.get("order_id")
+    kind = meta.get("kind", "livetest")   # старые платежи до kind -- считаем livetest
+    model = {"livetest": LiveTestOrder, "report": ReportPurchase}.get(kind, LiveTestOrder)
     try:
         with Session(engine) as s:
-            order = s.get(LiveTestOrder, int(order_id)) if order_id else None
+            order = s.get(model, int(order_id)) if order_id else None
             if order and order.status != "paid":
                 order.status = "paid"; s.add(order); s.commit()
     except Exception:
         logging.getLogger(__name__).warning("webhook order update failed", exc_info=True)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Отчёт/бизнес-план: платный разбор идеи поверх уже посчитанных данных спроса
+# ---------------------------------------------------------------------------
+
+REPORT_PRICES = {
+    "quick": {"price": 990, "was": 1490, "label": "Быстрый разбор"},
+    "full": {"price": 2990, "was": 3990, "label": "Полный отчёт"},
+}
+
+
+def _report_preview(demand_data: dict) -> dict:
+    """Бесплатный тизер отчёта — из уже посчитанных данных проверки спроса,
+    без LLM. Показывается всегда, вне зависимости от оплаты."""
+    v = demand_data.get("verdict") or {}
+    overall = demand_data.get("overall") or {}
+    formulations = demand_data.get("formulations") or []
+    known = [f["count"] for f in formulations if f.get("count") is not None]
+    top = max(known) if known else None
+    comp = demand_data.get("competitors") or {}
+    return {
+        "best_count": top,
+        "verdict_text": v.get("text", ""),
+        "verdict_level": v.get("level", "unknown"),
+        "overall_value": overall.get("value"),
+        "weakest": overall.get("weakest", ""),
+        "competitors_count": len(comp.get("top") or []),
+    }
+
+
+def _best_report_purchase(s: Session, check_id: int):
+    """Самая полная ОПЛАЧЕННАЯ покупка отчёта для этой проверки спроса --
+    full перекрывает quick, если куплены оба."""
+    rows = s.exec(select(ReportPurchase).where(
+        ReportPurchase.check_id == check_id, ReportPurchase.status == "paid"
+    ).order_by(ReportPurchase.created_at.desc())).all()
+    if not rows:
+        return None
+    full = [r for r in rows if r.tier == "full"]
+    return full[0] if full else rows[0]
+
+
+class ReportIn(SQLModel):
+    check_id: Optional[int] = None
+    tier: str = "quick"
+    contact: str = ""
+
+
+@app.post("/api/report")
+async def report_order(data: ReportIn, request: Request):
+    """Заказ отчёта/бизнес-плана. Нужны данные бесплатной проверки спроса --
+    без них отчёту не на чем строиться, в отличие от живого теста."""
+    contact = (data.contact or "").strip()
+    if len(contact) < 5:
+        return JSONResponse({"ok": False, "error": "Оставьте телеграм или почту — чтобы вернуться к отчёту."}, status_code=400)
+    tier = data.tier if data.tier in REPORT_PRICES else "quick"
+    if not data.check_id:
+        return JSONResponse({"ok": False, "error": "Сначала пройдите бесплатную проверку спроса."}, status_code=400)
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, data.check_id)
+        if not rec or not rec.result_json:
+            return JSONResponse({"ok": False, "error": "Проверка спроса не найдена."}, status_code=404)
+        idea = rec.idea
+        price = REPORT_PRICES[tier]["price"]
+        order = ReportPurchase(check_id=data.check_id, idea=idea, tier=tier, contact=contact[:200],
+                               amount=price, status="pending_payment" if payments.configured() else "new")
+        s.add(order); s.commit(); s.refresh(order)
+        order_id = order.id
+    if not payments.configured():
+        return {"ok": True, "paid": False,
+                "message": "Заявка принята. Мы соберём отчёт вручную и пришлём в течение дня."}
+    try:
+        base = str(request.base_url).rstrip("/")
+        pid, url = await payments.create_payment(
+            order_id, REPORT_PRICES[tier]["price"], f"Создатель · отчёт по идее (заказ {order_id})",
+            f"{base}/report/{data.check_id}?paid=1", kind="report")
+        with Session(engine) as s:
+            order = s.get(ReportPurchase, order_id)
+            order.payment_id = pid; s.add(order); s.commit()
+        return {"ok": True, "paid": True, "confirmation_url": url}
+    except payments.PaymentsError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+
+
+@app.get("/api/report/{rid}/status")
+def report_status(rid: int):
+    """Лёгкий поллинг после редиректа с оплаты -- вебхук может прийти
+    на пару секунд позже, чем пользователь вернётся на страницу."""
+    with Session(engine) as s:
+        purchase = _best_report_purchase(s, rid)
+    return {"paid": bool(purchase), "tier": purchase.tier if purchase else None}
+
+
+@app.get("/report/{rid}", response_class=HTMLResponse)
+async def report_page(rid: int):
+    """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
+    после оплаты, генерируются лениво при первом открытии (без воркеров,
+    тот же принцип, что и во всём проекте)."""
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec or not rec.result_json:
+            return HTMLResponse(_static("index.html"), status_code=404)
+        purchase = _best_report_purchase(s, rid)
+
+    demand_data = json.loads(rec.result_json)
+    preview = _report_preview(demand_data)
+    report_sections = None
+    gen_error = ""
+
+    if purchase:
+        if not purchase.report_json:
+            try:
+                report = await generate_report(rec.idea, demand_data, purchase.tier)
+                with Session(engine) as s:
+                    fresh = s.get(ReportPurchase, purchase.id)
+                    fresh.report_json = json.dumps(report, ensure_ascii=False)
+                    s.add(fresh); s.commit(); s.refresh(fresh)
+                    purchase = fresh
+            except ReportEngineError as e:
+                gen_error = str(e)
+        if purchase.report_json:
+            report_sections = json.loads(purchase.report_json)["sections"]
+
+    tpl = _static("report.html")
+    html_out = (tpl
+        .replace("__CHECK_ID__", str(rid))
+        .replace("__IDEA__", html.escape(rec.idea))
+        .replace("__PREVIEW_JSON__", json.dumps(preview, ensure_ascii=False))
+        .replace("__REPORT_JSON__", json.dumps(report_sections, ensure_ascii=False) if report_sections else "null")
+        .replace("__UNLOCKED_TIER__", json.dumps(purchase.tier if purchase else None))
+        .replace("__ORDER_STATUS__", json.dumps(purchase.status if purchase else None))
+        .replace("__GEN_ERROR__", json.dumps(gen_error, ensure_ascii=False))
+        .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
+        .replace("__SECTIONS_JSON__", json.dumps([{"key": k, "title": t} for k, t in ALL_SECTIONS], ensure_ascii=False))
+        .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
+    return HTMLResponse(html_out)
 
 
 @app.get("/api/orders")
