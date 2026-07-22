@@ -315,7 +315,12 @@ async def live_test_order(data: LiveTestIn, request: Request):
     без ключей ЮКассы -> заявка (свяжемся вручную)."""
     contact = (data.contact or "").strip()
     if len(contact) < 5:
-        return JSONResponse({"ok": False, "error": "Оставьте телеграм или почту — чтобы нам было куда вернуться с результатом."}, status_code=400)
+        return JSONResponse({"ok": False, "error": "Оставьте почту или телефон — чтобы нам было куда вернуться с результатом."}, status_code=400)
+    # Оплата требует чек (54-ФЗ) с email/телефоном покупателя -- телеграм-хэндл
+    # тут не годится, ЮКасса отклонит платёж на API-стороне. Проверяем формат
+    # ДО похода в ЮКассу, а не после 400 из чужого API.
+    if payments.configured() and not payments.valid_receipt_contact(contact):
+        return JSONResponse({"ok": False, "error": "Для оплаты нужна почта или телефон — на них пришлём чек. Телеграм для этого не подходит."}, status_code=400)
     idea = ""
     chosen_offer_json = json.dumps(data.chosen_offer, ensure_ascii=False)[:2000] if data.chosen_offer else ""
     with Session(engine) as s:
@@ -429,7 +434,9 @@ async def report_order(data: ReportIn, request: Request):
     без них отчёту не на чем строиться, в отличие от живого теста."""
     contact = (data.contact or "").strip()
     if len(contact) < 5:
-        return JSONResponse({"ok": False, "error": "Оставьте телеграм или почту — чтобы вернуться к отчёту."}, status_code=400)
+        return JSONResponse({"ok": False, "error": "Оставьте почту или телефон — чтобы вернуться к отчёту."}, status_code=400)
+    if payments.configured() and not payments.valid_receipt_contact(contact):
+        return JSONResponse({"ok": False, "error": "Для оплаты нужна почта или телефон — на них пришлём чек. Телеграм для этого не подходит."}, status_code=400)
     tier = data.tier if data.tier in REPORT_PRICES else "quick"
     if not data.check_id:
         return JSONResponse({"ok": False, "error": "Сначала пройдите бесплатную проверку спроса."}, status_code=400)

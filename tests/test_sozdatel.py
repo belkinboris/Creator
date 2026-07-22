@@ -1118,8 +1118,17 @@ class TestResultFunnel:
     def test_steps_without_data_excluded_from_order(self):
         """Пустые scores/competitors не рисуют шаг вовсе -- STEP_ORDER их не включает."""
         text = client.get(f"/r/{self._make_check(scores=[], overall=None, competitors={'found': None, 'top': []})}").text
-        assert "hasScores ? 2 : null" in text            # логика исключения шага в разметке присутствует
-        assert "hasComp ? 3 : null" in text
+        assert "hasComp ? 2 : null" in text            # логика исключения шага в разметке присутствует
+        assert "hasScores ? 3 : null" in text
+
+    def test_competitors_named_clearly_and_come_before_score(self):
+        """По кастдев-фидбеку: «Кто уже отвечает на этот спрос» -- непонятное
+        имя раздела, конкурентов надо смотреть раньше синтезирующей оценки,
+        а не между сырым спросом и ей."""
+        text = client.get(f"/r/{self._make_check()}").text
+        assert "Кто уже отвечает на этот спрос" not in text
+        assert "Конкуренты" in text
+        assert text.index("Конкуренты") < text.index("Оценка идеи")
 
 
 class TestPayments:
@@ -1133,7 +1142,7 @@ class TestPayments:
             return "pay_x", "https://yookassa.example/pay"
         monkeypatch.setattr(m.payments, "configured", lambda: True)
         monkeypatch.setattr(m.payments, "create_payment", fake_create_payment)
-        r = client.post("/api/live-test", json={"contact": "@no_check_id"})
+        r = client.post("/api/live-test", json={"contact": "no_check_id@example.com"})
         assert r.status_code == 200
         assert captured["return_url"].endswith("/?paid=1")
         assert "/r/" not in captured["return_url"]
@@ -1146,7 +1155,7 @@ class TestPayments:
             return "pay_y", "https://yookassa.example/pay"
         monkeypatch.setattr(m.payments, "configured", lambda: True)
         monkeypatch.setattr(m.payments, "create_payment", fake_create_payment)
-        r = client.post("/api/live-test", json={"check_id": 42, "contact": "@with_check_id"})
+        r = client.post("/api/live-test", json={"check_id": 42, "contact": "with_check_id@example.com"})
         assert r.status_code == 200
         assert captured["return_url"].endswith("/r/42?paid=1")
 
@@ -1177,6 +1186,14 @@ class TestPayments:
         assert receipt["items"][0]["vat_code"] == 1
         assert receipt["customer"]["email"] == "user@example.com"
 
+    def test_valid_receipt_contact_accepts_email_and_phone_rejects_telegram(self):
+        from app.payments import valid_receipt_contact
+        assert valid_receipt_contact("user@example.com") is True
+        assert valid_receipt_contact("+7 999 123-45-67") is True
+        assert valid_receipt_contact("@telegram_handle") is False
+        assert valid_receipt_contact("просто текст") is False
+        assert valid_receipt_contact("") is False
+
     def test_receipt_without_email_or_phone_omits_customer(self):
         """contact = телеграм-хэндл -- чек всё равно валиден (есть items),
         просто без адресата доставки, который ЮКасса не примет как email/phone."""
@@ -1188,6 +1205,45 @@ class TestPayments:
         asyncio.run(create_payment(7, 990, "Создатель · отчёт", "https://x/report/1?paid=1",
                                    contact="@telegram_handle", _post=post))
         assert "customer" not in captured["receipt"]
+
+    def test_live_test_rejects_telegram_only_contact_when_payments_configured(self, monkeypatch):
+        """Регрессия: этот магазин ЮКассы отклоняет платёж без customer.email
+        /customer.phone в чеке -- значит телеграм-хэндл больше не годится для
+        платного заказа, и мы обязаны сказать об этом ДО похода в ЮКассу,
+        а не вернуть пользователю 502 после чужого 400."""
+        import app.main as m
+        monkeypatch.setattr(m.payments, "configured", lambda: True)
+        async def should_not_be_called(*a, **kw):
+            raise AssertionError("create_payment не должен вызываться с невалидным контактом")
+        monkeypatch.setattr(m.payments, "create_payment", should_not_be_called)
+        r = client.post("/api/live-test", json={"contact": "@telegram_handle"})
+        assert r.status_code == 400
+        assert "почта или телефон" in r.json()["error"].lower()
+
+    def test_live_test_telegram_contact_ok_without_payments_configured(self, monkeypatch):
+        """Без настроенной кассы -- заявка без оплаты, чек не создаётся,
+        телеграм остаётся нормальным способом связи."""
+        import app.main as m
+        monkeypatch.setattr(m.payments, "configured", lambda: False)
+        r = client.post("/api/live-test", json={"contact": "@telegram_handle"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+
+    def test_report_rejects_telegram_only_contact_when_payments_configured(self, monkeypatch):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест", "count": 100}],
+                    "verdict": {"level": "unknown", "text": ""}, "competitors": {"found": None, "top": []},
+                    "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея достаточно длинная для проверки контакта"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        monkeypatch.setattr(m.payments, "configured", lambda: True)
+        r = client.post("/api/report", json={"check_id": rid, "tier": "quick", "contact": "@telegram_handle"})
+        assert r.status_code == 400
+        assert "почта или телефон" in r.json()["error"].lower()
 
     def test_webhook_marks_order_paid_only_after_verification(self, monkeypatch):
         import app.main as m
@@ -1278,6 +1334,27 @@ class TestSharpenPublic:
         text = client.get(f"/r/{rid}").text
         assert "/api/sharpen" in text
         assert "Заострим идею" in text
+
+    def test_sharpen_cards_render_audience_and_labeled_pain(self):
+        """По кастдев-фидбеку: варианты заострения были неразличимы -- eyebrow
+        (аудитория) уже генерируется offer_engine, но раньше не рендерился;
+        боль теперь явно подписана, а не голым текстом под заголовком."""
+        text = client.get(f"/r/{self._make_check_for_sharpen()}").text
+        assert "o.eyebrow" in text and "Для кого:" in text
+        assert "Боль:" in text
+
+    def _make_check_for_sharpen(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 1}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""}, "competitors": {"found": None, "top": []},
+                    "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand", json={"idea": "Идея для проверки карточек заострения"}).json()["id"]
+        finally:
+            m.check_demand = orig
 
 
 class TestReportFlow:

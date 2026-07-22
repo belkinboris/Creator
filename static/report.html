@@ -279,13 +279,13 @@ function pricingHTML(suffix){
     return `<h3>Докупить <span class="hl">полный отчёт</span></h3>
       <p>У вас есть быстрый разбор. Полный отчёт добавляет аудиторию, финансовую модель, риски и план запуска.</p>
       <div class="tiers">${tierCard('full', suffix)}</div>
-      <div class="contact-row"><input id="contact-${suffix}" placeholder="Телеграм или почта — куда вернуться с отчётом"></div>
+      <div class="contact-row"><input id="contact-${suffix}" placeholder="Почта или телефон — на них пришлём чек и отчёт"></div>
       <p class="err" id="order-err-${suffix}" role="alert"></p>`;
   }
   return `<h3>Получите <span class="hl">отчёт по идее</span></h3>
     <p>Не общие слова — разбор на данных, которые мы уже честно посчитали на бесплатной проверке спроса.</p>
     <div class="tiers">${tierCard('quick', suffix)}${tierCard('full', suffix)}</div>
-    <div class="contact-row"><input id="contact-${suffix}" placeholder="Телеграм или почта — куда вернуться с отчётом"></div>
+    <div class="contact-row"><input id="contact-${suffix}" placeholder="Почта или телефон — на них пришлём чек и отчёт"></div>
     <p class="err" id="order-err-${suffix}" role="alert"></p>`;
 }
 if (UNLOCKED_TIER === 'full') {

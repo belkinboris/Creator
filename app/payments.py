@@ -45,6 +45,16 @@ def _auth() -> tuple[str, str]:
     return (os.environ.get("YOOKASSA_SHOP_ID", ""), os.environ.get("YOOKASSA_SECRET_KEY", ""))
 
 
+def valid_receipt_contact(contact: str) -> bool:
+    """ЮКасса на этом магазине отклоняет платёж целиком без customer.email
+    или customer.phone в чеке (см. _receipt) -- значит "телеграм или почта"
+    для платных заказов больше не любой текст ≥5 символов, а именно
+    email/телефон. Вызывающая сторона проверяет это ДО create_payment,
+    чтобы вернуть понятную ошибку, а не 502 после неудачного похода в API."""
+    contact = (contact or "").strip()
+    return bool(_EMAIL_RE.match(contact) or _PHONE_RE.match(contact))
+
+
 def _receipt(amount_rub: int, description: str, contact: str) -> dict:
     """Чек для одной услуги. contact у нас — «телеграм или почта», без
     жёсткого формата: если похоже на email/телефон, кладём в customer (тогда

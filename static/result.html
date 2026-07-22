@@ -118,8 +118,9 @@
   .sharp-card h4{font-size:16px;font-weight:600;letter-spacing:-.01em}
   .sharp-card h4 em{font-style:normal;background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
   .sharp-card p{color:var(--muted);font-size:14px}
+  .sharp-audience{color:var(--ink) !important;font-size:14px}
+  .sharp-audience b,.sharp-pain b{font-weight:600}
   .sharp-pain{color:var(--ink) !important}
-  .sharp-pain b{font-weight:600}
   .sharp-pick{appearance:none;cursor:pointer;border-radius:6px;margin-top:auto;align-self:flex-start;
     background:transparent;border:1px solid var(--line);color:var(--ink);
     font:500 14px "IBM Plex Sans";padding:9px 14px}
@@ -206,8 +207,20 @@
 
   <section class="step" data-step="2" id="step-2">
     <div class="step-summary" onclick="reopen(2)">
-      <span class="step-summary-title"><span class="ok-mark">✓</span>Оценка идеи</span>
+      <span class="step-summary-title"><span class="ok-mark">✓</span>Конкуренты</span>
       <span class="step-summary-detail" id="sum-2"></span>
+    </div>
+    <div class="step-body">
+      <div class="step-title">Конкуренты</div>
+      <div id="comps"></div>
+      <div class="step-next"><button class="btn" type="button" onclick="advance(2)" id="step2-next"></button></div>
+    </div>
+  </section>
+
+  <section class="step" data-step="3" id="step-3">
+    <div class="step-summary" onclick="reopen(3)">
+      <span class="step-summary-title"><span class="ok-mark">✓</span>Оценка идеи</span>
+      <span class="step-summary-detail" id="sum-3"></span>
     </div>
     <div class="step-body">
       <div class="step-title">Оценка идеи</div>
@@ -217,19 +230,7 @@
       </div>
       <button class="detail-toggle" id="score-detail-toggle" type="button">Почему такая оценка? →</button>
       <div class="score-grid" id="scores" hidden></div>
-      <div class="step-next"><button class="btn" type="button" onclick="advance(2)" id="step2-next"></button></div>
-    </div>
-  </section>
-
-  <section class="step" data-step="3" id="step-3">
-    <div class="step-summary" onclick="reopen(3)">
-      <span class="step-summary-title"><span class="ok-mark">✓</span>Кто уже отвечает на этот спрос</span>
-      <span class="step-summary-detail" id="sum-3"></span>
-    </div>
-    <div class="step-body">
-      <div class="step-title">Кто уже отвечает на этот спрос</div>
-      <div id="comps"></div>
-      <div class="step-next"><button class="btn" type="button" onclick="advance(3)">Дальше — заострим идею →</button></div>
+      <div class="step-next"><button class="btn" type="button" onclick="advance(3)" id="step3-next"></button></div>
     </div>
   </section>
 
@@ -258,7 +259,7 @@
       <h3>Дальше — соберём страницу и <span class="hl">скажем, приносит ли идея деньги</span></h3>
       <p>Полностью соберём проверочную страницу под вашу идею — дизайн, тексты, форма заявки — и сами запустим рекламу в Яндексе по <a href="/guide/direct">проверенной схеме</a>, которая обходит типичные ошибки новичков. Через пару недель у вас будут не догадки, а реальные цифры: сколько людей готовы оставить заявку на вашу идею.</p>
       <p class="chosen-note" id="chosen-note"></p>
-      <input id="contact" placeholder="Телеграм или почта — куда вернуться с результатом">
+      <input id="contact" placeholder="Почта или телефон — на них пришлём чек и результат">
       <button class="btn" id="order-btn" type="button"></button>
       <p class="err" id="order-err" role="alert"></p>
       <p class="okmsg" id="order-ok"></p>
@@ -347,8 +348,8 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
 
 // --- Лента: один активный фокус, шаги без данных пропускаются целиком ---
 
-const ARRIVAL = {2: 'оценка идеи', 3: 'кто уже на этом рынке', 4: 'заострим идею', 5: 'живой тест'};
-const STEP_ORDER = [1, hasScores ? 2 : null, hasComp ? 3 : null, 4, 5].filter(Boolean);
+const ARRIVAL = {2: 'конкуренты', 3: 'оценка идеи', 4: 'заострим идею', 5: 'живой тест'};
+const STEP_ORDER = [1, hasComp ? 2 : null, hasScores ? 3 : null, 4, 5].filter(Boolean);
 
 function nextLabel(afterStep){
   const pos = STEP_ORDER.indexOf(afterStep);
@@ -356,7 +357,8 @@ function nextLabel(afterStep){
   return next ? `Дальше — ${ARRIVAL[next]} →` : 'Дальше →';
 }
 document.getElementById('step1-next').textContent = nextLabel(1);
-if (hasScores) document.getElementById('step2-next').textContent = nextLabel(2);
+if (hasComp) document.getElementById('step2-next').textContent = nextLabel(2);
+if (hasScores) document.getElementById('step3-next').textContent = nextLabel(3);
 
 function summarizeStep1(){
   const known = (DATA.formulations||[]).filter(f => f.count !== null);
@@ -365,13 +367,13 @@ function summarizeStep1(){
   return top !== null ? `${fmt(top)} запросов/мес — ${label}` : label;
 }
 function summarizeStep2(){
-  const ov = DATA.overall;
-  return ov && ov.value !== null ? `${ov.value}/10${ov.weakest ? ', слабое место — ' + ov.weakest.toLowerCase() : ''}` : '';
-}
-function summarizeStep3(){
   if (!hasComp) return '';
   const names = comp.top.slice(0, 2).map(c => serviceName(c.domain)).join(', ');
   return comp.found ? `${fmt(comp.found)} страниц, топ — ${names}` : `топ — ${names}`;
+}
+function summarizeStep3(){
+  const ov = DATA.overall;
+  return ov && ov.value !== null ? `${ov.value}/10${ov.weakest ? ', слабое место — ' + ov.weakest.toLowerCase() : ''}` : '';
 }
 
 function openStep(n){
@@ -432,8 +434,9 @@ function renderSharpen(offers){
     <div class="sharp-card" data-i="${i}">
       <div class="sharp-angle">${escapeHtml(o.angle || '')}</div>
       <h4>${o.h1 || ''}</h4>
+      ${o.eyebrow ? `<p class="sharp-audience"><b>Для кого:</b> ${escapeHtml(o.eyebrow)}</p>` : ''}
       <p>${escapeHtml(o.sub || '')}</p>
-      ${o.pains && o.pains[0] ? `<p class="sharp-pain"><b>${escapeHtml(o.pains[0].h2 || '')}</b> — ${escapeHtml(o.pains[0].p || '')}</p>` : ''}
+      ${o.pains && o.pains[0] ? `<p class="sharp-pain"><b>Боль:</b> ${escapeHtml(o.pains[0].h2 || '')} — ${escapeHtml(o.pains[0].p || '')}</p>` : ''}
       <button class="sharp-pick" type="button">Выбрать этот вариант</button>
     </div>`).join('');
   sharpenCards.classList.add('show');
