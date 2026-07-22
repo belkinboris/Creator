@@ -12,11 +12,14 @@
   quick — 4 секции + 2 риска, быстрый разбор
   full  — все 8 секций + 3 риска, подробно
 
-Модель: форсируем Anthropic/Claude (см. _call_llm) вне зависимости от
-LLM_PROVIDER остального проекта -- отчёт платный, и здесь важно качество
-аналитики, а не скорость/цена, как в бесплатных этапах. При отсутствии
-ANTHROPIC_API_KEY -- тихий откат на дефолтного провайдера (деградация,
-не отказ фичи).
+Модель: НЕ Anthropic/Claude -- проект российский, обработка персональных
+данных не может уезжать за границу (152-ФЗ о трансграничной передаче), и
+Claude API в любом случае заблокирован Роскомнадзором для конечных
+пользователей в РФ. Вместо смены провайдера форсируем более сильную модель
+внутри уже используемого Yandex AI Studio (см. _call_llm) -- YandexGPT 5.1
+Pro вместо дефолтного дешёвого DeepSeek Flash остального проекта: отчёт
+платный, здесь важно качество аналитики, а не скорость/цена бесплатных
+этапов. Вся обработка остаётся на инфраструктуре Yandex Cloud.
 
 Как offer_engine.py: честный LLM-вызов, строго типизированный и
 провалидированный выход, детерминированной логики здесь нет.
@@ -37,6 +40,12 @@ logger = logging.getLogger(__name__)
 MAX_IDEA_CHARS = 2000
 MAX_TOKENS_QUICK = 4000
 MAX_TOKENS_FULL = 12000
+
+# YandexGPT 5.1 Pro (версия "rc" в каталоге Yandex AI Studio) -- заметно
+# сильнее дефолтного deepseek-v4-flash остального проекта, остаётся на
+# инфраструктуре Yandex Cloud. Один env var -- можно поменять без деплоя,
+# если Yandex переведёт "rc" на другую модель.
+SOZDATEL_REPORT_MODEL = os.environ.get("SOZDATEL_REPORT_MODEL", "yandexgpt/rc")
 
 # (ключ, заголовок) — порядок фиксирован, quick берёт первые 4.
 ALL_SECTIONS = [
@@ -165,16 +174,12 @@ def _validate(data: dict, tier: str) -> dict:
 
 
 async def _call_llm(system: str, user: str, max_tokens: int, *, _post=None) -> str:
-    """Форсируем Anthropic/Claude для отчёта, если ключ настроен -- платный
-    продукт, где качество текста определяет, оправдана ли цена; остальной
-    проект может работать на более дешёвом Yandex/DeepSeek. Нет
-    ANTHROPIC_API_KEY -- используем дефолтного провайдера проекта (деградация,
-    не отказ всей фичи). Решение принимается ДО вызова, не через try/except
-    по тексту ошибки -- предсказуемее и тестируемее."""
-    provider = "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else None
-    if provider is None:
-        logger.info("report engine: ANTHROPIC_API_KEY не задан, используем дефолтного провайдера")
-    return await llm_adapter.call(system, user, max_tokens, provider=provider, _post=_post)
+    """Платный отчёт использует более сильную модель Yandex AI Studio, чем
+    дефолтный дешёвый DeepSeek Flash остального проекта -- качество текста
+    определяет, оправдана ли цена. Провайдер не переопределяем (остаётся
+    "yandex" / LLM_PROVIDER) -- Anthropic/Claude для этого проекта не
+    используется в принципе (см. докстринг модуля)."""
+    return await llm_adapter.call(system, user, max_tokens, model=SOZDATEL_REPORT_MODEL, _post=_post)
 
 
 async def generate_report(idea: str, demand_data: dict, tier: str = "quick",

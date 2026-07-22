@@ -60,11 +60,11 @@ def _anthropic_payload(system: str, user: str, max_tokens: int) -> dict:
     }
 
 
-def _yandex_payload(system: str, user: str, max_tokens: int) -> dict:
+def _yandex_payload(system: str, user: str, max_tokens: int, *, model: str | None = None) -> dict:
     if not YANDEX_FOLDER_ID:
         raise LLMAdapterError("Сервер не настроен: не задан YANDEX_FOLDER_ID.")
     return {
-        "model": f"gpt://{YANDEX_FOLDER_ID}/{YANDEX_MODEL}",
+        "model": f"gpt://{YANDEX_FOLDER_ID}/{model or YANDEX_MODEL}",
         "instructions": system + NON_CLAUDE_HARDENING,
         "input": user,
         "max_output_tokens": max_tokens + YANDEX_THINKING_BUDGET,
@@ -89,7 +89,8 @@ def _extract_yandex_text(data: dict) -> str:
     return "\n".join(parts)
 
 
-async def call(system: str, user: str, max_tokens: int, *, provider: str | None = None, _post=None) -> str:
+async def call(system: str, user: str, max_tokens: int, *, provider: str | None = None,
+                model: str | None = None, _post=None) -> str:
     """
     Единая точка вызова LLM для всего приложения.
 
@@ -98,9 +99,15 @@ async def call(system: str, user: str, max_tokens: int, *, provider: str | None 
     не транспорт).
 
     provider -- необязательный оверрайд глобального LLM_PROVIDER для одного
-    конкретного вызова (например, report_engine.py форсирует "anthropic"
-    для платного отчёта, где качество текста определяет ценность покупки,
-    даже если весь остальной проект работает на более дешёвом Yandex/DeepSeek).
+    конкретного вызова. Anthropic/Claude оставлен как путь отката для сценариев
+    без ограничений на трансграничную передачу данных (см. комментарий вверху
+    файла) -- для Создателя не используется: РФ-проект, вся обработка должна
+    оставаться на инфраструктуре Yandex Cloud (152-ФЗ, Claude заблокирован
+    Роскомнадзором).
+
+    model -- оверрайд YANDEX_MODEL для одного конкретного вызова (например,
+    report_engine.py платного отчёта использует более сильную модель Yandex
+    AI Studio, чем дефолтный дешёвый DeepSeek Flash всего остального проекта).
 
     _post(provider, payload) -> raw_response_dict -- инъекция для тестов:
     подставляет то, что вернул бы соответствующий API, без сети.
@@ -133,7 +140,7 @@ async def call(system: str, user: str, max_tokens: int, *, provider: str | None 
         api_key = os.environ.get("YANDEX_API_KEY")
         if not api_key and _post is None:
             raise LLMAdapterError("Сервер не настроен: не задан YANDEX_API_KEY.")
-        payload = _yandex_payload(system, user, max_tokens)
+        payload = _yandex_payload(system, user, max_tokens, model=model)
         if _post is not None:
             data = await _post(provider, payload)
         else:
