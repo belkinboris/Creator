@@ -2335,3 +2335,28 @@ class TestCustomerDevPass:
         чернильного веса, отчёт не второсортная опция."""
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
         assert '<a class="btn" href="/report/__CHECK_ID__">Посмотреть отчёт</a>' in text
+
+
+class TestFunnelCopyClarity:
+    """Кастдев-фидбек: «живой тест» на главной непонятен без контекста, шаги
+    6-8 звучат как обещание того, чего продукт ещё не делает, «отчёт» не
+    доносит ценность так, как «бизнес-план»."""
+
+    def test_homepage_step_3_4_no_longer_say_bare_live_test(self):
+        home = client.get("/").text
+        assert "тест на реальных людях" in home
+        assert '<span class="tag paid-tag">живой тест</span>' not in home
+        assert "счётчиком событий" not in home   # жаргон снят
+
+    def test_homepage_roadmap_steps_tagged_as_future(self):
+        home = client.get("/").text
+        assert home.count("в Создателе 2.0") == 3   # шаги 6, 7, 8
+        assert "скрипт разговора" not in home        # продукт этого не делает
+
+    def test_homepage_mentions_business_plan_alt_path(self):
+        home = client.get("/").text
+        assert "бизнес-план" in home.lower()
+
+    def test_full_report_tier_relabeled_business_plan(self):
+        import app.main as m
+        assert m.REPORT_PRICES["full"]["label"] == "Бизнес-план"
