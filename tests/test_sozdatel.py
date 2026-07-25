@@ -2162,6 +2162,71 @@ class TestSaveCheckToAccount:
         assert 'id="checks-block"' in text and "d.checks" in text
 
 
+class TestProjectPageCustomerAccess:
+    """/p/{id} стало доступно из кабинета покупателя (см. _smoke_card в
+    /api/account/me) -- цифры проекта не должны требовать секретный ключ
+    владельца у обычного покупателя, только у самого владельца."""
+
+    def _issue_session(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_proj_" + contact, contact=contact))
+            s.commit()
+        r = client.get(f"/account/verify?token=tok_proj_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 307)
+        return r.cookies.get("sozdatel_session")
+
+    def test_owner_key_still_works(self):
+        client.cookies.clear()
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="pacc_owner")})
+        assert client.get("/api/verdict/pacc_owner", headers=OWNER).status_code == 200
+        assert client.get("/api/series/pacc_owner", headers=OWNER).status_code == 200
+
+    def test_customer_session_grants_access_to_own_project(self):
+        client.cookies.clear()
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="pacc_mine")})
+        client.patch("/api/projects/pacc_mine/contact", headers=OWNER,
+                     json={"contact": "owner_of_project@example.com"})
+        token = self._issue_session("owner_of_project@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            assert client.get("/api/verdict/pacc_mine").status_code == 200
+            assert client.get("/api/series/pacc_mine").status_code == 200
+        finally:
+            client.cookies.clear()
+
+    def test_customer_session_denied_for_someone_elses_project(self):
+        client.cookies.clear()
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="pacc_other")})
+        client.patch("/api/projects/pacc_other/contact", headers=OWNER,
+                     json={"contact": "real_owner@example.com"})
+        token = self._issue_session("stranger@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            assert client.get("/api/verdict/pacc_other").status_code == 401
+        finally:
+            client.cookies.clear()
+
+    def test_no_key_no_session_still_401(self):
+        client.cookies.clear()
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="pacc_anon")})
+        assert client.get("/api/verdict/pacc_anon").status_code == 401
+        assert client.get("/api/series/pacc_anon").status_code == 401
+
+    def test_unknown_project_404_regardless_of_key(self):
+        assert client.get("/api/series/pacc_does_not_exist", headers=OWNER).status_code == 404
+
+    def test_project_page_tries_session_before_prompting_for_owner_key(self):
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        assert "authedFetch" in text
+        assert "authedFetch(`/api/verdict/${IDEA_ID}`)" in text
+        assert "authedFetch(`/api/series/${IDEA_ID}`)" in text
+
+
 class TestAutoLaunchUiWiring:
     """Статическая проверка, что новые состояния заказа (запущено само /
     нужно запустить вручную) отражены в JS /desk и /account, а не только

@@ -249,6 +249,18 @@ def _check_owner(request: Request) -> None:
         raise HTTPException(401, "Нужен ключ владельца (X-Owner-Key).")
 
 
+def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
+    """Доступ к цифрам проекта на /p/{id}: владелец по ключу (как везде на
+    /desk), либо покупатель по своей сессии кабинета -- /p/ теперь открыт
+    и из /account, а не только из /desk, значит нельзя требовать секретный
+    ключ владельца у обычного покупателя."""
+    provided = request.headers.get("X-Owner-Key") or request.query_params.get("key") or ""
+    if OWNER_KEY and provided == OWNER_KEY:
+        return True
+    contact = _current_contact(request)
+    return bool(contact and proj.contact and contact == proj.contact)
+
+
 # ---------------------------------------------------------------------------
 # Этап ⓪: идея → офферы
 # ---------------------------------------------------------------------------
@@ -821,11 +833,12 @@ def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
 
 @app.get("/api/verdict/{idea_id}")
 def verdict(idea_id: str, request: Request):
-    _check_owner(request)
     with Session(engine) as s:
         proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
         if proj is None:
             raise HTTPException(404, "идея не найдена")
+        if not _project_access_ok(request, proj):
+            raise HTTPException(401, "Нужен ключ владельца или вход в кабинет с этим проектом.")
         views = len(s.exec(select(SmokeEvent.id).where(
             SmokeEvent.idea == idea_id, SmokeEvent.event == "page_view")).all())
         leads_rows = s.exec(select(SmokeEvent.contact, SmokeEvent.created_at).where(
@@ -847,12 +860,14 @@ def verdict(idea_id: str, request: Request):
 @app.get("/api/series/{idea_id}")
 def series(idea_id: str, request: Request):
     """Визиты/заявки по дням за последние 14 дней — для графика на /p/{id}."""
-    _check_owner(request)
     from collections import defaultdict
     from datetime import timedelta
     with Session(engine) as s:
-        if s.exec(select(SmokeProject.id).where(SmokeProject.idea_id == idea_id)).first() is None:
+        proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
+        if proj is None:
             raise HTTPException(404, "идея не найдена")
+        if not _project_access_ok(request, proj):
+            raise HTTPException(401, "Нужен ключ владельца или вход в кабинет с этим проектом.")
         since = utcnow() - timedelta(days=14)
         rows = s.exec(select(SmokeEvent.created_at, SmokeEvent.event).where(
             SmokeEvent.idea == idea_id, SmokeEvent.created_at >= since)).all()

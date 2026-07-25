@@ -194,11 +194,22 @@
 const IDEA_ID = "{{IDEA_ID}}";
 const STAGES = ["Идея","Спрос","Проверочная страница","Реклама","Заявки","Первые продажи","Повторяемость","Удержание"];
 const VERDICT_CLASS = {"СИГНАЛ ЕСТЬ":"ok","СПРОСА НЕТ":"bad","СЕРАЯ ЗОНА":"warn","РАНО СУДИТЬ":""};
-let OWNER_KEY = sessionStorage === undefined ? "" : ""; /* ключ живёт в переменной */
+let OWNER_KEY = ""; /* ключ живёт в переменной, только для владельца */
 function ask(){ if(!OWNER_KEY) OWNER_KEY = prompt("Ключ владельца:") || ""; return OWNER_KEY; }
+// Покупатель попадает сюда из своего кабинета и видит проект по сессии
+// кабинета (куки) -- без ключа. Ключ владельца спрашиваем только если
+// сначала не получилось (например, страницу открыли из /desk).
+async function authedFetch(path){
+  let r = await fetch(path);
+  if (r.status === 401) {
+    const sep = path.includes('?') ? '&' : '?';
+    r = await fetch(`${path}${sep}key=${encodeURIComponent(ask())}`);
+  }
+  return r;
+}
 async function load(){
-  const r = await fetch(`/api/verdict/${IDEA_ID}?key=${encodeURIComponent(ask())}`);
-  if(r.status === 401){ OWNER_KEY=""; document.getElementById("verdict").textContent="НЕВЕРНЫЙ КЛЮЧ"; return; }
+  const r = await authedFetch(`/api/verdict/${IDEA_ID}`);
+  if(r.status === 401){ OWNER_KEY=""; document.getElementById("verdict").textContent="НЕТ ДОСТУПА"; return; }
   const d = await r.json();
   views.textContent = d.views; target.textContent = d.target;
   leads.textContent = d.leads;
@@ -235,7 +246,7 @@ load();
 /* График по дням: чистый canvas, без библиотек */
 async function drawChart(){
   try{
-    const r = await fetch(`/api/series/${IDEA_ID}?key=${encodeURIComponent(OWNER_KEY)}`);
+    const r = await authedFetch(`/api/series/${IDEA_ID}`);
     if(!r.ok) return;
     const {days} = await r.json();
     const c = document.getElementById("chart");
