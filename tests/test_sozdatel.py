@@ -963,6 +963,26 @@ class TestOverallAndStats:
         assert out["overall"]["value"] == round((8 + 3 + 8 + 7) / 4)
         assert out["overall"]["weakest"] == "Конкуренция"
 
+    def test_overall_capped_by_weak_demand(self):
+        """Спрос -- ворота: почти нулевая частотность не должна тонуть в
+        среднем с тремя хорошими LLM-шкалами и выдавать обманчиво высокий балл."""
+        score_json = json.dumps({"competition": 9, "timing": 9, "execution": 9,
+            "notes": {"competition": "", "timing": "", "execution": ""}}, ensure_ascii=False)
+        async def post(provider, payload):
+            if provider == "yandex":
+                if "шкалам" in payload["instructions"]:
+                    return _yandex_response(score_json)
+                return _yandex_response(json.dumps(["a b", "c d", "e f"]))
+            if provider == "wordstat":
+                return {"totalCount": 1}   # спрос = 1 -- почти никто не ищет
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Достаточно длинная идея с почти нулевым спросом", _post=post))
+        assert out["scores"][0]["value"] == 1
+        naive_avg = round((1 + 9 + 9 + 9) / 4)   # было бы 7 без ворот -- вводит в заблуждение
+        assert naive_avg == 7
+        assert out["overall"]["value"] == 1
+        assert out["overall"]["weakest"] == "Спрос"
+
     def test_demand_check_persisted_and_stats(self):
         import app.main as m
         async def fake_check(idea):
@@ -1469,6 +1489,35 @@ class TestReportFlow:
         text = client.get(f"/report/{rid}").text
         assert "t.ru" in text
         assert "Спрос есть" in text
+
+    def test_free_preview_is_analysis_not_a_stat_block(self):
+        """Кастдев-фидбек: крупные цифры без разбора не убеждают -- тизер
+        должен читаться как текстовый анализ (заметки LLM по шкалам, уже
+        посчитанные на бесплатном шаге), а не витрина из голых чисел."""
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест фраза", "count": 4200}],
+                    "best_phrase": "тест фраза",
+                    "verdict": {"level": "strong", "text": "Спрос есть"},
+                    "competitors": {"found": 100, "top": [{"title": "Т", "domain": "t.ru"}]},
+                    "scores": [
+                        {"key": "demand", "label": "Спрос", "value": 8, "note": ""},
+                        {"key": "competition", "label": "Конкуренция", "value": 6, "note": "рынок не забит"},
+                        {"key": "timing", "label": "Своевременность", "value": 7, "note": "спрос растёт сейчас"},
+                        {"key": "execution", "label": "Реализуемость", "value": 9, "note": "можно запустить за пару недель"},
+                    ],
+                    "overall": {"value": 7, "weakest": "Конкуренция"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея достаточно длинная для анализа тизера"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        text = client.get(f"/report/{rid}").text
+        assert 'class="stat"' not in text          # старая витрина из цифр убрана
+        assert "рынок не забит" in text
+        assert "спрос растёт сейчас" in text
+        assert "можно запустить за пару недель" in text
 
     def test_pricing_shown_near_top_not_only_at_bottom(self):
         """Цены не только в самом низу заблюренного отчёта -- дублируются
@@ -2090,7 +2139,7 @@ class TestCustomerDevPass:
         уместен как шаг воронки, но на странице отчёта после того, как идею
         уже заострили, звучит как отказ от уже принятого решения купить."""
         text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
-        assert "p.verdict_level !== 'weak'" in text
+        assert "p.verdict_level === 'weak'" in text
 
     def test_alt_path_report_button_is_ink_not_ghost(self):
         """"Посмотреть отчёт" был btn-ghost -- по фидбеку поднят до полного

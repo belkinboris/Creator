@@ -447,7 +447,10 @@ REPORT_PRICES = {
 
 def _report_preview(demand_data: dict) -> dict:
     """Бесплатный тизер отчёта — из уже посчитанных данных проверки спроса,
-    без LLM. Показывается всегда, вне зависимости от оплаты."""
+    без новых вызовов LLM (заметки по шкалам уже сгенерированы бесплатным
+    шагом check_demand). Показывается всегда, вне зависимости от оплаты.
+    Текстовый разбор, а не витрина из голых цифр -- см. кастдев-фидбек
+    (dimeadozen как ориентир на содержательный анализ, не «воду»)."""
     v = demand_data.get("verdict") or {}
     overall = demand_data.get("overall") or {}
     formulations = demand_data.get("formulations") or []
@@ -455,6 +458,7 @@ def _report_preview(demand_data: dict) -> dict:
     top = max(known) if known else None
     comp = demand_data.get("competitors") or {}
     top_names = [c.get("domain") or c.get("title") or "" for c in (comp.get("top") or [])[:3]]
+    notes = {s["key"]: s.get("note", "") for s in (demand_data.get("scores") or [])}
     return {
         "best_count": top,
         "verdict_text": v.get("text", ""),
@@ -463,6 +467,9 @@ def _report_preview(demand_data: dict) -> dict:
         "weakest": overall.get("weakest", ""),
         "competitors_count": len(comp.get("top") or []),
         "top_competitor_names": [n for n in top_names if n],
+        "competition_note": notes.get("competition", ""),
+        "timing_note": notes.get("timing", ""),
+        "execution_note": notes.get("execution", ""),
     }
 
 
