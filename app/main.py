@@ -127,6 +127,9 @@ class DemandCheck(SQLModel, table=True):
     idea: str = ""
     best_count: Optional[int] = None
     result_json: str = ""
+    # Пусто, пока человек не привязал бесплатную проверку к кабинету -- см.
+    # POST /api/demand/{id}/save и автопривязку на /r/ для уже вошедших.
+    contact: str = ""
 
 
 class LiveTestOrder(SQLModel, table=True):
@@ -200,6 +203,7 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS idea_id VARCHAR"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -293,8 +297,11 @@ async def demand_check(data: IdeaIn, request: Request):
     check_id = None
     try:  # сохранение не должно уметь ломать ответ пользователю
         known = [f["count"] for f in result["formulations"] if f["count"] is not None]
+        # Уже вошедший в кабинет человек получает автопривязку без лишних
+        # действий -- проверка сразу видна в /account, без отдельного "Сохранить".
+        contact = _current_contact(request) or ""
         rec = DemandCheck(idea=data.idea[:300], best_count=max(known) if known else None,
-                          result_json=json.dumps(result, ensure_ascii=False))
+                          result_json=json.dumps(result, ensure_ascii=False), contact=contact)
         with Session(engine) as s:
             s.add(rec); s.commit(); s.refresh(rec)
             check_id = rec.id
@@ -338,7 +345,8 @@ def result_page(rid: int):
         .replace("__PAY_ENABLED__", "true" if payments.configured() else "false")
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__IDEA_JSON__", idea_json)
-        .replace("__RESULT_JSON__", safe_json))
+        .replace("__RESULT_JSON__", safe_json)
+        .replace("__SAVED__", "true" if rec.contact else "false"))
     return HTMLResponse(html_out)
 
 
@@ -1116,6 +1124,21 @@ class AccountLinkIn(BaseModel):
     contact: str
 
 
+def _send_magic_link(contact: str, request: Request, subject: str, intro: str) -> None:
+    """Токен входа + письмо со ссылкой -- общая часть обычного входа в кабинет
+    и сохранения бесплатной проверки под контакт. Бросает mailer.MailerError
+    на стороне вызова, не глотает её сама."""
+    token = secrets.token_urlsafe(32)
+    with Session(engine) as s:
+        s.add(MagicLinkToken(token=token, contact=contact))
+        s.commit()
+    base = str(request.base_url).rstrip("/")
+    link = f"{base}/account/verify?token={token}"
+    body = (f"{intro} (действует {MAGIC_LINK_TTL_MINUTES} минут):\n{link}\n\n"
+            "Если это не вы — просто проигнорируйте это письмо.")
+    mailer.send(contact, subject, body)
+
+
 @app.post("/api/account/request-link")
 async def account_request_link(data: AccountLinkIn, request: Request):
     contact = data.contact.strip().lower()
@@ -1123,17 +1146,9 @@ async def account_request_link(data: AccountLinkIn, request: Request):
         return JSONResponse({"ok": False, "error": "Введите почту, на которую оформляли заказ."}, status_code=400)
     if not mailer.configured():
         return JSONResponse({"ok": False, "error": "Вход по почте пока не настроен на сервере."}, status_code=503)
-
-    token = secrets.token_urlsafe(32)
-    with Session(engine) as s:
-        s.add(MagicLinkToken(token=token, contact=contact))
-        s.commit()
-    base = str(request.base_url).rstrip("/")
-    link = f"{base}/account/verify?token={token}"
-    body = (f"Ссылка для входа в личный кабинет Создателя (действует {MAGIC_LINK_TTL_MINUTES} минут):\n{link}\n\n"
-            "Если вы не запрашивали вход — просто проигнорируйте это письмо.")
     try:
-        mailer.send(contact, "Вход в личный кабинет — Создатель", body)
+        _send_magic_link(contact, request, "Вход в личный кабинет — Создатель",
+                          "Ссылка для входа в личный кабинет Создателя")
     except mailer.MailerError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
     return {"ok": True, "message": "Если эта почта известна нам, письмо со ссылкой уже отправлено."}
@@ -1175,11 +1190,48 @@ def _current_contact(request: Request) -> Optional[str]:
         return sess.contact if sess else None
 
 
+class DemandSaveIn(BaseModel):
+    contact: str = ""
+
+
+@app.post("/api/demand/{rid}/save")
+async def demand_save(rid: int, data: DemandSaveIn, request: Request):
+    """Привязать бесплатную проверку спроса к кабинету -- иначе результат,
+    полученный без прямой ссылки на /account (обычный вход с посадочной),
+    нигде не найти повторно. Уже вошедшему привязываем контактом сессии
+    сразу; остальным -- контакт из формы + magic-link, как обычный вход."""
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+
+        already = _current_contact(request)
+        if already:
+            rec.contact = already
+            s.add(rec); s.commit()
+            return {"ok": True, "message": "Сохранено в кабинете."}
+
+        contact = data.contact.strip().lower()
+        if not _EMAIL_RE.match(contact):
+            return JSONResponse({"ok": False, "error": "Введите почту, на которую пришлём ссылку для входа."}, status_code=400)
+        rec.contact = contact
+        s.add(rec); s.commit()
+
+    if not mailer.configured():
+        return {"ok": True, "message": "Сохранено. Вход по почте пока не настроен на сервере."}
+    try:
+        _send_magic_link(contact, request, "Проверка сохранена — вход в кабинет Создателя",
+                          "Идея сохранена в кабинете. Ссылка для входа")
+    except mailer.MailerError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    return {"ok": True, "message": "Сохранили. Письмо со ссылкой для входа в кабинет уже отправлено."}
+
+
 @app.get("/api/account/me")
 def account_me(request: Request):
     contact = _current_contact(request)
     if not contact:
-        return {"ok": True, "contact": None, "projects": [], "reports": [], "orders": []}
+        return {"ok": True, "contact": None, "projects": [], "reports": [], "orders": [], "checks": []}
     with Session(engine) as s:
         projects = s.exec(select(SmokeProject).where(SmokeProject.contact == contact)
                           .order_by(SmokeProject.created_at.desc())).all()
@@ -1194,6 +1246,15 @@ def account_me(request: Request):
         orders = s.exec(select(LiveTestOrder).where(
             LiveTestOrder.contact == contact, LiveTestOrder.idea_id.is_(None)
         ).order_by(LiveTestOrder.created_at.desc())).all()
+        # Сохранённые бесплатные проверки спроса -- вход в кабинет без покупки
+        # (см. POST /api/demand/{id}/save). Проверки, из которых уже выросли
+        # отчёт или заявка на живой тест, не дублируем отдельной строкой --
+        # они и так видны выше с более полным контекстом.
+        promoted_ids = {r.check_id for r in reports} | {o.check_id for o in orders}
+        checks = s.exec(select(DemandCheck).where(
+            DemandCheck.contact == contact
+        ).order_by(DemandCheck.created_at.desc())).all()
+        checks = [c for c in checks if c.id not in promoted_ids]
         from collections import defaultdict
         idea_ids = [p.idea_id for p in projects]
         counts: dict[tuple[str, str], int] = defaultdict(int)
@@ -1211,6 +1272,7 @@ def account_me(request: Request):
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
                     "status": _effective_status(o.status, o.created_at),
                     "continue_url": f"/r/{o.check_id}" if o.check_id else None} for o in orders],
+        "checks": [{"id": c.id, "idea": c.idea, "result_url": f"/r/{c.id}"} for c in checks],
     }
 
 

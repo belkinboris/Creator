@@ -2038,6 +2038,130 @@ class TestAccountCabinet:
         assert r.status_code == 401
 
 
+class TestSaveCheckToAccount:
+    """Бесплатная проверка спроса без ссылки на кабинет не должна теряться --
+    можно привязать её к контакту постфактум (POST /api/demand/{id}/save),
+    либо она привязывается сама, если проверку делает уже вошедший."""
+
+    def _make_check(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест фраза", "count": 4200}],
+                    "best_phrase": "тест фраза",
+                    "verdict": {"level": "strong", "text": "Спрос есть"},
+                    "competitors": {"found": 100, "top": [{"title": "Т", "domain": "t.ru"}]},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 8, "note": ""}],
+                    "overall": {"value": 8, "weakest": "Спрос"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            r = client.post("/api/demand", json={"idea": "Идея достаточно длинная для сохранения"})
+            return r.json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def _issue_session(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_save_" + contact, contact=contact))
+            s.commit()
+        r = client.get(f"/account/verify?token=tok_save_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 307)
+        return r.cookies.get("sozdatel_session")
+
+    def test_result_page_exposes_saved_flag(self):
+        client.cookies.clear()
+        rid = self._make_check()
+        assert "const SAVED = false;" in client.get(f"/r/{rid}").text
+
+    def test_save_requires_valid_email_when_anonymous(self):
+        client.cookies.clear()
+        rid = self._make_check()
+        r = client.post(f"/api/demand/{rid}/save", json={"contact": "@telegram"})
+        assert r.status_code == 400
+
+    def test_save_unknown_check_404(self):
+        client.cookies.clear()
+        r = client.post("/api/demand/999999/save", json={"contact": "user@example.com"})
+        assert r.status_code == 404
+
+    def test_save_anonymous_sends_magic_link_and_persists_contact(self, monkeypatch):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        captured = {}
+        def fake_send(to, subject, body, **kw):
+            captured["to"] = to; captured["body"] = body
+        monkeypatch.setattr(m.mailer, "send", fake_send)
+        client.cookies.clear()
+        rid = self._make_check()
+        r = client.post(f"/api/demand/{rid}/save", json={"contact": "Saver@Example.com"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert captured["to"] == "saver@example.com"
+        assert "/account/verify?token=" in captured["body"]
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            assert rec.contact == "saver@example.com"
+
+    def test_save_while_logged_in_uses_session_contact_instantly(self):
+        client.cookies.clear()
+        rid = self._make_check()
+        token = self._issue_session("loggedin@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            r = client.post(f"/api/demand/{rid}/save", json={"contact": ""})
+            assert r.status_code == 200
+            assert r.json()["message"] == "Сохранено в кабинете."
+        finally:
+            client.cookies.clear()
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            assert rec.contact == "loggedin@example.com"
+
+    def test_demand_check_auto_attaches_contact_for_logged_in_user(self):
+        client.cookies.clear()
+        token = self._issue_session("autosave@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            rid = self._make_check()
+        finally:
+            client.cookies.clear()
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            assert rec.contact == "autosave@example.com"
+
+    def test_account_me_lists_saved_checks_not_promoted_to_report_or_order(self, monkeypatch):
+        import app.main as m
+        from app.main import DemandCheck, ReportPurchase, Session, engine
+        client.cookies.clear()
+        token = self._issue_session("checklist@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            rid_plain = self._make_check()
+            rid_promoted = self._make_check()
+            with Session(engine) as s:
+                s.add(ReportPurchase(check_id=rid_promoted, idea="уже выросло в отчёт",
+                                     tier="quick", contact="checklist@example.com",
+                                     status="paid", amount=990))
+                s.commit()
+            d = client.get("/api/account/me").json()
+        finally:
+            client.cookies.clear()
+        check_ids = [c["id"] for c in d["checks"]]
+        assert rid_plain in check_ids
+        assert rid_promoted not in check_ids   # уже виден в reports, не дублируем
+
+    def test_result_page_has_save_button_wiring(self):
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert 'id="save-btn"' in text and "/save" in text and "trySave" in text
+
+    def test_account_page_renders_checks_section(self):
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert 'id="checks-block"' in text and "d.checks" in text
+
+
 class TestAutoLaunchUiWiring:
     """Статическая проверка, что новые состояния заказа (запущено само /
     нужно запустить вручную) отражены в JS /desk и /account, а не только

@@ -42,10 +42,15 @@
   .head{padding:14px 0 6px}
   h1{font-size:clamp(21px,3.8vw,27px);font-weight:600;letter-spacing:-.015em}
   .idea{color:var(--muted);font-size:16px;margin-top:6px;max-width:42em}
-  .share{margin-top:10px}
+  .share{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
   .share button{appearance:none;background:transparent;border:1px solid var(--line);
     border-radius:6px;padding:8px 14px;font:500 14px "IBM Plex Sans";color:var(--ink);cursor:pointer}
   .share button:hover{border-color:var(--ink)}
+  .share button[disabled]{opacity:.55;cursor:default}
+  .save-form{display:none;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .save-form.show{display:flex}
+  .save-form input{flex:1;min-width:200px;padding:9px 12px;border:1px solid var(--line);
+    border-radius:6px;background:#fff;color:var(--ink);font:inherit}
   .paid-note{display:none;border-left:3px solid var(--ok);padding:2px 0 2px 12px;
     margin-top:14px;font-size:15px}
   .paid-note.show{display:block}
@@ -162,6 +167,9 @@
     .score-grid{grid-template-columns:1fr 1fr}
     .btn,.sharp-pick,#sharpen-btn,.step-next .btn{width:100%;text-align:center}
     .step-summary-detail{max-width:100%}
+    .share{flex-direction:column}
+    .share button{width:100%;text-align:center}
+    .save-form input,.save-form button{width:100%}
   }
   footer{border-top:1px solid var(--line);margin-top:30px;padding:22px 0;color:var(--muted);font-size:13px}
   footer a{color:var(--muted)}
@@ -192,7 +200,16 @@
   <div class="head">
     <h1>Результат проверки спроса</h1>
     <p class="idea" id="idea">__IDEA__</p>
-    <div class="share"><button id="share-btn" type="button">Поделиться результатом</button></div>
+    <div class="share">
+      <button id="share-btn" type="button">Поделиться результатом</button>
+      <button id="save-btn" type="button">Сохранить в кабинете</button>
+    </div>
+    <div class="save-form" id="save-form">
+      <input id="save-contact" type="email" placeholder="Почта — для входа в кабинет">
+      <button class="btn-ghost" id="save-submit" type="button">Сохранить</button>
+    </div>
+    <p class="err" id="save-err" role="alert"></p>
+    <p class="okmsg" id="save-ok"></p>
     <p class="paid-note" id="paid-note">Оплата принята. Мы запускаем живой тест вашей идеи — вернёмся с первыми цифрами.</p>
   </div>
 
@@ -284,6 +301,7 @@ const CHECK_ID = __CHECK_ID__;
 const PRICE = __PRICE__;
 const PAY_ENABLED = __PAY_ENABLED__;
 const IDEA = __IDEA_JSON__;
+const SAVED = __SAVED__;
 
 function fmt(n){ return n.toLocaleString('ru-RU'); }
 function escapeHtml(s){
@@ -519,6 +537,58 @@ orderBtn.addEventListener('click', async () => {
   } finally {
     if (orderBtn.style.display !== 'none') { orderBtn.disabled = false; orderBtn.textContent = label; }
   }
+});
+
+// --- Сохранить в кабинете: чтобы результат не терялся у тех, кто пришёл
+// без прямой ссылки на /account. Уже вошедшим сохраняем в один клик (сервер
+// сам знает контакт из сессии); остальным раскрываем поле почты только
+// если первая попытка без почты не прошла -- не спрашиваем лишнего заранее. ---
+
+const saveBtn = document.getElementById('save-btn');
+const saveForm = document.getElementById('save-form');
+const saveErr = document.getElementById('save-err');
+const saveOk = document.getElementById('save-ok');
+
+function markSaved(message){
+  saveBtn.textContent = 'Сохранено в кабинете';
+  saveBtn.disabled = true;
+  saveForm.classList.remove('show');
+  if (message) { saveOk.textContent = message; saveOk.classList.add('show'); }
+}
+if (SAVED) markSaved();
+
+async function trySave(contact){
+  saveErr.classList.remove('show');
+  const label = saveBtn.textContent;
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Сохраняем…';
+  try {
+    const r = await fetch(`/api/demand/${CHECK_ID}/save`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({contact})
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) {
+      if (!contact) {
+        // Скорее всего просто не вошли в кабинет -- показываем поле почты
+        // вместо голой ошибки, это не сбой, а ожидаемый следующий шаг.
+        saveForm.classList.add('show');
+        saveBtn.textContent = label;
+        saveBtn.disabled = false;
+        return;
+      }
+      throw new Error(data.error || 'Не получилось сохранить. Попробуйте ещё раз.');
+    }
+    markSaved(data.message);
+  } catch (e) {
+    saveErr.textContent = e.message; saveErr.classList.add('show');
+    saveBtn.textContent = label; saveBtn.disabled = false;
+  }
+}
+
+saveBtn.addEventListener('click', () => trySave(''));
+document.getElementById('save-submit').addEventListener('click', () => {
+  trySave(document.getElementById('save-contact').value.trim());
 });
 
 document.getElementById('share-btn').addEventListener('click', async () => {

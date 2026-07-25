@@ -112,6 +112,11 @@
     <div class="list-title">Отчёты по идее</div>
     <div id="reports"></div>
 
+    <div id="checks-block" style="display:none">
+      <div class="list-title">Проверки спроса</div>
+      <div id="checks"></div>
+    </div>
+
     <button class="btn-ghost" id="logout-btn" type="button" style="margin-top:10px">Выйти</button>
   </div>
 </main>
@@ -178,6 +183,16 @@ function stageBadge(stageIdx, name){
         <div class="sub2">${rp.tier === 'full' ? 'Полный отчёт' : 'Быстрый разбор'}${STATUS_LABEL[rp.status] ? ' · ' + escapeHtml(STATUS_LABEL[rp.status]) : ''}</div></div>
       <a class="btn-ghost" href="${rp.report_url}">Открыть →</a>
     </div>`).join('') : '<p class="empty">Пока нет отчётов по идее.</p>';
+
+  if (d.checks.length) {
+    document.getElementById('checks-block').style.display = 'block';
+    document.getElementById('checks').innerHTML = d.checks.map(c => `
+      <div class="item">
+        <div><div class="name">${escapeHtml(c.idea || 'Без названия')}</div>
+          <div class="sub2">Бесплатная проверка спроса</div></div>
+        <a class="btn-ghost" href="${c.result_url}">Открыть →</a>
+      </div>`).join('');
+  }
 
   document.getElementById('logout-btn').addEventListener('click', async () => {
     await fetch('/api/account/logout', {method: 'POST'});
