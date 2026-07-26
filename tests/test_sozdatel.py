@@ -175,6 +175,72 @@ class TestReportEngine:
         assert len(out["sections"]) == 8
         assert len(out["top_risks"]) == 3
 
+    def test_finance_section_must_demand_concrete_numbers(self):
+        """Лендинги продают «обоснование сметы» и «финансовую модель» -- промпт
+        не имеет права разрешать модели отказаться считать. Раньше он прямо
+        давал лазейку («мало данных для расчёта -- так и пиши»), и человек,
+        заплативший за расчёт, получал отказ его сделать."""
+        from app.report_engine import _system_prompt, PURPOSES
+        for purpose in PURPOSES:
+            prompt = _system_prompt("full", purpose)
+            assert "Отказ считать" in prompt and "недопустим" in prompt
+            assert "мало данных для" not in prompt   # старая лазейка убрана
+            assert "допущения" in prompt             # честность: числа с допущениями
+
+    def test_social_contract_prompt_drops_venture_optics(self):
+        """Самозанятая, которой нужна выплата на пошив штор, не должна
+        оцениваться критериями венчурного фонда: там «не масштабируется»
+        означает низкий балл и вердикт «не запускать» -- бесполезно и
+        деморализующе для человека, которому надо защитить смету."""
+        from app.report_engine import _system_prompt, PURPOSE_SOCIAL_CONTRACT, PURPOSE_BUSINESS
+        soc = _system_prompt("full", PURPOSE_SOCIAL_CONTRACT)
+        biz = _system_prompt("full", PURPOSE_BUSINESS)
+        assert "венчурного фонда" in biz          # для фаундера оптика остаётся
+        assert "венчурного фонда" not in soc
+        assert "комиссии" in soc and "350 000" in soc
+        assert "смета расходов" in soc            # то, что комиссия и проверяет
+        assert "отчитаться перед соцзащитой" in soc
+        # честность не приносится в жертву удобству
+        assert "скажи прямо" in soc
+
+    def test_social_contract_launch_plan_is_not_creator_funnel(self):
+        """План запуска для соцконтракта -- регистрация, закупка по смете,
+        первые клиенты и отчётность, а не воронка Создателя: человек уже
+        получил деньги на конкретное дело, гипотезы ему проверять незачем."""
+        from app.report_engine import _system_prompt, PURPOSE_SOCIAL_CONTRACT, STAGE_NAMES
+        soc = _system_prompt("full", PURPOSE_SOCIAL_CONTRACT)
+        assert STAGE_NAMES[2] not in soc          # «Тест на реальных людях» не навязываем
+        assert "самозанятого или ИП" in soc
+
+    def test_business_launch_plan_references_existing_stage(self):
+        """Регрессия слияния этапов: промпт велел начинать план с
+        «Проверочной страницы», которой в STAGE_NAMES больше нет -- модель
+        получала указание на несуществующий шаг."""
+        from app.report_engine import _system_prompt, PURPOSE_BUSINESS, STAGE_NAMES
+        biz = _system_prompt("full", PURPOSE_BUSINESS)
+        assert "Проверочная страница" not in biz
+        assert STAGE_NAMES[2] in biz
+
+    def test_unknown_purpose_falls_back_to_business(self):
+        from app.report_engine import _system_prompt, PURPOSE_BUSINESS
+        assert _system_prompt("full", "чепуха") == _system_prompt("full", PURPOSE_BUSINESS)
+
+    def test_purpose_reaches_the_model_prompt(self):
+        """Сквозная проверка: purpose доходит до реального вызова LLM,
+        а не теряется по дороге."""
+        from app.report_engine import generate_report, ALL_SECTIONS, PURPOSE_SOCIAL_CONTRACT
+        keys = [k for k, _ in ALL_SECTIONS]
+        captured = {}
+        async def fake_post(provider, payload):
+            captured.update(payload)
+            return _yandex_response(json.dumps(_report_body(keys, 3), ensure_ascii=False))
+        asyncio.run(generate_report("Пошив штор и постельного белья на заказ на дому",
+                                    DEMAND_DATA_FIXTURE, "full",
+                                    purpose=PURPOSE_SOCIAL_CONTRACT, _post=fake_post))
+        # промпт многострочный -- сравниваем без переносов
+        flat = " ".join(captured["instructions"].split())
+        assert "комиссии по социальному контракту" in flat
+
     def test_missing_section_rejected(self):
         from app.report_engine import generate_report, ReportEngineError, QUICK_KEYS
         async def fake_post(provider, payload):
@@ -1671,7 +1737,7 @@ class TestReportFlow:
             order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == "@unlock_test")).first()
             order.status = "paid"; s.add(order); s.commit(); oid = order.id
 
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None):
+        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose='business'):
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "Тестовый текст отчёта."}]}
         monkeypatch.setattr(m, "generate_report", fake_generate)
 
@@ -1695,7 +1761,7 @@ class TestReportFlow:
             order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == "@fail_test")).first()
             order.status = "paid"; s.add(order); s.commit()
 
-        async def failing(idea, demand_data, tier, chosen_offer=None):
+        async def failing(idea, demand_data, tier, chosen_offer=None, purpose='business'):
             raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
         monkeypatch.setattr(m, "generate_report", failing)
         text = client.get(f"/report/{rid}").text
@@ -1749,6 +1815,89 @@ class TestGuideDirect:
         finally:
             m.check_demand = orig
         assert "/guide/direct" in client.get(f"/r/{rid}").text
+
+
+class TestSocialContractPurpose:
+    """Сквозная проводка purpose: /social-contract -> DemandCheck -> отчёт.
+    Без неё лендинг обещает смету для комиссии, а движок отдаёт венчурный
+    разбор -- ровно то, из-за чего человек чувствует, что зря заплатил."""
+
+    def _make_check(self, purpose=None):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор на заказ", "count": 1200}],
+                    "best_phrase": "пошив штор на заказ",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": [{"title": "Ш", "domain": "shtory.ru"}]},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            body = {"idea": "Пошив штор и постельного белья на заказ на дому"}
+            if purpose is not None:
+                body["purpose"] = purpose
+            return client.post("/api/demand", json=body).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def test_landing_sends_social_contract_purpose(self):
+        text = (main_module.BASE_DIR.parent / "static" / "social-contract.html").read_text()
+        assert "purpose: 'social_contract'" in text
+
+    def test_landing_does_not_promise_smeta_in_tier_without_finance(self):
+        """Главное обещание лендинга -- обоснование сметы, но секции finance
+        нет в QUICK_KEYS: за 990 ₽ сметы не будет. Об этом надо сказать на
+        витрине, иначе человек покупает дешёвый тариф ровно за тем, чего в
+        нём нет, и справедливо считает, что его обманули."""
+        from app.report_engine import QUICK_KEYS
+        assert "finance" not in QUICK_KEYS      # предпосылка теста
+        text = (main_module.BASE_DIR.parent / "static" / "social-contract.html").read_text()
+        assert "Без сметы и расчётов" in text
+        assert "в тарифе «Бизнес-план»" in text
+
+    def test_landing_tier_name_matches_backend_label(self):
+        """Витрина и страница отчёта должны звать тариф одинаково."""
+        import app.main as m
+        text = (main_module.BASE_DIR.parent / "static" / "social-contract.html").read_text()
+        assert f"<h3>{m.REPORT_PRICES['full']['label']}</h3>" in text
+
+    def test_purpose_persisted_from_landing(self):
+        from app.main import DemandCheck, Session, engine
+        rid = self._make_check("social_contract")
+        with Session(engine) as s:
+            assert s.get(DemandCheck, rid).purpose == "social_contract"
+
+    def test_default_purpose_is_business(self):
+        """Обычная главная ничего не шлёт -- прежнее поведение сохраняется."""
+        from app.main import DemandCheck, Session, engine
+        rid = self._make_check()
+        with Session(engine) as s:
+            assert s.get(DemandCheck, rid).purpose == "business"
+
+    def test_unknown_purpose_rejected_not_stored(self):
+        from app.main import DemandCheck, Session, engine
+        rid = self._make_check("../../etc/passwd")
+        with Session(engine) as s:
+            assert s.get(DemandCheck, rid).purpose == "business"
+
+    def test_report_generation_receives_stored_purpose(self, monkeypatch):
+        """Главное звено: то, что сохранили при проверке спроса, реально
+        доезжает до generate_report при открытии оплаченного отчёта."""
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        rid = self._make_check("social_contract")
+        client.post("/api/report", json={"check_id": rid, "tier": "full", "contact": "@soc_purpose"})
+        with Session(engine) as s:
+            order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == "@soc_purpose")).first()
+            order.status = "paid"; s.add(order); s.commit()
+        seen = {}
+        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            seen["purpose"] = purpose
+            return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
+        monkeypatch.setattr(m, "generate_report", fake_generate)
+        client.get(f"/report/{rid}")
+        assert seen["purpose"] == "social_contract"
 
 
 class TestLegalPages:

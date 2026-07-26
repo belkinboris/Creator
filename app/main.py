@@ -59,6 +59,7 @@ from app.offer_engine import OfferEngineError, sharpen_idea  # noqa: E402
 from app.demand import DemandError, check_demand, generate_idea, diagnose  # noqa: E402
 from app.report_engine import (  # noqa: E402
     ReportEngineError, generate_report, ALL_SECTIONS, QUICK_KEYS,
+    PURPOSES as report_purposes,
 )
 from app import payments  # noqa: E402
 from app import mailer  # noqa: E402
@@ -148,6 +149,10 @@ class DemandCheck(SQLModel, table=True):
     # Пусто, пока человек не привязал бесплатную проверку к кабинету -- см.
     # POST /api/demand/{id}/save и автопривязку на /r/ для уже вошедших.
     contact: str = ""
+    # С какой стороны человек пришёл: "business" (главная, фаундер) или
+    # "social_contract" (лендинг /social-contract, выплата от государства).
+    # Определяет оптику платного отчёта -- см. PURPOSES в report_engine.
+    purpose: str = "business"
 
 
 class LiveTestOrder(SQLModel, table=True):
@@ -222,6 +227,7 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS idea_id VARCHAR"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS purpose VARCHAR DEFAULT 'business'"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -285,6 +291,9 @@ def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
 
 class IdeaIn(BaseModel):
     idea: str
+    # Откуда пришёл человек -- /social-contract шлёт "social_contract",
+    # обычная главная ничего не шлёт и получает дефолт (см. DemandCheck.purpose).
+    purpose: str = "business"
 
 
 @app.post("/api/offers")
@@ -330,8 +339,10 @@ async def demand_check(data: IdeaIn, request: Request):
         # Уже вошедший в кабинет человек получает автопривязку без лишних
         # действий -- проверка сразу видна в /account, без отдельного "Сохранить".
         contact = _current_contact(request) or ""
+        purpose = data.purpose if data.purpose in report_purposes else "business"
         rec = DemandCheck(idea=data.idea[:300], best_count=max(known) if known else None,
-                          result_json=json.dumps(result, ensure_ascii=False), contact=contact)
+                          result_json=json.dumps(result, ensure_ascii=False), contact=contact,
+                          purpose=purpose)
         with Session(engine) as s:
             s.add(rec); s.commit(); s.refresh(rec)
             check_id = rec.id
@@ -598,7 +609,10 @@ async def report_page(rid: int):
     if purchase:
         if not purchase.report_json:
             try:
-                report = await generate_report(rec.idea, demand_data, purchase.tier)
+                # purpose определяет оптику отчёта: для соцконтракта это
+                # обоснование сметы для комиссии, а не венчурный разбор.
+                report = await generate_report(rec.idea, demand_data, purchase.tier,
+                                               purpose=rec.purpose)
                 with Session(engine) as s:
                     fresh = s.get(ReportPurchase, purchase.id)
                     fresh.report_json = json.dumps(report, ensure_ascii=False)

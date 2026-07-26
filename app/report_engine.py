@@ -71,13 +71,88 @@ def _risk_count(tier: str) -> int:
     return 2 if tier == "quick" else 3
 
 
-def _system_prompt(tier: str) -> str:
+# Одна и та же идея приходит к нам с двух очень разных сторон, и мерить их
+# одной линейкой -- прямой путь к ощущению «отчёт не стоил денег»:
+#   business        -- фаундер проверяет идею перед вложением сил и денег;
+#   social_contract -- человек (часто самозанятый/безработный) готовит
+#                      обоснование для комиссии соцзащиты под выплату ~350к.
+# Для второго венчурная логика («не масштабируется», «нет кратного роста»)
+# не просто бесполезна -- она даёт низкий балл и вердикт «не запускать»
+# там, где устойчивый доход одной семьи и есть цель. См. /social-contract.
+PURPOSE_BUSINESS = "business"
+PURPOSE_SOCIAL_CONTRACT = "social_contract"
+PURPOSES = (PURPOSE_BUSINESS, PURPOSE_SOCIAL_CONTRACT)
+
+_PERSONA = {
+    PURPOSE_BUSINESS: """Ты — жёсткий аналитик венчурного фонда. Зарабатываешь тем, что
+находишь структурные проблемы в идеях ДО того, как в них вложат время и
+деньги — а не тем, что хвалишь идеи.""",
+    PURPOSE_SOCIAL_CONTRACT: """Ты — экономист, который готовит обоснование бизнес-плана для комиссии
+по социальному контракту. Заявитель — обычный человек, часто самозанятый
+или безработный, который просит у государства единовременную выплату
+(до ~350 000 ₽) на своё дело. Комиссия отказывает не из-за «недостаточной
+амбициозности», а из-за необоснованных сумм в смете, нереалистичной выручки
+и непонимания, на что конкретно уйдут деньги.
+Венчурные критерии здесь НЕ применяй: масштабируемость, кратный рост, выход
+на другие рынки — неуместны и вредны. Устойчивый доход одного человека или
+семьи — это нормальная и достаточная цель. Но честность сохраняй: если дело
+в текущем виде не прокормит заявителя или смета не сойдётся — скажи прямо,
+лучше узнать это до комиссии, чем получить отказ.""",
+}
+
+_VIABILITY_SPEC = {
+    PURPOSE_BUSINESS: """честная оценка жизнеспособности идеи В
+   ТЕКУЩЕМ виде, не оптимистичная скидка. 85+ — редкость, такой балл отдельно
+   обоснуй в viability_summary.""",
+    PURPOSE_SOCIAL_CONTRACT: """насколько дело реально прокормит
+   заявителя и насколько смета выдержит вопросы комиссии. Оценивай не
+   амбициозность, а реалистичность: сходится ли экономика, хватит ли выплаты
+   на старт, есть ли платящие клиенты рядом. Крепкое локальное дело без роста
+   — это высокий балл, а не низкий.""",
+}
+
+_FINANCE_SPEC = {
+    PURPOSE_BUSINESS: """   - "finance" — ОБЯЗАТЕЛЬНО с конкретными числами в рублях: стартовые
+     затраты по статьям, постоянные и переменные расходы в месяц, средний чек,
+     сколько клиентов в месяц нужно для выхода в ноль, срок окупаемости.
+     Отказ считать («недостаточно данных для расчёта») недопустим — расчёт
+     это и есть то, за что заплатили. Мало вводных — прими разумные для этой
+     ниши в России допущения и назови их прямо: «считаю при среднем чеке N ₽,
+     конверсии M%, аренде K ₽/мес». Отдельной фразой пометь, что это оценка
+     по допущениям, а не гарантия.""",
+    PURPOSE_SOCIAL_CONTRACT: """   - "finance" — главная секция, комиссия читает её внимательнее всего.
+     Обязательно и с конкретными суммами в рублях:
+     (а) смета расходов — на что пойдут деньги выплаты, построчно, с суммами
+         и итогом; итог не должен превышать ~350 000 ₽, а если делу столько не
+         нужно — честно назови меньшую сумму, это только усиливает заявку;
+     (б) план доходов на первый год — средний чек, число клиентов в месяц,
+         как выручка растёт от месяца к месяцу;
+     (в) регулярные расходы в месяц и точка безубыточности;
+     (г) срок окупаемости и сколько останется заявителю на руки.
+     Отказ считать («недостаточно данных») недопустим: прими разумные для
+     России и этой ниши цифры и назови допущения явно. Отдельной фразой
+     пометь, что это расчёт-обоснование по допущениям, а не гарантия дохода.""",
+}
+
+_LAUNCH_SPEC = {
+    PURPOSE_BUSINESS: f"""   - "launch" — план из 7 этапов пути (нумеруй с 1 по 7): {", ".join(STAGE_NAMES)}.
+     Идея и Спрос уже пройдены пользователем бесплатно — план начинай с
+     ближайшего следующего шага, то есть с «{STAGE_NAMES[2]}».""",
+    PURPOSE_SOCIAL_CONTRACT: """   - "launch" — практический план запуска дела, без венчурных этапов и
+     проверки гипотез: что подготовить до подачи заявления, что сделать сразу
+     после одобрения (оформить статус самозанятого или ИП, закупить по смете),
+     где брать первых клиентов, и как отчитаться перед соцзащитой за
+     потраченные деньги — за отчётность спрашивают, о ней часто забывают.""",
+}
+
+
+def _system_prompt(tier: str, purpose: str = PURPOSE_BUSINESS) -> str:
+    if purpose not in PURPOSES:
+        purpose = PURPOSE_BUSINESS
     keys = QUICK_KEYS if tier == "quick" else [k for k, _ in ALL_SECTIONS]
     sections_spec = "\n".join(f'    "{k}": "текст секции «{title}»"' for k, title in ALL_SECTIONS if k in keys)
     risk_count = _risk_count(tier)
-    return f"""Ты — жёсткий аналитик венчурного фонда. Зарабатываешь тем, что
-находишь структурные проблемы в идеях ДО того, как в них вложат время и
-деньги — а не тем, что хвалишь идеи. Тебе дали идею и РЕАЛЬНЫЕ данные
+    return f"""{_PERSONA[purpose]} Тебе дали идею и РЕАЛЬНЫЕ данные
 бесплатной проверки спроса: частотность Вордстата, реальные конкуренты из
 выдачи Яндекса, оценка идеи. Используй эти цифры и названия конкурентов
 буквально — не выдумывай другие.
@@ -95,9 +170,7 @@ def _system_prompt(tier: str) -> str:
 - Плоский текст без markdown (**, ##, списки через *) внутри значений JSON.
 
 Обязательные элементы ответа:
-1. viability_score — целое 1-100: честная оценка жизнеспособности идеи В
-   ТЕКУЩЕМ виде, не оптимистичная скидка. 85+ — редкость, такой балл отдельно
-   обоснуй в viability_summary.
+1. viability_score — целое 1-100: {_VIABILITY_SPEC[purpose]}
 2. viability_summary — 1-2 предложения: главная причина именно такого балла.
 3. top_risks — ровно {risk_count} структурных риска, каждый:
    {{"title": "короткое ёмкое название риска, 3-6 слов",
@@ -108,11 +181,8 @@ def _system_prompt(tier: str) -> str:
    а не общие фразы вида «может не быть спроса».
 4. sections — секции ниже, 2-5 абзацев каждая (\\n\\n между абзацами):
 {sections_spec}
-   - "finance" — явно помечай как оценку, не гарантию; мало данных для
-     расчёта — так и пиши, а не выдумывай точные суммы.
-   - "launch" — план из 7 этапов пути (нумеруй с 1 по 7): {", ".join(STAGE_NAMES)}. Идея и
-     Спрос уже пройдены пользователем бесплатно — план начинай с ближайшего
-     следующего шага (обычно «Проверочная страница»).
+{_FINANCE_SPEC[purpose]}
+{_LAUNCH_SPEC[purpose]}
    - "verdict" — прямой вывод: запускать / дорабатывать / не запускать в
      текущем виде. Вердикт без права сказать «нет» — не вердикт.
 
@@ -186,17 +256,23 @@ async def _call_llm(system: str, user: str, max_tokens: int, *, _post=None) -> s
 
 
 async def generate_report(idea: str, demand_data: dict, tier: str = "quick",
-                          chosen_offer: dict | None = None, *, _post=None, _attempt: int = 1) -> dict:
+                          chosen_offer: dict | None = None, purpose: str = PURPOSE_BUSINESS,
+                          *, _post=None, _attempt: int = 1) -> dict:
     """
     Идея + данные бесплатной проверки спроса -> отчёт: viability_score,
     viability_summary, top_risks, sections. Бросает ReportEngineError с
     человеческим текстом при любой проблеме.
+
+    purpose меняет и оптику, и требования к секциям (см. PURPOSES): для
+    соцконтракта это обоснование сметы для комиссии, а не венчурный разбор.
     """
     idea = (idea or "").strip()[:MAX_IDEA_CHARS]
     if len(idea) < 15:
         raise ReportEngineError("Идея слишком короткая для отчёта.")
     if tier not in ("quick", "full"):
         tier = "quick"
+    if purpose not in PURPOSES:
+        purpose = PURPOSE_BUSINESS
 
     context = {
         "идея": idea,
@@ -213,7 +289,7 @@ async def generate_report(idea: str, demand_data: dict, tier: str = "quick",
     max_tokens = MAX_TOKENS_QUICK if tier == "quick" else MAX_TOKENS_FULL
 
     try:
-        text = await _call_llm(_system_prompt(tier), user_msg, max_tokens, _post=_post)
+        text = await _call_llm(_system_prompt(tier, purpose), user_msg, max_tokens, _post=_post)
         text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         return _validate(json.loads(text), tier)
     except ReportEngineError:
@@ -223,12 +299,12 @@ async def generate_report(idea: str, demand_data: dict, tier: str = "quick",
     except json.JSONDecodeError:
         logger.exception("report engine: bad JSON (attempt %s)", _attempt)
         if _attempt == 1:
-            return await generate_report(idea, demand_data, tier, chosen_offer, _post=_post, _attempt=2)
+            return await generate_report(idea, demand_data, tier, chosen_offer, purpose, _post=_post, _attempt=2)
         raise ReportEngineError("ИИ ответил в неожиданном формате. Попробуйте ещё раз.")
     except httpx.TimeoutException:
         logger.warning("report engine: timeout (attempt %s)", _attempt)
         if _attempt == 1:
-            return await generate_report(idea, demand_data, tier, chosen_offer, _post=_post, _attempt=2)
+            return await generate_report(idea, demand_data, tier, chosen_offer, purpose, _post=_post, _attempt=2)
         raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
     except Exception:
         logger.exception("report engine failed")
