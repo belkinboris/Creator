@@ -1177,6 +1177,13 @@ def _send_magic_link(contact: str, request: Request, subject: str, intro: str) -
 
 @app.post("/api/account/request-link")
 async def account_request_link(data: AccountLinkIn, request: Request):
+    # Отправляет письмо -- без лимита кто угодно мог бы забросать произвольную
+    # почту письмами со ссылкой входа (чужой адрес, не только свой) и посадить
+    # репутацию SMTP-аккаунта. Тот же лимит, что у остальных публичных ручек.
+    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+        or (request.client.host if request.client else "?")
+    if _rate_limited(client_ip):
+        raise HTTPException(429, "слишком часто")
     contact = data.contact.strip().lower()
     if not _EMAIL_RE.match(contact):
         return JSONResponse({"ok": False, "error": "Введите почту, на которую оформляли заказ."}, status_code=400)
@@ -1236,6 +1243,10 @@ async def demand_save(rid: int, data: DemandSaveIn, request: Request):
     полученный без прямой ссылки на /account (обычный вход с посадочной),
     нигде не найти повторно. Уже вошедшему привязываем контактом сессии
     сразу; остальным -- контакт из формы + magic-link, как обычный вход."""
+    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+        or (request.client.host if request.client else "?")
+    if _rate_limited(client_ip):
+        raise HTTPException(429, "слишком часто")
     with Session(engine) as s:
         rec = s.get(DemandCheck, rid)
         if not rec:

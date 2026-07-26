@@ -530,6 +530,25 @@ class TestHardening:
         assert r.status_code == 200
         assert "svg" in r.headers["content-type"]
 
+    def test_account_request_link_is_rate_limited(self):
+        """Ручка шлёт письмо -- без лимита кто угодно мог бы забросать
+        произвольную почту письмами со ссылкой входа и посадить репутацию
+        SMTP-аккаунта (тот же риск, что у остальных публичных ручек)."""
+        import app.main as m
+        m._RL_WINDOW.clear()
+        codes = [client.post("/api/account/request-link", json={"contact": "x@example.com"}).status_code
+                 for _ in range(35)]
+        assert 429 in codes[30:]
+        m._RL_WINDOW.clear()
+
+    def test_demand_save_is_rate_limited(self):
+        import app.main as m
+        m._RL_WINDOW.clear()
+        codes = [client.post("/api/demand/999999/save", json={"contact": "x@example.com"}).status_code
+                 for _ in range(35)]
+        assert 429 in codes[30:]
+        m._RL_WINDOW.clear()
+
 
 class TestWaitlist:
     def test_waitlist_public_and_stored(self):
