@@ -2069,6 +2069,33 @@ class TestProjectPage:
         assert "#FBF6EA" in text   # фон бумаги, а не --blueprint
 
 
+class TestProjectPageSpeaksToCustomer:
+    """A3 из PRODUCT_ROADMAP: `/p/` писалась, когда её видел только владелец,
+    и осталась на «ты» с владельческими формулировками. Теперь страница
+    открыта покупателю из /account -- остальной сайт обращается на «вы»."""
+
+    def test_no_informal_address_left(self):
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        for bad in ("не трогай", "ты знаешь", "видны только тебе", "твой целевой",
+                    "Открой ", "Проверь ", "Проверь,", "Создай ", "Запусти ",
+                    "Вставь ", "впиши "):
+            assert bad not in text, f"«ты»-форма осталась: {bad!r}"
+
+    def test_polite_forms_present(self):
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        for good in ("Откройте", "Проверьте", "Создайте", "Запустите", "Вставьте",
+                     "впишите", "видны только вам"):
+            assert good in text, f"не хватает вежливой формы: {good!r}"
+
+    def test_internal_jargon_removed(self):
+        """«smoke-тест» и «РСЯ» -- наши внутренние слова; «трафик» запрещён
+        принципом 5 (пользователь не обязан знать наш язык)."""
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        assert "smoke" not in text.lower()
+        assert "РСЯ" not in text
+        assert "трафик" not in text.lower()
+
+
 class TestOwnerKeyUrlHandoff:
     """/desk уже знает ключ владельца (sessionStorage) -- при переходе на
     /p/{id} раньше он терялся, и project.html спрашивал ключ заново нативным
