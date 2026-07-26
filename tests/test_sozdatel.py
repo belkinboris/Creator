@@ -530,6 +530,25 @@ class TestHardening:
         assert r.status_code == 200
         assert "svg" in r.headers["content-type"]
 
+    def test_account_request_link_is_rate_limited(self):
+        """Ручка шлёт письмо -- без лимита кто угодно мог бы забросать
+        произвольную почту письмами со ссылкой входа и посадить репутацию
+        SMTP-аккаунта (тот же риск, что у остальных публичных ручек)."""
+        import app.main as m
+        m._RL_WINDOW.clear()
+        codes = [client.post("/api/account/request-link", json={"contact": "x@example.com"}).status_code
+                 for _ in range(35)]
+        assert 429 in codes[30:]
+        m._RL_WINDOW.clear()
+
+    def test_demand_save_is_rate_limited(self):
+        import app.main as m
+        m._RL_WINDOW.clear()
+        codes = [client.post("/api/demand/999999/save", json={"contact": "x@example.com"}).status_code
+                 for _ in range(35)]
+        assert 429 in codes[30:]
+        m._RL_WINDOW.clear()
+
 
 class TestWaitlist:
     def test_waitlist_public_and_stored(self):
@@ -1759,6 +1778,26 @@ class TestProjectPage:
         assert "#FBF6EA" in text   # фон бумаги, а не --blueprint
 
 
+class TestOwnerKeyUrlHandoff:
+    """/desk уже знает ключ владельца (sessionStorage) -- при переходе на
+    /p/{id} раньше он терялся, и project.html спрашивал ключ заново нативным
+    prompt() при КАЖДОМ открытии проекта. Теперь /desk кладёт ключ в ссылку,
+    а project.html сначала смотрит в URL и только потом -- в prompt()."""
+
+    def test_desk_passes_owner_key_in_project_link(self):
+        text = (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
+        assert "location.href='${s.project_url}?key='+encodeURIComponent(KEY)" in text
+
+    def test_project_page_reads_key_from_url_before_prompting(self):
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        assert "new URLSearchParams(location.search).get(\"key\")" in text
+        # порядок важен: URL раньше prompt(), иначе владелец из /desk всё
+        # равно увидит диалог
+        url_pos = text.index("URLSearchParams(location.search)")
+        prompt_pos = text.index("prompt(\"Ключ владельца:\")")
+        assert url_pos < prompt_pos
+
+
 class TestYandexMetrika:
     """Счётчик вставляется единой точкой в _static() (см. _inject_metrika),
     а не копипастой по каждому HTML-файлу. Цели воронки шлются из JS через
@@ -2084,6 +2123,46 @@ class TestSaveCheckToAccount:
         client.cookies.clear()
         r = client.post("/api/demand/999999/save", json={"contact": "user@example.com"})
         assert r.status_code == 404
+
+    def test_save_cannot_hijack_check_already_claimed_by_another_contact(self, monkeypatch):
+        """check_id -- обычный автоинкремент, легко перебрать (/r/1, /r/2, ...).
+        Без проверки владения кто угодно мог бы молча переприсвоить себе уже
+        сохранённую чужую проверку и увидеть чужую идею в своём /account."""
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        monkeypatch.setattr(m.mailer, "configured", lambda: False)
+        client.cookies.clear()
+        rid = self._make_check()
+        first = client.post(f"/api/demand/{rid}/save", json={"contact": "owner@example.com"})
+        assert first.status_code == 200
+
+        hijack = client.post(f"/api/demand/{rid}/save", json={"contact": "stranger@example.com"})
+        assert hijack.status_code == 409
+
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            assert rec.contact == "owner@example.com"   # не перезаписалось
+
+    def test_save_same_contact_again_is_idempotent(self, monkeypatch):
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "configured", lambda: False)
+        client.cookies.clear()
+        rid = self._make_check()
+        assert client.post(f"/api/demand/{rid}/save", json={"contact": "owner@example.com"}).status_code == 200
+        again = client.post(f"/api/demand/{rid}/save", json={"contact": "Owner@Example.com"})
+        assert again.status_code == 200   # тот же контакт (регистр не важен) -- не конфликт
+
+    def test_logged_in_session_cannot_hijack_check_claimed_by_another_contact(self):
+        client.cookies.clear()
+        rid = self._make_check()
+        assert client.post(f"/api/demand/{rid}/save", json={"contact": "owner@example.com"}).status_code == 200
+        token = self._issue_session("stranger@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            r = client.post(f"/api/demand/{rid}/save", json={"contact": ""})
+            assert r.status_code == 409
+        finally:
+            client.cookies.clear()
 
     def test_save_anonymous_sends_magic_link_and_persists_contact(self, monkeypatch):
         import app.main as m
