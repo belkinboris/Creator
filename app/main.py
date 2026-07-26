@@ -1253,12 +1253,19 @@ async def demand_save(rid: int, data: DemandSaveIn, request: Request):
             return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
 
         already = _current_contact(request)
+        contact = already or data.contact.strip().lower()
+        # check_id -- обычный автоинкремент, легко перебрать (/r/1, /r/2, ...).
+        # Без этой проверки кто угодно мог бы молча переприсвоить чужую уже
+        # сохранённую проверку себе, получив в своём /account идею и разбор
+        # спроса постороннего человека, а у владельца она бы пропала из вида.
+        if rec.contact and rec.contact != contact:
+            return JSONResponse({"ok": False, "error": "Эта проверка уже сохранена в другом кабинете."}, status_code=409)
+
         if already:
             rec.contact = already
             s.add(rec); s.commit()
             return {"ok": True, "message": "Сохранено в кабинете."}
 
-        contact = data.contact.strip().lower()
         if not _EMAIL_RE.match(contact):
             return JSONResponse({"ok": False, "error": "Введите почту, на которую пришлём ссылку для входа."}, status_code=400)
         rec.contact = contact

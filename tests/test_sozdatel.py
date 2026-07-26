@@ -2124,6 +2124,46 @@ class TestSaveCheckToAccount:
         r = client.post("/api/demand/999999/save", json={"contact": "user@example.com"})
         assert r.status_code == 404
 
+    def test_save_cannot_hijack_check_already_claimed_by_another_contact(self, monkeypatch):
+        """check_id -- обычный автоинкремент, легко перебрать (/r/1, /r/2, ...).
+        Без проверки владения кто угодно мог бы молча переприсвоить себе уже
+        сохранённую чужую проверку и увидеть чужую идею в своём /account."""
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        monkeypatch.setattr(m.mailer, "configured", lambda: False)
+        client.cookies.clear()
+        rid = self._make_check()
+        first = client.post(f"/api/demand/{rid}/save", json={"contact": "owner@example.com"})
+        assert first.status_code == 200
+
+        hijack = client.post(f"/api/demand/{rid}/save", json={"contact": "stranger@example.com"})
+        assert hijack.status_code == 409
+
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            assert rec.contact == "owner@example.com"   # не перезаписалось
+
+    def test_save_same_contact_again_is_idempotent(self, monkeypatch):
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "configured", lambda: False)
+        client.cookies.clear()
+        rid = self._make_check()
+        assert client.post(f"/api/demand/{rid}/save", json={"contact": "owner@example.com"}).status_code == 200
+        again = client.post(f"/api/demand/{rid}/save", json={"contact": "Owner@Example.com"})
+        assert again.status_code == 200   # тот же контакт (регистр не важен) -- не конфликт
+
+    def test_logged_in_session_cannot_hijack_check_claimed_by_another_contact(self):
+        client.cookies.clear()
+        rid = self._make_check()
+        assert client.post(f"/api/demand/{rid}/save", json={"contact": "owner@example.com"}).status_code == 200
+        token = self._issue_session("stranger@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            r = client.post(f"/api/demand/{rid}/save", json={"contact": ""})
+            assert r.status_code == 409
+        finally:
+            client.cookies.clear()
+
     def test_save_anonymous_sends_magic_link_and_persists_contact(self, monkeypatch):
         import app.main as m
         from app.main import DemandCheck, Session, engine
