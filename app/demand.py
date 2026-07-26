@@ -205,33 +205,39 @@ async def _wordstat_cloud_raw(phrase: str, *, _post=None) -> dict:
         return {"ok": False, "error": repr(exc)}
 
 
-def _best_related_count(data: dict, fallback_count: int | None) -> int | None:
+def _best_related(data: dict, fallback_phrase: str, fallback_count: int | None) -> dict:
     """Cloud Search API отдаёт вместе с totalCount список похожих формулировок
     (topRequests: [{"phrase", "count"}, ...]) -- то, что и так предлагает сам
     Вордстат рядом с точной фразой. Если среди них частотность выше, чем у
     дословно запрошенной фразы -- значит наша (LLM-угаданная) формулировка
     промахнулась мимо реального ходового запроса, а Вордстат его тут же
-    показывает. Берём максимум, а не то, что дословно спросили."""
-    best = fallback_count
+    показывает. Берём максимум, а не то, что дословно спросили -- и ЗАПОМИНАЕМ
+    формулировку-победителя (не только число): показывать чужой счёт под
+    исходной фразой было бы нечестно -- человек вручную проверит именно её
+    в Вордстате, увидит другое число и решит, что сервис врёт или сломан."""
+    best_phrase, best_count = fallback_phrase, fallback_count
     for item in data.get("topRequests") or []:
         if not isinstance(item, dict):
             continue
-        count = item.get("count")
-        if isinstance(count, (int, float)) and (best is None or count > best):
-            best = int(count)
-    return best
+        phrase, count = item.get("phrase"), item.get("count")
+        if (isinstance(phrase, str) and phrase.strip()
+                and isinstance(count, (int, float)) and (best_count is None or count > best_count)):
+            best_phrase, best_count = phrase.strip().lower(), int(count)
+    return {"phrase": best_phrase, "count": best_count}
 
 
-async def wordstat_count(phrase: str, *, _post=None) -> int | None:
-    """Месячная частотность фразы по России. Пробует официальный Wordstat
-    API первым (если сконфигурирован), при неуспехе -- прежний Cloud Search
-    API путь. None = оба пути недоступны/без данных -- штатная деградация,
-    не ошибка."""
+async def wordstat_best(phrase: str, *, _post=None) -> dict:
+    """Частотность формулировки + при необходимости более популярная похожая
+    формулировка от самого Вордстата. Возвращает {"phrase": str, "count":
+    int|None} -- phrase в ответе может отличаться от входной, см. _best_related.
+    Пробует официальный Wordstat API первым (если сконфигурирован), при
+    неуспехе -- прежний Cloud Search API путь. count=None = оба пути
+    недоступны/без данных -- штатная деградация, не ошибка."""
     oauth = await _wordstat_oauth_raw(phrase, _post=_post)
     if oauth.get("ok"):
         count = (oauth.get("data") or {}).get("totalCount")
         if count is not None:
-            return int(count)
+            return {"phrase": phrase, "count": int(count)}
     elif "status" in oauth or "error" in oauth:
         logger.warning("wordstat oauth path failed for %r: %s", phrase, oauth)
 
@@ -240,10 +246,16 @@ async def wordstat_count(phrase: str, *, _post=None) -> int | None:
         data = cloud.get("data") or {}
         count = data.get("totalCount")
         count = int(count) if count is not None else None
-        return _best_related_count(data, count)
+        return _best_related(data, phrase, count)
     if "status" in cloud or "error" in cloud:
         logger.warning("wordstat cloud path failed for %r: %s", phrase, cloud)
-    return None
+    return {"phrase": phrase, "count": None}
+
+
+async def wordstat_count(phrase: str, *, _post=None) -> int | None:
+    """Только частотность, без данных о формулировке-победителе -- обратная
+    совместимость для вызовов, которым не нужна замена фразы."""
+    return (await wordstat_best(phrase, _post=_post))["count"]
 
 
 async def diagnose(phrase: str = "купить слона", *, _post=None) -> dict:
@@ -338,11 +350,24 @@ async def check_demand(idea: str, *, _post=None) -> dict:
     """Полная бесплатная проверка: формулировки -> частотности -> конкуренты
     по лучшей формулировке -> вердикт."""
     phrases = await generate_formulations(idea, _post=_post)
-    counts = [await wordstat_count(p, _post=_post) for p in phrases]
-    rows = [{"phrase": p, "count": c} for p, c in zip(phrases, counts)]
+    results = [await wordstat_best(p, _post=_post) for p in phrases]
+    rows = []
+    for p, r in zip(phrases, results):
+        row = {"phrase": p, "count": r["count"]}
+        if r["count"] is not None and r["phrase"] != p:
+            # Вордстат сам предложил формулировку с большей частотностью --
+            # показываем её отдельно, а не молча приписываем чужой счёт
+            # исходной фразе (см. wordstat_best/_best_related).
+            row["matched_phrase"] = r["phrase"]
+        rows.append(row)
+    counts = [r["count"] for r in rows]
     known = [c for c in counts if c is not None]
     best_idx = counts.index(max(known)) if known else 0
-    comp = await competitors(phrases[best_idx], _post=_post)
+    # Конкурентов и "лучшую формулировку" ищем по реально ходовой фразе, если
+    # Вордстат её подсказал -- иначе искали бы конкурентов не по тому запросу,
+    # который на самом деле приносит трафик.
+    search_phrase = rows[best_idx].get("matched_phrase") or phrases[best_idx]
+    comp = await competitors(search_phrase, _post=_post)
     best = max(known) if known else None
     llm_scores = await score_idea(idea, rows, comp, _post=_post)
     scores = [{"key": "demand", "label": "Спрос", "value": _demand_score(best), "note": ""}]
@@ -362,7 +387,7 @@ async def check_demand(idea: str, *, _post=None) -> dict:
         overall = {"value": value, "weakest": weakest["label"]}
     return {
         "formulations": rows,
-        "best_phrase": phrases[best_idx],
+        "best_phrase": search_phrase,
         "verdict": _verdict(best),
         "competitors": comp,
         "scores": scores,

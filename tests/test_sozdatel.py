@@ -759,6 +759,45 @@ class TestDemand:
         assert out["competitors"]["found"] == 15000
         assert out["competitors"]["top"][0]["domain"] == "example.ru"
 
+    def test_check_demand_surfaces_matched_phrase_honestly(self, monkeypatch):
+        """Если Вордстат подсказал формулировку популярнее угаданной LLM --
+        показываем ЕЁ отдельным полем, а не молча приписываем чужой счёт
+        исходной фразе (иначе ручная проверка исходной фразы в Вордстате
+        покажет другое число и будет выглядеть как обман/баг)."""
+        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
+        async def post(provider, payload):
+            if provider == "yandex":
+                if "шкалам" in payload["instructions"]:
+                    return _yandex_response(json.dumps({"competition": 5, "timing": 5, "execution": 5,
+                        "notes": {"competition": "", "timing": "", "execution": ""}}, ensure_ascii=False))
+                return _yandex_response(json.dumps(
+                    ["создание рекламного видео", "генератор рекламных видео", "рекламное видео онлайн"],
+                    ensure_ascii=False))
+            if provider == "wordstat":
+                if payload["phrase"] == "создание рекламного видео":
+                    return {"totalCount": 157, "topRequests": [
+                        {"phrase": "нейросеть для рекламы", "count": 902}]}
+                return {"totalCount": 2}
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Сервис генерирует рекламные видео через ИИ", _post=post))
+        row = out["formulations"][0]
+        assert row["phrase"] == "создание рекламного видео"   # исходная формулировка не подменена
+        assert row["count"] == 902                             # но частотность -- реальная
+        assert row["matched_phrase"] == "нейросеть для рекламы"
+        assert out["best_phrase"] == "нейросеть для рекламы"   # конкурентов ищем по реальному запросу
+        assert out["verdict"]["level"] == "niche"              # 902 -- между порогами niche/strong
+
+    def test_check_demand_no_matched_phrase_when_nothing_beats_it(self):
+        """Без topRequests или когда угаданная фраза и так лучшая -- поле
+        matched_phrase отсутствует, чтобы не путать фронтенд лишним полем."""
+        post = _demand_post(counts={
+            "ответы на отзывы вайлдберриз": 5200,
+            "сервис ответов на отзывы": 900,
+            "автоответ на отзывы озон": 340,
+        })
+        out = asyncio.run(check_demand("Сервис отвечает на отзывы за селлеров маркетплейсов", _post=post))
+        assert all("matched_phrase" not in f for f in out["formulations"])
+
     def test_wordstat_unavailable_degrades_not_fails(self):
         """Нет токена/квоты Вордстата -- counts=None, вердикт unknown, но ответ есть."""
         async def post(provider, payload):
@@ -1109,6 +1148,31 @@ class TestResultPageAndOrders:
         assert "тест фраза" in page.text          # результат вшит в страницу
         assert "Путь от идеи до денег" not in page.text   # витрины здесь нет
         assert client.get("/r/999999").status_code == 404
+
+    def test_result_page_shows_matched_phrase_transparency_note(self):
+        """Когда Вордстат подсказал более ходовую формулировку (см.
+        check_demand/wordstat_best в app/demand.py), страница должна честно
+        показать, какая фраза дала эту частотность -- иначе цифра рядом с
+        исходной фразой выглядит взятой с потолка при ручной перепроверке."""
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "создание рекламного видео", "count": 902,
+                                       "matched_phrase": "нейросеть для рекламы"}],
+                    "best_phrase": "нейросеть для рекламы",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": None, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": ""}],
+                    "overall": {"value": 4, "weakest": "Спрос"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            r = client.post("/api/demand", json={"idea": "Идея достаточно длинная для теста подсказанной фразы"})
+            rid = r.json()["id"]
+        finally:
+            m.check_demand = orig
+        page = client.get(f"/r/{rid}").text
+        assert "нейросеть для рекламы" in page   # данные дошли до страницы
+        assert "f.matched_phrase" in page         # фронтенд умеет её показать
 
     def test_result_page_handles_null_demand_score_gracefully(self):
         """Прочерк из 10 баллов -- явный текст вместо голого тире, когда Вордстат недоступен."""
