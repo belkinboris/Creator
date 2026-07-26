@@ -184,6 +184,11 @@ class ReportPurchase(SQLModel, table=True):
     payment_id: str = ""
     amount: int = 0
     report_json: str = ""     # заполняется лениво после оплаты
+    # Оплата прошла, а генерация упала -- худший сценарий платного продукта.
+    # Причина видна владельцу в /desk, owner_notified не даёт слать письмо
+    # заново на каждую перезагрузку страницы покупателем.
+    gen_error: str = ""
+    owner_notified: bool = False
 
 
 class MagicLinkToken(SQLModel, table=True):
@@ -228,6 +233,8 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS idea_id VARCHAR"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS purpose VARCHAR DEFAULT 'business'"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS gen_error VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS owner_notified BOOLEAN DEFAULT FALSE"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -594,8 +601,57 @@ def report_status(rid: int):
     return {"paid": bool(purchase), "tier": purchase.tier if purchase else None}
 
 
+def _record_report_failure(purchase_id: int, error: str, request: Request, check_id: int) -> None:
+    """Оплата прошла, отчёт не собрался -- самый дорогой сценарий отказа для
+    платного продукта: деньги списаны, услуга не оказана, и до этой правки
+    единственным, кто об этом знал, был сам покупатель.
+
+    Записываем причину (владелец видит её в /desk) и ОДИН раз пишем владельцу.
+    Один -- потому что страницу можно перезагружать сколько угодно, и каждая
+    перезагрузка заново дёргает генерацию. Всё внутри fail-soft: сбой записи
+    или письма не имеет права уронить страницу, которую и так уже видит
+    расстроенный покупатель."""
+    try:
+        with Session(engine) as s:
+            purchase = s.get(ReportPurchase, purchase_id)
+            if purchase is None:
+                return
+            purchase.gen_error = error[:500]
+            already_notified = purchase.owner_notified
+            # Заявка без оплаты (status="new") -- не денежный сбой, владелец
+            # и так собирает такие вручную; письмо шлём только когда заплатили.
+            paid = purchase.status == "paid"
+            contact, tier, idea = purchase.contact, purchase.tier, purchase.idea
+            s.add(purchase); s.commit()
+
+        if already_notified or not paid:
+            return
+
+        base = str(request.base_url).rstrip("/")
+        label = REPORT_PRICES.get(tier, {}).get("label", tier)
+        sent = mailer.notify_owner(
+            f"Создатель: оплачен отчёт, но он не собрался (заказ {purchase_id})",
+            f"Тариф: {label}\n"
+            f"Идея: {idea[:200]}\n"
+            f"Покупатель: {contact}\n"
+            f"Ошибка генерации: {error}\n\n"
+            f"Страница отчёта: {base}/report/{check_id}\n"
+            f"Заказы: {base}/desk\n\n"
+            "Покупатель видит на странице сообщение об ошибке. Отчёт пересоберётся "
+            "сам при следующем открытии страницы -- если причина была временной. "
+            "Если нет, деньги придётся вернуть.")
+        if sent:
+            with Session(engine) as s:
+                fresh = s.get(ReportPurchase, purchase_id)
+                if fresh is not None:
+                    fresh.owner_notified = True
+                    s.add(fresh); s.commit()
+    except Exception:
+        logging.getLogger(__name__).warning("report failure notice failed", exc_info=True)
+
+
 @app.get("/report/{rid}", response_class=HTMLResponse)
-async def report_page(rid: int):
+async def report_page(rid: int, request: Request):
     """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
     после оплаты, генерируются лениво при первом открытии (без воркеров,
     тот же принцип, что и во всём проекте)."""
@@ -624,6 +680,7 @@ async def report_page(rid: int):
                     purchase = fresh
             except ReportEngineError as e:
                 gen_error = str(e)
+                _record_report_failure(purchase.id, gen_error, request, rid)
         if purchase.report_json:
             report_full = json.loads(purchase.report_json)
 
@@ -647,12 +704,25 @@ def orders_list(request: Request):
     _check_owner(request)
     with Session(engine) as s:
         rows = s.exec(select(LiveTestOrder)).all()
+        # Покупки отчётов раньше не были видны владельцу НИГДЕ -- ни успешные,
+        # ни сорванные. Для платного продукта это значит, что оплата на 2990 ₽
+        # и несостоявшаяся доставка выглядели одинаково: никак.
+        reports = s.exec(select(ReportPurchase)).all()
     return {"orders": [{"id": o.id, "created_at": str(o.created_at), "idea": o.idea,
                         "contact": o.contact, "status": _effective_status(o.status, o.created_at),
                         "amount": o.amount, "idea_id": o.idea_id,
                         "project_url": f"/p/{o.idea_id}" if o.idea_id else None,
                         "chosen_offer": json.loads(o.chosen_offer) if o.chosen_offer else None}
-                       for o in reversed(rows)]}
+                       for o in reversed(rows)],
+            "reports": [{"id": r.id, "created_at": str(r.created_at), "idea": r.idea,
+                         "contact": r.contact, "tier": r.tier,
+                         "tier_label": REPORT_PRICES.get(r.tier, {}).get("label", r.tier),
+                         "status": _effective_status(r.status, r.created_at),
+                         "amount": r.amount,
+                         "delivered": bool(r.report_json),
+                         "gen_error": r.gen_error,
+                         "report_url": f"/report/{r.check_id}" if r.check_id else None}
+                        for r in reversed(reports)]}
 
 
 @app.get("/api/stats")

@@ -167,7 +167,10 @@
 - Личный кабинет покупателя (`/account`) — вход по magic-link на почту, без
   пароля (`app/mailer.py`, SMTP reg.ru Mail-1). Нужны env:
   `SOZDATEL_SMTP_HOST`, `SOZDATEL_SMTP_PORT` (465), `SOZDATEL_SMTP_USER`,
-  `SOZDATEL_SMTP_PASSWORD`. `SmokeProject.contact` не проставляется
+  `SOZDATEL_SMTP_PASSWORD`. Отдельно `SOZDATEL_OWNER_EMAIL` — куда писать
+  владельцу об оплате, доставка которой сорвалась (`mailer.notify_owner`,
+  никогда не бросает исключение). Не задана — уведомления молча не уходят.
+  `SmokeProject.contact` не проставляется
   автоматически — владелец привязывает вручную через
   `PATCH /api/projects/{idea_id}/contact` при запуске проекта под оплаченную
   заявку живого теста.

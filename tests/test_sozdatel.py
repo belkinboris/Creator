@@ -2126,6 +2126,134 @@ class TestYandexMetrika:
         assert "UNLOCKED_TIER !== 'full'" not in text
 
 
+class TestPaidReportFailureIsNoticed:
+    """A1 из PRODUCT_ROADMAP: оплата прошла, отчёт не собрался -- самый дорогой
+    сценарий отказа. До этого единственным, кто знал о сбое, был покупатель:
+    владельцу не приходило ничего, и покупки отчётов вообще не были видны
+    в /desk -- ни успешные, ни сорванные."""
+
+    def _paid_purchase(self, monkeypatch):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея достаточно длинная для сбоя отчёта"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        contact = f"buyer{rid}@example.com"
+        client.post("/api/report", json={"check_id": rid, "tier": "full", "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = "paid"; s.add(o); s.commit(); oid = o.id
+        return rid, oid
+
+    def _break_generation(self, monkeypatch):
+        import app.main as m
+        from app.report_engine import ReportEngineError
+        async def failing(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
+        monkeypatch.setattr(m, "generate_report", failing)
+
+    def test_failure_is_recorded_and_owner_notified_once(self, monkeypatch):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine
+        rid, oid = self._paid_purchase(monkeypatch)
+        self._break_generation(monkeypatch)
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        sent = []
+        monkeypatch.setattr(m.mailer, "send", lambda to, subject, body, **kw: sent.append((to, subject, body)))
+
+        client.get(f"/report/{rid}")
+        assert len(sent) == 1
+        to, subject, body = sent[0]
+        assert to == "owner@example.com"
+        assert "не собрался" in subject
+        assert f"buyer{rid}@example.com" in body and "ИИ думал слишком долго" in body
+        with Session(engine) as s:
+            p = s.get(ReportPurchase, oid)
+            assert p.gen_error and p.owner_notified is True
+
+        # покупатель перезагружает страницу -- второго письма быть не должно
+        client.get(f"/report/{rid}")
+        client.get(f"/report/{rid}")
+        assert len(sent) == 1
+
+    def test_unpaid_request_does_not_alarm_owner(self, monkeypatch):
+        """Заявка без оплаты -- не денежный сбой, письмо слать не за что."""
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея длинная для неоплаченной заявки"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        client.post("/api/report", json={"check_id": rid, "tier": "quick", "contact": "nopay@example.com"})
+        self._break_generation(monkeypatch)
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        sent = []
+        monkeypatch.setattr(m.mailer, "send", lambda to, subject, body, **kw: sent.append(to))
+        client.get(f"/report/{rid}")
+        assert sent == []
+
+    def test_broken_mail_does_not_break_the_page(self, monkeypatch):
+        """Принцип «деградация вместо ошибки»: покупатель и так видит сбой
+        отчёта -- он не должен получить сверху ещё и 500 из-за почты."""
+        import app.main as m
+        rid, _ = self._paid_purchase(monkeypatch)
+        self._break_generation(monkeypatch)
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        def boom(*a, **kw):
+            raise RuntimeError("SMTP лёг")
+        monkeypatch.setattr(m.mailer, "send", boom)
+        r = client.get(f"/report/{rid}")
+        assert r.status_code == 200
+        assert "Не получилось собрать отчёт" in r.text
+
+    def test_owner_sees_report_purchases_in_orders(self, monkeypatch):
+        """Покупки отчётов не были видны владельцу нигде: оплата на 2990 ₽
+        и несостоявшаяся доставка выглядели одинаково -- никак."""
+        rid, oid = self._paid_purchase(monkeypatch)
+        self._break_generation(monkeypatch)
+        monkeypatch.delenv("SOZDATEL_OWNER_EMAIL", raising=False)
+        client.get(f"/report/{rid}")
+        data = client.get("/api/orders", headers=OWNER).json()
+        row = [r for r in data["reports"] if r["id"] == oid][0]
+        assert row["status"] == "paid"
+        assert row["delivered"] is False
+        assert "ИИ думал слишком долго" in row["gen_error"]
+        assert row["tier_label"] == "Бизнес-план"
+        assert row["report_url"] == f"/report/{rid}"
+
+    def test_desk_renders_failed_delivery(self):
+        text = (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
+        assert 'id="reports"' in text
+        assert "Оплачено, но отчёт не собрался" in text
+        # ранний return в loadOrders прятал бы блок отчётов, пока нет живых тестов
+        assert "} else {" in text
+
+    def test_notify_owner_never_raises_and_skips_without_address(self, monkeypatch):
+        from app import mailer
+        monkeypatch.delenv("SOZDATEL_OWNER_EMAIL", raising=False)
+        assert mailer.notify_owner("т", "т") is False
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+        def boom(msg):
+            raise RuntimeError("сеть легла")
+        assert mailer.notify_owner("т", "т", _send=boom) is False
+
+
 class TestMailer:
     """SMTP-обёртка -- тот же паттерн инъекции, что payments.py/llm_adapter.py."""
 
