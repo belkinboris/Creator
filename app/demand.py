@@ -167,6 +167,9 @@ async def _wordstat_oauth_raw(phrase: str, *, _post=None) -> dict:
         return {"ok": False, "error": repr(exc)}
 
 
+WORDSTAT_RELATED_COUNT = 20  # сколько похожих формулировок просить у Вордстата вместе с totalCount
+
+
 async def _wordstat_cloud_raw(phrase: str, *, _post=None) -> dict:
     """Сырой вызов прежнего пути -- Wordstat-прокси внутри Yandex Cloud
     Search API v2, авторизация Api-Key сервисного аккаунта."""
@@ -174,10 +177,17 @@ async def _wordstat_cloud_raw(phrase: str, *, _post=None) -> dict:
     folder_id = os.environ.get("YANDEX_FOLDER_ID")
     if (not api_key or not folder_id) and _post is None:
         return {"ok": False, "skipped": "YANDEX_API_KEY/YANDEX_FOLDER_ID не заданы"}
-    # num_phrases обязателен (1..2000) -- без него API возвращал 400
-    # "Value must be in the range of 1 to 2000" на КАЖДЫЙ запрос; нам нужен
-    # только totalCount самой фразы, не список похожих, поэтому просим минимум.
-    payload = {"phrase": phrase, "regions": [RUSSIA_REGION], "folderId": folder_id, "num_phrases": 1}
+    # num_phrases обязателен (1..2000) -- без него API отвечал 400 "Value must
+    # be in the range of 1 to 2000" на КАЖДЫЙ запрос. Раньше здесь стоял
+    # минимум (1) в убеждении, что нам нужен только totalCount самой фразы --
+    # это оказалось недальновидно (см. кастдев: LLM угадала «создание
+    # рекламного видео» 157/мес, а реальный ходовой запрос для той же идеи --
+    # «нейросеть для рекламы», 902/мес). Публичные примеры использования этого
+    # эндпоинта используют camelCase (numPhrases) -- шлём оба варианта имени
+    # поля, чтобы не зависеть от неподтверждённой офдокой схемы (см. докстринг
+    # модуля), и просим больше похожих формулировок, чтобы реально их видеть.
+    payload = {"phrase": phrase, "regions": [RUSSIA_REGION], "folderId": folder_id,
+               "num_phrases": WORDSTAT_RELATED_COUNT, "numPhrases": WORDSTAT_RELATED_COUNT}
     try:
         if _post is not None:
             data = await _post("wordstat", payload)
@@ -195,6 +205,23 @@ async def _wordstat_cloud_raw(phrase: str, *, _post=None) -> dict:
         return {"ok": False, "error": repr(exc)}
 
 
+def _best_related_count(data: dict, fallback_count: int | None) -> int | None:
+    """Cloud Search API отдаёт вместе с totalCount список похожих формулировок
+    (topRequests: [{"phrase", "count"}, ...]) -- то, что и так предлагает сам
+    Вордстат рядом с точной фразой. Если среди них частотность выше, чем у
+    дословно запрошенной фразы -- значит наша (LLM-угаданная) формулировка
+    промахнулась мимо реального ходового запроса, а Вордстат его тут же
+    показывает. Берём максимум, а не то, что дословно спросили."""
+    best = fallback_count
+    for item in data.get("topRequests") or []:
+        if not isinstance(item, dict):
+            continue
+        count = item.get("count")
+        if isinstance(count, (int, float)) and (best is None or count > best):
+            best = int(count)
+    return best
+
+
 async def wordstat_count(phrase: str, *, _post=None) -> int | None:
     """Месячная частотность фразы по России. Пробует официальный Wordstat
     API первым (если сконфигурирован), при неуспехе -- прежний Cloud Search
@@ -210,8 +237,10 @@ async def wordstat_count(phrase: str, *, _post=None) -> int | None:
 
     cloud = await _wordstat_cloud_raw(phrase, _post=_post)
     if cloud.get("ok"):
-        count = (cloud.get("data") or {}).get("totalCount")
-        return int(count) if count is not None else None
+        data = cloud.get("data") or {}
+        count = data.get("totalCount")
+        count = int(count) if count is not None else None
+        return _best_related_count(data, count)
     if "status" in cloud or "error" in cloud:
         logger.warning("wordstat cloud path failed for %r: %s", phrase, cloud)
     return None
