@@ -387,7 +387,11 @@ def result_page(rid: int):
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__IDEA_JSON__", idea_json)
         .replace("__RESULT_JSON__", safe_json)
-        .replace("__SAVED__", "true" if rec.contact else "false"))
+        .replace("__SAVED__", "true" if rec.contact else "false")
+        # Человек с /social-contract пришёл за бизнес-планом для комиссии, а
+        # не за рекламным тестом -- страница результата разворачивает финальный
+        # шаг под него, см. PURPOSE в result.html.
+        .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False)))
     return HTMLResponse(html_out)
 
 

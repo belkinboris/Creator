@@ -1881,6 +1881,40 @@ class TestSocialContractPurpose:
         with Session(engine) as s:
             assert s.get(DemandCheck, rid).purpose == "business"
 
+    def test_result_page_exposes_purpose(self):
+        rid = self._make_check("social_contract")
+        assert 'const PURPOSE = "social_contract";' in client.get(f"/r/{rid}").text
+
+    def test_result_page_defaults_purpose_for_business(self):
+        rid = self._make_check()
+        assert 'const PURPOSE = "business";' in client.get(f"/r/{rid}").text
+
+    def test_result_page_promotes_business_plan_for_social_contract(self):
+        """Человек с /social-contract пришёл за планом для комиссии, а главной
+        кнопкой ему предлагался рекламный тест за 1490 ₽, тогда как бизнес-план
+        прятался в «Или...». Для рекламной кампании на эту аудиторию это прямая
+        потеря конверсии: платим за клик и сразу продаём не то."""
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert "IS_SOCIAL_CONTRACT" in text
+        # бизнес-план поднимается в главный блок, рекламный тест опускается
+        assert "alt.className = 'next'" in text
+        assert "order.className = 'alt-path'" in text
+        assert "insertBefore(alt, order)" in text
+        assert "бизнес-план для комиссии" in text
+
+    def test_social_contract_copy_avoids_internal_jargon(self):
+        """«Живой тест» -- наше внутреннее имя услуги, человеку из соцконтракта
+        оно ничего не говорит."""
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert "Оставить заявку на проверку идеи" in text
+        assert "сразу к бизнес-плану" in text
+
+    def test_swapped_blocks_keep_input_styling(self):
+        """Блоки меняются ролями -- поле контакта не должно терять оформление
+        из-за смены класса контейнера."""
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert ".next input,.alt-path input{" in text
+
     def test_report_generation_receives_stored_purpose(self, monkeypatch):
         """Главное звено: то, что сохранили при проверке спроса, реально
         доезжает до generate_report при открытии оплаченного отчёта."""
