@@ -153,6 +153,10 @@ class DemandCheck(SQLModel, table=True):
     # "social_contract" (лендинг /social-contract, выплата от государства).
     # Определяет оптику платного отчёта -- см. PURPOSES в report_engine.
     purpose: str = "business"
+    # JSON выбранного на /r/ заострённого позиционирования. Живёт здесь, а не
+    # на заказе, потому что отчёт заказывают уже со страницы /report/{check_id},
+    # которая знает только check_id: иначе выбор человека до отчёта не доезжает.
+    chosen_offer: str = ""
 
 
 class LiveTestOrder(SQLModel, table=True):
@@ -240,6 +244,7 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS fail_notified BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -720,6 +725,18 @@ def _record_report_failure(purchase_id: int, error: str, request: Request, check
         logging.getLogger(__name__).warning("report failure notice failed", exc_info=True)
 
 
+def _chosen_offer(rec: "DemandCheck") -> dict | None:
+    """Заострение, выбранное на /r/. Битый JSON не имеет права уронить
+    платный отчёт -- лучше собрать разбор по исходной идее, чем не собрать."""
+    if not rec.chosen_offer:
+        return None
+    try:
+        offer = json.loads(rec.chosen_offer)
+    except ValueError:
+        return None
+    return offer if isinstance(offer, dict) else None
+
+
 @app.get("/report/{rid}", response_class=HTMLResponse)
 async def report_page(rid: int, request: Request):
     """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
@@ -741,7 +758,11 @@ async def report_page(rid: int, request: Request):
             try:
                 # purpose определяет оптику отчёта: для соцконтракта это
                 # обоснование сметы для комиссии, а не венчурный разбор.
+                # chosen_offer -- заострение, выбранное человеком на /r/:
+                # разбирать надо ту формулировку, которую он выбрал, а не
+                # сырую первую фразу (A6 в PRODUCT_ROADMAP).
                 report = await generate_report(rec.idea, demand_data, purchase.tier,
+                                               chosen_offer=_chosen_offer(rec),
                                                purpose=rec.purpose)
                 with Session(engine) as s:
                     fresh = s.get(ReportPurchase, purchase.id)
@@ -754,9 +775,17 @@ async def report_page(rid: int, request: Request):
         if purchase.report_json:
             report_full = json.loads(purchase.report_json)
 
+    # Если человек выбрал заострённую формулировку на /r/, он должен видеть,
+    # что разбор построен именно вокруг неё, а не вокруг сырой первой фразы.
+    chosen = _chosen_offer(rec)
+    chosen_h1 = re.sub(r"<[^>]+>", "", str(chosen.get("h1", ""))).strip() if chosen else ""
+    chosen_block = (f'<div class="chosen"><span class="chosen-tag">Разбираем формулировку</span>'
+                    f'<span class="chosen-h1">{html.escape(chosen_h1)}</span></div>') if chosen_h1 else ""
+
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rid))
+        .replace("__CHOSEN_BLOCK__", chosen_block)
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__PREVIEW_JSON__", json.dumps(preview, ensure_ascii=False))
         .replace("__REPORT_JSON__", json.dumps(report_full, ensure_ascii=False) if report_full else "null")
@@ -1437,6 +1466,35 @@ async def demand_save(rid: int, data: DemandSaveIn, request: Request):
     except mailer.MailerError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
     return {"ok": True, "message": "Сохранили. Письмо со ссылкой для входа в кабинет уже отправлено."}
+
+
+class ChosenOfferIn(BaseModel):
+    offer: dict
+
+
+@app.post("/api/demand/{rid}/chosen")
+def demand_chosen(rid: int, data: ChosenOfferIn, request: Request):
+    """Запомнить, какой из трёх заострённых вариантов человек выбрал на /r/.
+
+    Заказ отчёта идёт со страницы /report/{check_id}, где выбора уже нет на
+    экране, — без этой привязки человек выбирал позиционирование, а платный
+    разбор молча строился по исходной сырой формулировке идеи.
+    """
+    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+        or (request.client.host if request.client else "?")
+    if _rate_limited(client_ip):
+        raise HTTPException(429, "слишком часто")
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+        # Проверка, уже привязанная к кабинету, редактируется только своим
+        # владельцем: id перебираются, а выбор влияет на платный отчёт.
+        if rec.contact and rec.contact != _current_contact(request):
+            return JSONResponse({"ok": False, "error": "Эта проверка принадлежит другому кабинету."}, status_code=409)
+        rec.chosen_offer = json.dumps(data.offer, ensure_ascii=False)[:6000]
+        s.add(rec); s.commit()
+    return {"ok": True}
 
 
 @app.get("/api/account/me")

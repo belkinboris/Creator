@@ -498,6 +498,13 @@ function pickOffer(offer, btn){
   const displayH1 = stripTags(offer.h1);
   chosenNote.textContent = 'Тестируем: ' + displayH1;
   chosenNote.classList.add('show');
+  // Отчёт заказывают уже на /report/{id}, где выбора на экране нет -- если
+  // не запомнить его здесь, платный разбор соберётся по сырой идее, а не по
+  // тому, что человек выбрал. Молча: сбой сохранения не должен мешать выбору.
+  fetch('/api/demand/' + CHECK_ID + '/chosen', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({offer: offer})
+  }).catch(() => {});
   advance(4, 'Выбрано: ' + displayH1);
 }
 

@@ -3097,3 +3097,121 @@ class TestStageMerge:
         from app.report_engine import STAGE_NAMES as report_stage_names
         import app.main as m
         assert report_stage_names == m.STAGE_NAMES
+
+
+class TestChosenOfferReachesReport:
+    """A6: человек выбирает на /r/ одну из трёх заострённых формулировок, а
+    платный разбор до этой правки строился по сырой первой фразе. Выбор жил
+    только на заказе живого теста; отчёт заказывают с /report/{check_id},
+    который про заказ ничего не знает."""
+
+    OFFER = {"angle": "Для занятых родителей", "h1": "Шторы <em>за неделю</em>",
+             "sub": "Пошив на дому", "eyebrow": "Родители 30-45",
+             "pains": [{"h2": "Долго ждать", "p": "Ателье шьют месяц"}]}
+
+    def _make_check(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def _pay_report(self, rid, contact):
+        from app.main import ReportPurchase, Session, engine, select
+        client.post("/api/report", json={"check_id": rid, "tier": "full", "contact": contact})
+        with Session(engine) as s:
+            order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            order.status = "paid"; s.add(order); s.commit()
+
+    def test_choice_is_stored_on_the_check(self):
+        from app.main import DemandCheck, Session, engine
+        rid = self._make_check()
+        r = client.post(f"/api/demand/{rid}/chosen", json={"offer": self.OFFER})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        with Session(engine) as s:
+            stored = json.loads(s.get(DemandCheck, rid).chosen_offer)
+        assert stored["h1"] == self.OFFER["h1"]
+        assert stored["pains"][0]["h2"] == "Долго ждать"   # оффер целиком, не только заголовок
+
+    def test_missing_check_is_404(self):
+        assert client.post("/api/demand/999777/chosen", json={"offer": self.OFFER}).status_code == 404
+
+    def test_choice_reaches_report_generation(self, monkeypatch):
+        """Главное звено всей задачи."""
+        import app.main as m
+        rid = self._make_check()
+        client.post(f"/api/demand/{rid}/chosen", json={"offer": self.OFFER})
+        self._pay_report(rid, f"chosen{rid}@example.com")
+        seen = {}
+        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            seen["offer"] = chosen_offer
+            return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
+        monkeypatch.setattr(m, "generate_report", fake_generate)
+        client.get(f"/report/{rid}")
+        assert seen["offer"] is not None
+        assert seen["offer"]["h1"] == self.OFFER["h1"]
+
+    def test_report_without_choice_still_generates(self, monkeypatch):
+        """Заострение необязательно -- его можно пропустить. Отчёт обязан
+        собраться и без выбора, просто по исходной идее."""
+        import app.main as m
+        rid = self._make_check()
+        self._pay_report(rid, f"nochoice{rid}@example.com")
+        seen = {}
+        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            seen["offer"] = chosen_offer
+            return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
+        monkeypatch.setattr(m, "generate_report", fake_generate)
+        assert client.get(f"/report/{rid}").status_code == 200
+        assert seen["offer"] is None
+
+    def test_broken_json_does_not_break_paid_report(self, monkeypatch):
+        """Битая запись не имеет права сорвать оплаченную услугу."""
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        rid = self._make_check()
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid); rec.chosen_offer = "{не json"; s.add(rec); s.commit()
+        self._pay_report(rid, f"broken{rid}@example.com")
+        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            assert chosen_offer is None
+            return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
+        monkeypatch.setattr(m, "generate_report", fake_generate)
+        assert client.get(f"/report/{rid}").status_code == 200
+
+    def test_saved_check_of_another_cabinet_is_protected(self):
+        """id проверок перебираются, а выбор влияет на платный отчёт."""
+        from app.main import DemandCheck, Session, engine
+        rid = self._make_check()
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid); rec.contact = "owner@example.com"; s.add(rec); s.commit()
+        r = client.post(f"/api/demand/{rid}/chosen", json={"offer": self.OFFER})
+        assert r.status_code == 409
+
+    def test_report_page_shows_the_chosen_wording(self):
+        """Иначе человек не может понять, учли его выбор или нет."""
+        rid = self._make_check()
+        client.post(f"/api/demand/{rid}/chosen", json={"offer": self.OFFER})
+        text = client.get(f"/report/{rid}").text
+        assert "Разбираем формулировку" in text
+        assert "Шторы за неделю" in text      # разметка <em> снята, слот не сломан
+        assert "__CHOSEN_BLOCK__" not in text
+
+    def test_report_page_without_choice_has_no_empty_block(self):
+        rid = self._make_check()
+        text = client.get(f"/report/{rid}").text
+        assert "Разбираем формулировку" not in text
+        assert "__CHOSEN_BLOCK__" not in text
+
+    def test_result_page_sends_the_choice(self):
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert "'/api/demand/' + CHECK_ID + '/chosen'" in text
