@@ -103,9 +103,27 @@ class SmokeProject(SQLModel, table=True):
     contact: str = ""        # почта покупателя -- показывается в его личном кабинете (/account)
 
 
-# Единая шкала пути 0..7 -- те же названия на главной, в кабинете и в API.
-STAGE_NAMES = ["Идея", "Спрос", "Проверочная страница", "Реклама",
+# Шкала пути покупателя Создателя 0..6 -- те же названия на главной, в
+# кабинете покупателя (/account) и на /r//p/. "Проверочная страница" и
+# "Реклама" объединены в один шаг "Тест на реальных людях" -- по кастдев-
+# фидбеку это ОДИН платный этап с точки зрения покупателя (мы собираем
+# страницу, он по нашей инструкции запускает рекламу), раздельная нумерация
+# только запутывала. НЕ путать с TRACKED_STAGE_NAMES ниже -- это разные
+# сущности с разной длиной шкалы.
+STAGE_NAMES = ["Идея", "Спрос", "Тест на реальных людях",
                "Заявки", "Первые продажи", "Повторяемость", "Удержание"]
+
+# Шкала для TrackedProject (внешние проекты владельца, не Создателя, см.
+# докстринг класса) -- сознательно НЕ объединена с STAGE_NAMES выше и
+# заморожена в исходном виде из 8 названий. TrackedProject.stage -- сырое
+# целое число, уже хранящееся в БД для существующих внешних проектов
+# (например АвтоПост); если бы эта шкала менялась вместе с STAGE_NAMES,
+# старые записи стали бы указывать не на те этапы (а stage=7 вообще упал бы
+# по IndexError). Общий язык с покупательской шкалой этим двум сущностям не
+# нужен -- у внешнего проекта нет привязки к тому, как именно устроена
+# воронка Создателя.
+TRACKED_STAGE_NAMES = ["Идея", "Спрос", "Проверочная страница", "Реклама",
+                       "Заявки", "Первые продажи", "Повторяемость", "Удержание"]
 
 
 class TrackedProject(SQLModel, table=True):
@@ -114,7 +132,7 @@ class TrackedProject(SQLModel, table=True):
     этапом. Мост, а не переезд: ссылка ведёт в родной интерфейс проекта."""
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
-    stage: int = 0                 # 0..7, индекс в STAGE_NAMES
+    stage: int = 0                 # 0..7, индекс в TRACKED_STAGE_NAMES
     status_note: str = ""          # одна строка: что происходит сейчас
     external_link: str = ""        # куда идти за деталями (бот, кабинет)
     created_at: datetime = Field(default_factory=utcnow)
@@ -1021,11 +1039,11 @@ def cabinet(request: Request):
     """Портфель целиком: внешние проекты + smoke-тесты Создателя.
     Smoke-этап определяется данными: есть клики -> ① Спрос, иначе ⓪ Идея."""
     _check_owner(request)
-    out = {"stages": STAGE_NAMES, "tracked": [], "smoke": []}
+    out = {"stages": TRACKED_STAGE_NAMES, "tracked": [], "smoke": []}
     with Session(engine) as s:
         for tp in s.exec(select(TrackedProject).order_by(TrackedProject.created_at)).all():
             out["tracked"].append({"id": tp.id, "name": tp.name, "stage": tp.stage,
-                                   "stage_name": STAGE_NAMES[tp.stage],
+                                   "stage_name": TRACKED_STAGE_NAMES[tp.stage],
                                    "note": tp.status_note, "link": tp.external_link})
         # Все события одним запросом вместо 2×N (N+1 убивал время на Postgres)
         from collections import defaultdict
@@ -1306,7 +1324,8 @@ def legal_page():
 
 @app.get("/guide/direct", response_class=HTMLResponse)
 def guide_direct():
-    """Этап 4 из 8 — пошаговый запуск Директа (режим эксперта, только Поиск)."""
+    """Этап 3 из 7 — пошаговый запуск Директа, часть «Тест на реальных людях»
+    (режим эксперта, только Поиск)."""
     return HTMLResponse(_static("guide-direct.html"))
 
 

@@ -1040,7 +1040,7 @@ class TestResultPageAndOrders:
         assert rid is not None
         page = client.get(f"/r/{rid}")
         assert page.status_code == 200
-        assert "Этап 2 из 8" in page.text and "Этап 3" in page.text  # преемственность, без жаргона
+        assert "Этап 2 из 7" in page.text and "Этап 3" in page.text  # преемственность, без жаргона
         assert "Ступень" not in page.text
         assert "без ям" not in page.text
         assert "тест фраза" in page.text          # результат вшит в страницу
@@ -1604,7 +1604,7 @@ class TestGuideDirect:
         assert "Простой старт" in t and "нельзя выключить первые 30 дней" in t
         assert "режим эксперта" in t.lower()
         assert "только Поиск" in t
-        assert "Этап 4 из 8" in t
+        assert "Этап 3 из 7" in t
         assert "Ступень" not in t
         assert "без ям" not in t
         assert "оффер" not in t.lower() and "лендинг" not in t.lower()
@@ -2344,13 +2344,13 @@ class TestFunnelCopyClarity:
 
     def test_homepage_step_3_4_no_longer_say_bare_live_test(self):
         home = client.get("/").text
-        assert "тест на реальных людях" in home
+        assert "тест на реальных людях" in home.lower()
         assert '<span class="tag paid-tag">живой тест</span>' not in home
         assert "счётчиком событий" not in home   # жаргон снят
 
     def test_homepage_roadmap_steps_tagged_as_future(self):
         home = client.get("/").text
-        assert home.count("в Создателе 2.0") == 3   # шаги 6, 7, 8
+        assert home.count("в Создателе 2.0") == 3   # шаги 5, 6, 7 (после слияния 3+4)
         assert "скрипт разговора" not in home        # продукт этого не делает
 
     def test_homepage_mentions_business_plan_alt_path(self):
@@ -2360,3 +2360,61 @@ class TestFunnelCopyClarity:
     def test_full_report_tier_relabeled_business_plan(self):
         import app.main as m
         assert m.REPORT_PRICES["full"]["label"] == "Бизнес-план"
+
+
+class TestStageMerge:
+    """«Проверочная страница» + «Реклама» объединены в «Тест на реальных
+    людях» -- один шаг вместо двух непонятных читалось запутанно (кастдев-
+    фидбек). Слияние затрагивает ТОЛЬКО шкалу Создателя (STAGE_NAMES,
+    SmokeProject) -- TrackedProject (внешние проекты владельца, например
+    АвтоПост) использует отдельную неизменную шкалу из 8 названий, иначе
+    существующие в БД записи стали бы указывать не на те этапы после деплоя
+    (а stage=7 упал бы по IndexError на укороченном массиве)."""
+
+    def test_customer_scale_has_7_stages_merged(self):
+        import app.main as m
+        assert len(m.STAGE_NAMES) == 7
+        assert m.STAGE_NAMES == ["Идея", "Спрос", "Тест на реальных людях",
+                                  "Заявки", "Первые продажи", "Повторяемость", "Удержание"]
+
+    def test_tracked_scale_untouched_at_8_stages(self):
+        import app.main as m
+        assert len(m.TRACKED_STAGE_NAMES) == 8
+        assert m.TRACKED_STAGE_NAMES[2] == "Проверочная страница"
+        assert m.TRACKED_STAGE_NAMES[3] == "Реклама"
+
+    def test_existing_tracked_project_at_old_stage_7_still_resolves(self):
+        """До слияния «Удержание» было индексом 7 -- на укороченной customer-
+        шкале это вышло бы за границы массива. Внешние проекты не должны
+        сломаться после деплоя этого изменения."""
+        r = client.post("/api/tracked", headers=OWNER,
+                         json={"name": "Внешний проект на удержании", "stage": 7})
+        assert r.status_code == 200
+        tp_id = r.json()["id"]
+        try:
+            cab = client.get("/api/cabinet", headers=OWNER).json()
+            tracked = [t for t in cab["tracked"] if t["id"] == tp_id][0]
+            assert tracked["stage_name"] == "Удержание"
+            assert len(cab["stages"]) == 8
+        finally:
+            client.delete(f"/api/tracked/{tp_id}", headers=OWNER)
+
+    def test_project_page_uses_merged_7_stage_scale(self):
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        assert "Тест на реальных людях" in text
+        assert "из 7" in text
+        assert "length:7" in text.replace(" ", "")
+        assert "Реклама" not in text   # старое отдельное название шага ушло
+
+    def test_desk_stage_badge_parameterized_by_scale_length(self):
+        """/desk смешивает в одной сетке smoke-проекты Создателя (7 шагов) и
+        внешние tracked-проекты (8 шагов) -- общий stageBadge() должен брать
+        длину шкалы параметром, а не хардкодить одно число на двоих."""
+        text = (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
+        assert "stageBadge(s.stage, s.stage_name, 7)" in text
+        assert "stageBadge(t.stage, t.stage_name, 8)" in text
+
+    def test_report_engine_stage_names_match_merged_scale(self):
+        from app.report_engine import STAGE_NAMES as report_stage_names
+        import app.main as m
+        assert report_stage_names == m.STAGE_NAMES
