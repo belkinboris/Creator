@@ -253,7 +253,7 @@ async def _lifespan(_app: FastAPI):
             s.exec(select(SmokeProject.id).limit(1)).first()
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
-    for name in ("index.html", "portfolio.html", "project.html", "guide-direct.html", "result.html", "report.html",
+    for name in ("index.html", "project.html", "guide-direct.html", "result.html", "report.html",
                  "social-contract.html", "account.html"):
         try:
             _static(name)

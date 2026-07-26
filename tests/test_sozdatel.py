@@ -707,6 +707,13 @@ class TestNightPolish:
         assert r.status_code == 307
         assert r.headers["location"] == "/desk"
 
+    def test_dead_portfolio_file_is_gone(self):
+        """Файл нёс третью шкалу этапов (Оффер · Активация · Мост · Оплата ·
+        Масштаб) и путал при чтении кода. Роут-редирект живёт без него."""
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parents[1]
+        assert not (root / "static" / "portfolio.html").exists()
+
     def test_series_endpoint(self):
         client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
             "offer": dict(VALID_OFFER, idea_id="ser_v1")})
