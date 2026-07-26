@@ -109,7 +109,7 @@
       <h1>Мои <span class="hl">проекты</span></h1>
       <a href="/">На главную →</a>
     </div>
-    <p class="sub">Каждый проект — где он на пути 0→7, что показывают цифры и что делать дальше.</p>
+    <p class="sub">Каждый проект — на каком он этапе, что показывают цифры и что делать дальше.</p>
     <div class="grid" id="grid"></div>
 
     <div class="orders-head">
@@ -140,9 +140,11 @@
 <script>
 let KEY = sessionStorage.getItem("sozdatel_key") || "";
 const STAGES = ["Идея","Спрос","Проверочная страница","Реклама","Заявки","Первые продажи","Повторяемость","Удержание"];
-function stageBadge(stageIdx, name){
-  const segs = Array.from({length:8}, (_,i)=> `<i class="${i<=stageIdx?'done':''}"></i>`).join('');
-  return `<div class="stage-line"><span class="stage-txt">Этап ${stageIdx+1} из 8 — ${name}</span><div class="stage-bar">${segs}</div></div>`;
+function stageBadge(stageIdx, name, total){
+  // total разный: у smoke-проектов Создателя 7 шагов, у внешних (tracked) --
+  // 8, это разные шкалы (см. STAGE_NAMES/TRACKED_STAGE_NAMES в app/main.py).
+  const segs = Array.from({length:total}, (_,i)=> `<i class="${i<=stageIdx?'done':''}"></i>`).join('');
+  return `<div class="stage-line"><span class="stage-txt">Этап ${stageIdx+1} из ${total} — ${name}</span><div class="stage-bar">${segs}</div></div>`;
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -216,7 +218,7 @@ async function load(){
     el.innerHTML = `
       <div class="kind">проверка спроса · Создатель</div>
       <h2>${s.name}</h2>
-      ${stageBadge(s.stage, s.stage_name)}
+      ${stageBadge(s.stage, s.stage_name, 7)}
       <div class="nums">
         <div class="n"><div class="v">${s.views}<span style="font-size:.5em;color:var(--muted)">/${s.target}</span></div><div class="l">визитов</div></div>
         <div class="n"><div class="v">${s.leads}</div><div class="l">заявок</div></div>
@@ -240,7 +242,7 @@ async function load(){
     el.innerHTML = `
       <div class="kind">внешний проект · ведётся отдельно</div>
       <h2>${t.name}</h2>
-      ${stageBadge(t.stage, t.stage_name)}
+      ${stageBadge(t.stage, t.stage_name, 8)}
       <div class="next"><span>что происходит</span>${t.note || "—"}</div>
       <div class="acts">
         ${t.link? `<button class="btn" onclick="window.open('${t.link}','_blank')">Открыть</button>`:""}

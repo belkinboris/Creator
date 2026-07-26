@@ -963,6 +963,26 @@ class TestOverallAndStats:
         assert out["overall"]["value"] == round((8 + 3 + 8 + 7) / 4)
         assert out["overall"]["weakest"] == "Конкуренция"
 
+    def test_overall_capped_by_weak_demand(self):
+        """Спрос -- ворота: почти нулевая частотность не должна тонуть в
+        среднем с тремя хорошими LLM-шкалами и выдавать обманчиво высокий балл."""
+        score_json = json.dumps({"competition": 9, "timing": 9, "execution": 9,
+            "notes": {"competition": "", "timing": "", "execution": ""}}, ensure_ascii=False)
+        async def post(provider, payload):
+            if provider == "yandex":
+                if "шкалам" in payload["instructions"]:
+                    return _yandex_response(score_json)
+                return _yandex_response(json.dumps(["a b", "c d", "e f"]))
+            if provider == "wordstat":
+                return {"totalCount": 1}   # спрос = 1 -- почти никто не ищет
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Достаточно длинная идея с почти нулевым спросом", _post=post))
+        assert out["scores"][0]["value"] == 1
+        naive_avg = round((1 + 9 + 9 + 9) / 4)   # было бы 7 без ворот -- вводит в заблуждение
+        assert naive_avg == 7
+        assert out["overall"]["value"] == 1
+        assert out["overall"]["weakest"] == "Спрос"
+
     def test_demand_check_persisted_and_stats(self):
         import app.main as m
         async def fake_check(idea):
@@ -1020,7 +1040,7 @@ class TestResultPageAndOrders:
         assert rid is not None
         page = client.get(f"/r/{rid}")
         assert page.status_code == 200
-        assert "Этап 2 из 8" in page.text and "Этап 3" in page.text  # преемственность, без жаргона
+        assert "Этап 2 из 7" in page.text and "Этап 3" in page.text  # преемственность, без жаргона
         assert "Ступень" not in page.text
         assert "без ям" not in page.text
         assert "тест фраза" in page.text          # результат вшит в страницу
@@ -1470,6 +1490,35 @@ class TestReportFlow:
         assert "t.ru" in text
         assert "Спрос есть" in text
 
+    def test_free_preview_is_analysis_not_a_stat_block(self):
+        """Кастдев-фидбек: крупные цифры без разбора не убеждают -- тизер
+        должен читаться как текстовый анализ (заметки LLM по шкалам, уже
+        посчитанные на бесплатном шаге), а не витрина из голых чисел."""
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест фраза", "count": 4200}],
+                    "best_phrase": "тест фраза",
+                    "verdict": {"level": "strong", "text": "Спрос есть"},
+                    "competitors": {"found": 100, "top": [{"title": "Т", "domain": "t.ru"}]},
+                    "scores": [
+                        {"key": "demand", "label": "Спрос", "value": 8, "note": ""},
+                        {"key": "competition", "label": "Конкуренция", "value": 6, "note": "рынок не забит"},
+                        {"key": "timing", "label": "Своевременность", "value": 7, "note": "спрос растёт сейчас"},
+                        {"key": "execution", "label": "Реализуемость", "value": 9, "note": "можно запустить за пару недель"},
+                    ],
+                    "overall": {"value": 7, "weakest": "Конкуренция"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея достаточно длинная для анализа тизера"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        text = client.get(f"/report/{rid}").text
+        assert 'class="stat"' not in text          # старая витрина из цифр убрана
+        assert "рынок не забит" in text
+        assert "спрос растёт сейчас" in text
+        assert "можно запустить за пару недель" in text
+
     def test_pricing_shown_near_top_not_only_at_bottom(self):
         """Цены не только в самом низу заблюренного отчёта -- дублируются
         сразу после бесплатного тизера, чтобы не заставлять листать весь блюр."""
@@ -1555,7 +1604,7 @@ class TestGuideDirect:
         assert "Простой старт" in t and "нельзя выключить первые 30 дней" in t
         assert "режим эксперта" in t.lower()
         assert "только Поиск" in t
-        assert "Этап 4 из 8" in t
+        assert "Этап 3 из 7" in t
         assert "Ступень" not in t
         assert "без ям" not in t
         assert "оффер" not in t.lower() and "лендинг" not in t.lower()
@@ -1989,6 +2038,195 @@ class TestAccountCabinet:
         assert r.status_code == 401
 
 
+class TestSaveCheckToAccount:
+    """Бесплатная проверка спроса без ссылки на кабинет не должна теряться --
+    можно привязать её к контакту постфактум (POST /api/demand/{id}/save),
+    либо она привязывается сама, если проверку делает уже вошедший."""
+
+    def _make_check(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест фраза", "count": 4200}],
+                    "best_phrase": "тест фраза",
+                    "verdict": {"level": "strong", "text": "Спрос есть"},
+                    "competitors": {"found": 100, "top": [{"title": "Т", "domain": "t.ru"}]},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 8, "note": ""}],
+                    "overall": {"value": 8, "weakest": "Спрос"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            r = client.post("/api/demand", json={"idea": "Идея достаточно длинная для сохранения"})
+            return r.json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def _issue_session(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_save_" + contact, contact=contact))
+            s.commit()
+        r = client.get(f"/account/verify?token=tok_save_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 307)
+        return r.cookies.get("sozdatel_session")
+
+    def test_result_page_exposes_saved_flag(self):
+        client.cookies.clear()
+        rid = self._make_check()
+        assert "const SAVED = false;" in client.get(f"/r/{rid}").text
+
+    def test_save_requires_valid_email_when_anonymous(self):
+        client.cookies.clear()
+        rid = self._make_check()
+        r = client.post(f"/api/demand/{rid}/save", json={"contact": "@telegram"})
+        assert r.status_code == 400
+
+    def test_save_unknown_check_404(self):
+        client.cookies.clear()
+        r = client.post("/api/demand/999999/save", json={"contact": "user@example.com"})
+        assert r.status_code == 404
+
+    def test_save_anonymous_sends_magic_link_and_persists_contact(self, monkeypatch):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        captured = {}
+        def fake_send(to, subject, body, **kw):
+            captured["to"] = to; captured["body"] = body
+        monkeypatch.setattr(m.mailer, "send", fake_send)
+        client.cookies.clear()
+        rid = self._make_check()
+        r = client.post(f"/api/demand/{rid}/save", json={"contact": "Saver@Example.com"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert captured["to"] == "saver@example.com"
+        assert "/account/verify?token=" in captured["body"]
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            assert rec.contact == "saver@example.com"
+
+    def test_save_while_logged_in_uses_session_contact_instantly(self):
+        client.cookies.clear()
+        rid = self._make_check()
+        token = self._issue_session("loggedin@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            r = client.post(f"/api/demand/{rid}/save", json={"contact": ""})
+            assert r.status_code == 200
+            assert r.json()["message"] == "Сохранено в кабинете."
+        finally:
+            client.cookies.clear()
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            assert rec.contact == "loggedin@example.com"
+
+    def test_demand_check_auto_attaches_contact_for_logged_in_user(self):
+        client.cookies.clear()
+        token = self._issue_session("autosave@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            rid = self._make_check()
+        finally:
+            client.cookies.clear()
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            assert rec.contact == "autosave@example.com"
+
+    def test_account_me_lists_saved_checks_not_promoted_to_report_or_order(self, monkeypatch):
+        import app.main as m
+        from app.main import DemandCheck, ReportPurchase, Session, engine
+        client.cookies.clear()
+        token = self._issue_session("checklist@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            rid_plain = self._make_check()
+            rid_promoted = self._make_check()
+            with Session(engine) as s:
+                s.add(ReportPurchase(check_id=rid_promoted, idea="уже выросло в отчёт",
+                                     tier="quick", contact="checklist@example.com",
+                                     status="paid", amount=990))
+                s.commit()
+            d = client.get("/api/account/me").json()
+        finally:
+            client.cookies.clear()
+        check_ids = [c["id"] for c in d["checks"]]
+        assert rid_plain in check_ids
+        assert rid_promoted not in check_ids   # уже виден в reports, не дублируем
+
+    def test_result_page_has_save_button_wiring(self):
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert 'id="save-btn"' in text and "/save" in text and "trySave" in text
+
+    def test_account_page_renders_checks_section(self):
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert 'id="checks-block"' in text and "d.checks" in text
+
+
+class TestProjectPageCustomerAccess:
+    """/p/{id} стало доступно из кабинета покупателя (см. _smoke_card в
+    /api/account/me) -- цифры проекта не должны требовать секретный ключ
+    владельца у обычного покупателя, только у самого владельца."""
+
+    def _issue_session(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_proj_" + contact, contact=contact))
+            s.commit()
+        r = client.get(f"/account/verify?token=tok_proj_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 307)
+        return r.cookies.get("sozdatel_session")
+
+    def test_owner_key_still_works(self):
+        client.cookies.clear()
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="pacc_owner")})
+        assert client.get("/api/verdict/pacc_owner", headers=OWNER).status_code == 200
+        assert client.get("/api/series/pacc_owner", headers=OWNER).status_code == 200
+
+    def test_customer_session_grants_access_to_own_project(self):
+        client.cookies.clear()
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="pacc_mine")})
+        client.patch("/api/projects/pacc_mine/contact", headers=OWNER,
+                     json={"contact": "owner_of_project@example.com"})
+        token = self._issue_session("owner_of_project@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            assert client.get("/api/verdict/pacc_mine").status_code == 200
+            assert client.get("/api/series/pacc_mine").status_code == 200
+        finally:
+            client.cookies.clear()
+
+    def test_customer_session_denied_for_someone_elses_project(self):
+        client.cookies.clear()
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="pacc_other")})
+        client.patch("/api/projects/pacc_other/contact", headers=OWNER,
+                     json={"contact": "real_owner@example.com"})
+        token = self._issue_session("stranger@example.com")
+        client.cookies.set("sozdatel_session", token)
+        try:
+            assert client.get("/api/verdict/pacc_other").status_code == 401
+        finally:
+            client.cookies.clear()
+
+    def test_no_key_no_session_still_401(self):
+        client.cookies.clear()
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="pacc_anon")})
+        assert client.get("/api/verdict/pacc_anon").status_code == 401
+        assert client.get("/api/series/pacc_anon").status_code == 401
+
+    def test_unknown_project_404_regardless_of_key(self):
+        assert client.get("/api/series/pacc_does_not_exist", headers=OWNER).status_code == 404
+
+    def test_project_page_tries_session_before_prompting_for_owner_key(self):
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        assert "authedFetch" in text
+        assert "authedFetch(`/api/verdict/${IDEA_ID}`)" in text
+        assert "authedFetch(`/api/series/${IDEA_ID}`)" in text
+
+
 class TestAutoLaunchUiWiring:
     """Статическая проверка, что новые состояния заказа (запущено само /
     нужно запустить вручную) отражены в JS /desk и /account, а не только
@@ -2090,10 +2328,93 @@ class TestCustomerDevPass:
         уместен как шаг воронки, но на странице отчёта после того, как идею
         уже заострили, звучит как отказ от уже принятого решения купить."""
         text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
-        assert "p.verdict_level !== 'weak'" in text
+        assert "p.verdict_level === 'weak'" in text
 
     def test_alt_path_report_button_is_ink_not_ghost(self):
         """"Посмотреть отчёт" был btn-ghost -- по фидбеку поднят до полного
         чернильного веса, отчёт не второсортная опция."""
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
         assert '<a class="btn" href="/report/__CHECK_ID__">Посмотреть отчёт</a>' in text
+
+
+class TestFunnelCopyClarity:
+    """Кастдев-фидбек: «живой тест» на главной непонятен без контекста, шаги
+    6-8 звучат как обещание того, чего продукт ещё не делает, «отчёт» не
+    доносит ценность так, как «бизнес-план»."""
+
+    def test_homepage_step_3_4_no_longer_say_bare_live_test(self):
+        home = client.get("/").text
+        assert "тест на реальных людях" in home.lower()
+        assert '<span class="tag paid-tag">живой тест</span>' not in home
+        assert "счётчиком событий" not in home   # жаргон снят
+
+    def test_homepage_roadmap_steps_tagged_as_future(self):
+        home = client.get("/").text
+        assert home.count("в Создателе 2.0") == 3   # шаги 5, 6, 7 (после слияния 3+4)
+        assert "скрипт разговора" not in home        # продукт этого не делает
+
+    def test_homepage_mentions_business_plan_alt_path(self):
+        home = client.get("/").text
+        assert "бизнес-план" in home.lower()
+
+    def test_full_report_tier_relabeled_business_plan(self):
+        import app.main as m
+        assert m.REPORT_PRICES["full"]["label"] == "Бизнес-план"
+
+
+class TestStageMerge:
+    """«Проверочная страница» + «Реклама» объединены в «Тест на реальных
+    людях» -- один шаг вместо двух непонятных читалось запутанно (кастдев-
+    фидбек). Слияние затрагивает ТОЛЬКО шкалу Создателя (STAGE_NAMES,
+    SmokeProject) -- TrackedProject (внешние проекты владельца, например
+    АвтоПост) использует отдельную неизменную шкалу из 8 названий, иначе
+    существующие в БД записи стали бы указывать не на те этапы после деплоя
+    (а stage=7 упал бы по IndexError на укороченном массиве)."""
+
+    def test_customer_scale_has_7_stages_merged(self):
+        import app.main as m
+        assert len(m.STAGE_NAMES) == 7
+        assert m.STAGE_NAMES == ["Идея", "Спрос", "Тест на реальных людях",
+                                  "Заявки", "Первые продажи", "Повторяемость", "Удержание"]
+
+    def test_tracked_scale_untouched_at_8_stages(self):
+        import app.main as m
+        assert len(m.TRACKED_STAGE_NAMES) == 8
+        assert m.TRACKED_STAGE_NAMES[2] == "Проверочная страница"
+        assert m.TRACKED_STAGE_NAMES[3] == "Реклама"
+
+    def test_existing_tracked_project_at_old_stage_7_still_resolves(self):
+        """До слияния «Удержание» было индексом 7 -- на укороченной customer-
+        шкале это вышло бы за границы массива. Внешние проекты не должны
+        сломаться после деплоя этого изменения."""
+        r = client.post("/api/tracked", headers=OWNER,
+                         json={"name": "Внешний проект на удержании", "stage": 7})
+        assert r.status_code == 200
+        tp_id = r.json()["id"]
+        try:
+            cab = client.get("/api/cabinet", headers=OWNER).json()
+            tracked = [t for t in cab["tracked"] if t["id"] == tp_id][0]
+            assert tracked["stage_name"] == "Удержание"
+            assert len(cab["stages"]) == 8
+        finally:
+            client.delete(f"/api/tracked/{tp_id}", headers=OWNER)
+
+    def test_project_page_uses_merged_7_stage_scale(self):
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        assert "Тест на реальных людях" in text
+        assert "из 7" in text
+        assert "length:7" in text.replace(" ", "")
+        assert "Реклама" not in text   # старое отдельное название шага ушло
+
+    def test_desk_stage_badge_parameterized_by_scale_length(self):
+        """/desk смешивает в одной сетке smoke-проекты Создателя (7 шагов) и
+        внешние tracked-проекты (8 шагов) -- общий stageBadge() должен брать
+        длину шкалы параметром, а не хардкодить одно число на двоих."""
+        text = (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
+        assert "stageBadge(s.stage, s.stage_name, 7)" in text
+        assert "stageBadge(t.stage, t.stage_name, 8)" in text
+
+    def test_report_engine_stage_names_match_merged_scale(self):
+        from app.report_engine import STAGE_NAMES as report_stage_names
+        import app.main as m
+        assert report_stage_names == m.STAGE_NAMES

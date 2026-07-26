@@ -27,14 +27,16 @@
   h1{font-size:clamp(22px,3.8vw,28px);font-weight:600;letter-spacing:-.015em}
   .idea{color:var(--muted);font-size:15px;margin-top:6px;max-width:46em}
 
-  /* Бесплатный тизер — виден всегда, посчитан на бесплатных данных проверки спроса */
+  /* Бесплатный тизер — виден всегда, разбор на данных бесплатной проверки
+     спроса (частотность, конкуренты, LLM-заметки по шкалам), а не витрина
+     из крупных цифр без контекста -- цифры без разбора не убеждают. */
   .preview{border:1px solid var(--line);background:var(--box);border-radius:8px;
-    padding:18px;margin:18px 0 0;display:flex;gap:28px;flex-wrap:wrap}
-  .preview .stat b{font:600 24px "IBM Plex Mono",monospace;display:block;
-    background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px;width:fit-content}
-  .preview .stat span{display:block;color:var(--muted);font-size:13px;margin-top:5px;max-width:16em}
-  .preview-note{color:var(--ink);font-size:15px;max-width:56em;margin:12px 0 18px}
-  .preview-note b{font-weight:600}
+    padding:18px 20px;margin:18px 0 0}
+  .preview p{color:var(--ink);font-size:15px;max-width:56em;margin-top:10px}
+  .preview p:first-child{margin-top:0}
+  .preview b{font-weight:600}
+  .preview .num{font:600 15px "IBM Plex Mono",monospace;
+    background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 2px}
 
   /* Балл жизнеспособности + топ-риски -- появляются сразу после разблокировки,
      до подробных секций, как самый весомый вывод отчёта */
@@ -135,7 +137,6 @@
   </div>
 
   <div class="preview" id="preview"></div>
-  <p class="preview-note" id="preview-note"></p>
   <div id="score-section"></div>
   <div class="pricing no-print" id="pricing-top"></div>
   <div class="pdf-row no-print" id="pdf-row" style="display:none">
@@ -184,28 +185,45 @@ const TEASER = {
   audience: "Кому именно продавать в первую очередь и почему.",
   finance: "Оценка выручки, затрат и точки безубыточности.",
   risks: "Что может пойти не так и как это снизить заранее.",
-  launch: "Пошаговый план — что делать дальше по пути 0→7.",
+  launch: "Пошаговый план — что делать дальше, по этапам с 1 по 8.",
 };
 
-// --- Бесплатный тизер -- реальные данные бесплатной проверки спроса, без ИИ ---
+// --- Бесплатный тизер -- разбор на данных бесплатной проверки спроса, без
+// новых вызовов ИИ (заметки по шкалам уже посчитаны на бесплатном шаге).
+// Текст, а не витрина из голых цифр -- цифры сами по себе ничего не доказывают.
 (function renderPreview(){
   const p = PREVIEW;
-  const items = [];
-  items.push(`<div class="stat"><b>${p.best_count !== null ? fmt(p.best_count) + '/мес' : 'почти не ищут'}</b><span>частотность лучшей формулировки</span></div>`);
-  if (p.overall_value !== null && p.overall_value !== undefined)
-    items.push(`<div class="stat"><b>${p.overall_value}/10</b><span>общая оценка идеи${p.weakest ? ', слабое место — ' + escapeHtml(p.weakest.toLowerCase()) : ''}</span></div>`);
-  items.push(`<div class="stat"><b>${p.competitors_count}</b><span>конкурентов уже в выдаче</span></div>`);
-  document.getElementById('preview').innerHTML = items.join('');
+  const parts = [];
 
-  const bits = [];
-  // При слабом сигнале спроса вердикт советует "переформулируйте идею" --
-  // здесь это уже неактуально: если человек дошёл до покупки отчёта, он,
-  // скорее всего, уже заострил идею на бесплатном шаге. Повторять совет
-  // "попробуйте сузить" не нужно, показываем только положительные вердикты.
-  if (p.verdict_text && p.verdict_level !== 'weak') bits.push(escapeHtml(p.verdict_text));
-  if (p.top_competitor_names && p.top_competitor_names.length)
-    bits.push(`Уже в выдаче: <b>${p.top_competitor_names.map(escapeHtml).join(', ')}</b>`);
-  document.getElementById('preview-note').innerHTML = bits.join(' · ');
+  // Вердикт уже включает частотность в самой формулировке для сильного/нишевого
+  // спроса -- отдельное предложение с тем же числом было бы повтором.
+  // При слабом сигнале вердикт советует "переформулируйте идею" -- здесь это
+  // уже неактуально: если человек дошёл до покупки отчёта, он, скорее всего,
+  // уже заострил идею на бесплатном шаге. Показываем голый факт без совета.
+  if (p.verdict_level === 'weak') {
+    parts.push(p.best_count !== null
+      ? `Лучшую формулировку ищут <span class="num">${fmt(p.best_count)}</span> раз в месяц в Яндексе по России — немного.`
+      : `По нашим формулировкам идею в Яндексе почти не ищут.`);
+  } else if (p.verdict_text) {
+    parts.push(escapeHtml(p.verdict_text));
+  } else if (p.best_count !== null) {
+    parts.push(`Лучшую формулировку ищут <span class="num">${fmt(p.best_count)}</span> раз в месяц в Яндексе по России.`);
+  }
+
+  if (p.top_competitor_names && p.top_competitor_names.length) {
+    let s = `В выдаче на этот запрос уже отвечают: <b>${p.top_competitor_names.map(escapeHtml).join(', ')}</b>.`;
+    if (p.competition_note) s += ' ' + escapeHtml(p.competition_note);
+    parts.push(s);
+  } else if (p.competition_note) {
+    parts.push(escapeHtml(p.competition_note));
+  }
+  if (p.timing_note) parts.push(escapeHtml(p.timing_note));
+  if (p.execution_note) parts.push(escapeHtml(p.execution_note));
+
+  if (p.overall_value !== null && p.overall_value !== undefined)
+    parts.push(`Общая оценка идеи — <span class="num">${p.overall_value}/10</span>${p.weakest ? ', самое слабое место — ' + escapeHtml(p.weakest.toLowerCase()) : ''}.`);
+
+  document.getElementById('preview').innerHTML = parts.map(t => `<p>${t}</p>`).join('');
 })();
 
 // --- Балл жизнеспособности + топ-риски -- видны сразу после разблокировки ---
@@ -280,8 +298,8 @@ function tierCard(key){
 if (UNLOCKED_TIER === 'full') {
   pricing.style.display = 'none';
 } else if (UNLOCKED_TIER === 'quick') {
-  pricing.innerHTML = `<h3>Докупить <span class="hl">полный отчёт</span></h3>
-    <p>У вас есть быстрый разбор. Полный отчёт добавляет аудиторию, финансовую модель, риски и план запуска.</p>
+  pricing.innerHTML = `<h3>Докупить <span class="hl">бизнес-план</span></h3>
+    <p>У вас есть быстрый разбор. Бизнес-план добавляет аудиторию, финансовую модель, риски и план запуска.</p>
     <div class="tiers">${tierCard('full')}</div>
     <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
     <p class="err" id="order-err" role="alert"></p>`;

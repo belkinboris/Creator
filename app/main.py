@@ -103,9 +103,27 @@ class SmokeProject(SQLModel, table=True):
     contact: str = ""        # почта покупателя -- показывается в его личном кабинете (/account)
 
 
-# Единая шкала пути 0..7 -- те же названия на главной, в кабинете и в API.
-STAGE_NAMES = ["Идея", "Спрос", "Проверочная страница", "Реклама",
+# Шкала пути покупателя Создателя 0..6 -- те же названия на главной, в
+# кабинете покупателя (/account) и на /r//p/. "Проверочная страница" и
+# "Реклама" объединены в один шаг "Тест на реальных людях" -- по кастдев-
+# фидбеку это ОДИН платный этап с точки зрения покупателя (мы собираем
+# страницу, он по нашей инструкции запускает рекламу), раздельная нумерация
+# только запутывала. НЕ путать с TRACKED_STAGE_NAMES ниже -- это разные
+# сущности с разной длиной шкалы.
+STAGE_NAMES = ["Идея", "Спрос", "Тест на реальных людях",
                "Заявки", "Первые продажи", "Повторяемость", "Удержание"]
+
+# Шкала для TrackedProject (внешние проекты владельца, не Создателя, см.
+# докстринг класса) -- сознательно НЕ объединена с STAGE_NAMES выше и
+# заморожена в исходном виде из 8 названий. TrackedProject.stage -- сырое
+# целое число, уже хранящееся в БД для существующих внешних проектов
+# (например АвтоПост); если бы эта шкала менялась вместе с STAGE_NAMES,
+# старые записи стали бы указывать не на те этапы (а stage=7 вообще упал бы
+# по IndexError). Общий язык с покупательской шкалой этим двум сущностям не
+# нужен -- у внешнего проекта нет привязки к тому, как именно устроена
+# воронка Создателя.
+TRACKED_STAGE_NAMES = ["Идея", "Спрос", "Проверочная страница", "Реклама",
+                       "Заявки", "Первые продажи", "Повторяемость", "Удержание"]
 
 
 class TrackedProject(SQLModel, table=True):
@@ -114,7 +132,7 @@ class TrackedProject(SQLModel, table=True):
     этапом. Мост, а не переезд: ссылка ведёт в родной интерфейс проекта."""
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
-    stage: int = 0                 # 0..7, индекс в STAGE_NAMES
+    stage: int = 0                 # 0..7, индекс в TRACKED_STAGE_NAMES
     status_note: str = ""          # одна строка: что происходит сейчас
     external_link: str = ""        # куда идти за деталями (бот, кабинет)
     created_at: datetime = Field(default_factory=utcnow)
@@ -127,6 +145,9 @@ class DemandCheck(SQLModel, table=True):
     idea: str = ""
     best_count: Optional[int] = None
     result_json: str = ""
+    # Пусто, пока человек не привязал бесплатную проверку к кабинету -- см.
+    # POST /api/demand/{id}/save и автопривязку на /r/ для уже вошедших.
+    contact: str = ""
 
 
 class LiveTestOrder(SQLModel, table=True):
@@ -200,6 +221,7 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS idea_id VARCHAR"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -243,6 +265,18 @@ def _check_owner(request: Request) -> None:
     provided = request.headers.get("X-Owner-Key") or request.query_params.get("key") or ""
     if provided != OWNER_KEY:
         raise HTTPException(401, "Нужен ключ владельца (X-Owner-Key).")
+
+
+def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
+    """Доступ к цифрам проекта на /p/{id}: владелец по ключу (как везде на
+    /desk), либо покупатель по своей сессии кабинета -- /p/ теперь открыт
+    и из /account, а не только из /desk, значит нельзя требовать секретный
+    ключ владельца у обычного покупателя."""
+    provided = request.headers.get("X-Owner-Key") or request.query_params.get("key") or ""
+    if OWNER_KEY and provided == OWNER_KEY:
+        return True
+    contact = _current_contact(request)
+    return bool(contact and proj.contact and contact == proj.contact)
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +327,11 @@ async def demand_check(data: IdeaIn, request: Request):
     check_id = None
     try:  # сохранение не должно уметь ломать ответ пользователю
         known = [f["count"] for f in result["formulations"] if f["count"] is not None]
+        # Уже вошедший в кабинет человек получает автопривязку без лишних
+        # действий -- проверка сразу видна в /account, без отдельного "Сохранить".
+        contact = _current_contact(request) or ""
         rec = DemandCheck(idea=data.idea[:300], best_count=max(known) if known else None,
-                          result_json=json.dumps(result, ensure_ascii=False))
+                          result_json=json.dumps(result, ensure_ascii=False), contact=contact)
         with Session(engine) as s:
             s.add(rec); s.commit(); s.refresh(rec)
             check_id = rec.id
@@ -338,7 +375,8 @@ def result_page(rid: int):
         .replace("__PAY_ENABLED__", "true" if payments.configured() else "false")
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__IDEA_JSON__", idea_json)
-        .replace("__RESULT_JSON__", safe_json))
+        .replace("__RESULT_JSON__", safe_json)
+        .replace("__SAVED__", "true" if rec.contact else "false"))
     return HTMLResponse(html_out)
 
 
@@ -441,13 +479,19 @@ async def yookassa_webhook(request: Request):
 
 REPORT_PRICES = {
     "quick": {"price": 990, "was": 1490, "label": "Быстрый разбор"},
-    "full": {"price": 2990, "was": 3990, "label": "Полный отчёт"},
+    # "Полный отчёт" переименован в "Бизнес-план" -- этот тариф добавляет
+    # именно то, что бизнес-планом и называют (финансы, план запуска), а не
+    # ещё немного текста к тому же отчёту. Точнее описывает содержимое.
+    "full": {"price": 2990, "was": 3990, "label": "Бизнес-план"},
 }
 
 
 def _report_preview(demand_data: dict) -> dict:
     """Бесплатный тизер отчёта — из уже посчитанных данных проверки спроса,
-    без LLM. Показывается всегда, вне зависимости от оплаты."""
+    без новых вызовов LLM (заметки по шкалам уже сгенерированы бесплатным
+    шагом check_demand). Показывается всегда, вне зависимости от оплаты.
+    Текстовый разбор, а не витрина из голых цифр -- см. кастдев-фидбек
+    (dimeadozen как ориентир на содержательный анализ, не «воду»)."""
     v = demand_data.get("verdict") or {}
     overall = demand_data.get("overall") or {}
     formulations = demand_data.get("formulations") or []
@@ -455,6 +499,7 @@ def _report_preview(demand_data: dict) -> dict:
     top = max(known) if known else None
     comp = demand_data.get("competitors") or {}
     top_names = [c.get("domain") or c.get("title") or "" for c in (comp.get("top") or [])[:3]]
+    notes = {s["key"]: s.get("note", "") for s in (demand_data.get("scores") or [])}
     return {
         "best_count": top,
         "verdict_text": v.get("text", ""),
@@ -463,6 +508,9 @@ def _report_preview(demand_data: dict) -> dict:
         "weakest": overall.get("weakest", ""),
         "competitors_count": len(comp.get("top") or []),
         "top_competitor_names": [n for n in top_names if n],
+        "competition_note": notes.get("competition", ""),
+        "timing_note": notes.get("timing", ""),
+        "execution_note": notes.get("execution", ""),
     }
 
 
@@ -806,11 +854,12 @@ def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
 
 @app.get("/api/verdict/{idea_id}")
 def verdict(idea_id: str, request: Request):
-    _check_owner(request)
     with Session(engine) as s:
         proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
         if proj is None:
             raise HTTPException(404, "идея не найдена")
+        if not _project_access_ok(request, proj):
+            raise HTTPException(401, "Нужен ключ владельца или вход в кабинет с этим проектом.")
         views = len(s.exec(select(SmokeEvent.id).where(
             SmokeEvent.idea == idea_id, SmokeEvent.event == "page_view")).all())
         leads_rows = s.exec(select(SmokeEvent.contact, SmokeEvent.created_at).where(
@@ -832,12 +881,14 @@ def verdict(idea_id: str, request: Request):
 @app.get("/api/series/{idea_id}")
 def series(idea_id: str, request: Request):
     """Визиты/заявки по дням за последние 14 дней — для графика на /p/{id}."""
-    _check_owner(request)
     from collections import defaultdict
     from datetime import timedelta
     with Session(engine) as s:
-        if s.exec(select(SmokeProject.id).where(SmokeProject.idea_id == idea_id)).first() is None:
+        proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
+        if proj is None:
             raise HTTPException(404, "идея не найдена")
+        if not _project_access_ok(request, proj):
+            raise HTTPException(401, "Нужен ключ владельца или вход в кабинет с этим проектом.")
         since = utcnow() - timedelta(days=14)
         rows = s.exec(select(SmokeEvent.created_at, SmokeEvent.event).where(
             SmokeEvent.idea == idea_id, SmokeEvent.created_at >= since)).all()
@@ -988,11 +1039,11 @@ def cabinet(request: Request):
     """Портфель целиком: внешние проекты + smoke-тесты Создателя.
     Smoke-этап определяется данными: есть клики -> ① Спрос, иначе ⓪ Идея."""
     _check_owner(request)
-    out = {"stages": STAGE_NAMES, "tracked": [], "smoke": []}
+    out = {"stages": TRACKED_STAGE_NAMES, "tracked": [], "smoke": []}
     with Session(engine) as s:
         for tp in s.exec(select(TrackedProject).order_by(TrackedProject.created_at)).all():
             out["tracked"].append({"id": tp.id, "name": tp.name, "stage": tp.stage,
-                                   "stage_name": STAGE_NAMES[tp.stage],
+                                   "stage_name": TRACKED_STAGE_NAMES[tp.stage],
                                    "note": tp.status_note, "link": tp.external_link})
         # Все события одним запросом вместо 2×N (N+1 убивал время на Postgres)
         from collections import defaultdict
@@ -1109,6 +1160,21 @@ class AccountLinkIn(BaseModel):
     contact: str
 
 
+def _send_magic_link(contact: str, request: Request, subject: str, intro: str) -> None:
+    """Токен входа + письмо со ссылкой -- общая часть обычного входа в кабинет
+    и сохранения бесплатной проверки под контакт. Бросает mailer.MailerError
+    на стороне вызова, не глотает её сама."""
+    token = secrets.token_urlsafe(32)
+    with Session(engine) as s:
+        s.add(MagicLinkToken(token=token, contact=contact))
+        s.commit()
+    base = str(request.base_url).rstrip("/")
+    link = f"{base}/account/verify?token={token}"
+    body = (f"{intro} (действует {MAGIC_LINK_TTL_MINUTES} минут):\n{link}\n\n"
+            "Если это не вы — просто проигнорируйте это письмо.")
+    mailer.send(contact, subject, body)
+
+
 @app.post("/api/account/request-link")
 async def account_request_link(data: AccountLinkIn, request: Request):
     contact = data.contact.strip().lower()
@@ -1116,17 +1182,9 @@ async def account_request_link(data: AccountLinkIn, request: Request):
         return JSONResponse({"ok": False, "error": "Введите почту, на которую оформляли заказ."}, status_code=400)
     if not mailer.configured():
         return JSONResponse({"ok": False, "error": "Вход по почте пока не настроен на сервере."}, status_code=503)
-
-    token = secrets.token_urlsafe(32)
-    with Session(engine) as s:
-        s.add(MagicLinkToken(token=token, contact=contact))
-        s.commit()
-    base = str(request.base_url).rstrip("/")
-    link = f"{base}/account/verify?token={token}"
-    body = (f"Ссылка для входа в личный кабинет Создателя (действует {MAGIC_LINK_TTL_MINUTES} минут):\n{link}\n\n"
-            "Если вы не запрашивали вход — просто проигнорируйте это письмо.")
     try:
-        mailer.send(contact, "Вход в личный кабинет — Создатель", body)
+        _send_magic_link(contact, request, "Вход в личный кабинет — Создатель",
+                          "Ссылка для входа в личный кабинет Создателя")
     except mailer.MailerError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
     return {"ok": True, "message": "Если эта почта известна нам, письмо со ссылкой уже отправлено."}
@@ -1168,11 +1226,48 @@ def _current_contact(request: Request) -> Optional[str]:
         return sess.contact if sess else None
 
 
+class DemandSaveIn(BaseModel):
+    contact: str = ""
+
+
+@app.post("/api/demand/{rid}/save")
+async def demand_save(rid: int, data: DemandSaveIn, request: Request):
+    """Привязать бесплатную проверку спроса к кабинету -- иначе результат,
+    полученный без прямой ссылки на /account (обычный вход с посадочной),
+    нигде не найти повторно. Уже вошедшему привязываем контактом сессии
+    сразу; остальным -- контакт из формы + magic-link, как обычный вход."""
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+
+        already = _current_contact(request)
+        if already:
+            rec.contact = already
+            s.add(rec); s.commit()
+            return {"ok": True, "message": "Сохранено в кабинете."}
+
+        contact = data.contact.strip().lower()
+        if not _EMAIL_RE.match(contact):
+            return JSONResponse({"ok": False, "error": "Введите почту, на которую пришлём ссылку для входа."}, status_code=400)
+        rec.contact = contact
+        s.add(rec); s.commit()
+
+    if not mailer.configured():
+        return {"ok": True, "message": "Сохранено. Вход по почте пока не настроен на сервере."}
+    try:
+        _send_magic_link(contact, request, "Проверка сохранена — вход в кабинет Создателя",
+                          "Идея сохранена в кабинете. Ссылка для входа")
+    except mailer.MailerError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    return {"ok": True, "message": "Сохранили. Письмо со ссылкой для входа в кабинет уже отправлено."}
+
+
 @app.get("/api/account/me")
 def account_me(request: Request):
     contact = _current_contact(request)
     if not contact:
-        return {"ok": True, "contact": None, "projects": [], "reports": [], "orders": []}
+        return {"ok": True, "contact": None, "projects": [], "reports": [], "orders": [], "checks": []}
     with Session(engine) as s:
         projects = s.exec(select(SmokeProject).where(SmokeProject.contact == contact)
                           .order_by(SmokeProject.created_at.desc())).all()
@@ -1187,6 +1282,15 @@ def account_me(request: Request):
         orders = s.exec(select(LiveTestOrder).where(
             LiveTestOrder.contact == contact, LiveTestOrder.idea_id.is_(None)
         ).order_by(LiveTestOrder.created_at.desc())).all()
+        # Сохранённые бесплатные проверки спроса -- вход в кабинет без покупки
+        # (см. POST /api/demand/{id}/save). Проверки, из которых уже выросли
+        # отчёт или заявка на живой тест, не дублируем отдельной строкой --
+        # они и так видны выше с более полным контекстом.
+        promoted_ids = {r.check_id for r in reports} | {o.check_id for o in orders}
+        checks = s.exec(select(DemandCheck).where(
+            DemandCheck.contact == contact
+        ).order_by(DemandCheck.created_at.desc())).all()
+        checks = [c for c in checks if c.id not in promoted_ids]
         from collections import defaultdict
         idea_ids = [p.idea_id for p in projects]
         counts: dict[tuple[str, str], int] = defaultdict(int)
@@ -1204,6 +1308,7 @@ def account_me(request: Request):
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
                     "status": _effective_status(o.status, o.created_at),
                     "continue_url": f"/r/{o.check_id}" if o.check_id else None} for o in orders],
+        "checks": [{"id": c.id, "idea": c.idea, "result_url": f"/r/{c.id}"} for c in checks],
     }
 
 
@@ -1219,7 +1324,8 @@ def legal_page():
 
 @app.get("/guide/direct", response_class=HTMLResponse)
 def guide_direct():
-    """Этап 4 из 8 — пошаговый запуск Директа (режим эксперта, только Поиск)."""
+    """Этап 3 из 7 — пошаговый запуск Директа, часть «Тест на реальных людях»
+    (режим эксперта, только Поиск)."""
     return HTMLResponse(_static("guide-direct.html"))
 
 
