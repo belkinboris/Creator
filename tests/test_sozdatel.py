@@ -1759,6 +1759,26 @@ class TestProjectPage:
         assert "#FBF6EA" in text   # фон бумаги, а не --blueprint
 
 
+class TestOwnerKeyUrlHandoff:
+    """/desk уже знает ключ владельца (sessionStorage) -- при переходе на
+    /p/{id} раньше он терялся, и project.html спрашивал ключ заново нативным
+    prompt() при КАЖДОМ открытии проекта. Теперь /desk кладёт ключ в ссылку,
+    а project.html сначала смотрит в URL и только потом -- в prompt()."""
+
+    def test_desk_passes_owner_key_in_project_link(self):
+        text = (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
+        assert "location.href='${s.project_url}?key='+encodeURIComponent(KEY)" in text
+
+    def test_project_page_reads_key_from_url_before_prompting(self):
+        text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
+        assert "new URLSearchParams(location.search).get(\"key\")" in text
+        # порядок важен: URL раньше prompt(), иначе владелец из /desk всё
+        # равно увидит диалог
+        url_pos = text.index("URLSearchParams(location.search)")
+        prompt_pos = text.index("prompt(\"Ключ владельца:\")")
+        assert url_pos < prompt_pos
+
+
 class TestYandexMetrika:
     """Счётчик вставляется единой точкой в _static() (см. _inject_metrika),
     а не копипастой по каждому HTML-файлу. Цели воронки шлются из JS через

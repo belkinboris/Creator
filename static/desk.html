@@ -229,7 +229,7 @@ async function load(){
       <div class="verdict">${s.verdict}</div>
       <div class="next"><span>следующий шаг</span>${s.next_step}</div>
       <div class="acts">
-        <button class="btn" onclick="location.href='${s.project_url}'">Открыть проект</button>
+        <button class="btn" onclick="location.href='${s.project_url}?key='+encodeURIComponent(KEY)">Открыть проект</button>
         <button class="btn ghost" onclick="window.open('${s.landing_url}','_blank')">Лендинг</button>
         <button class="btn ghost" onclick="del('${s.idea_id}')">Удалить</button>
       </div>`;
