@@ -2126,6 +2126,130 @@ class TestYandexMetrika:
         assert "UNLOCKED_TIER !== 'full'" not in text
 
 
+class TestOwnerLearnsAboutOrders:
+    """A2 из PRODUCT_ROADMAP: владелец узнавал о деньгах и заявках, только
+    открыв /desk глазами. Для продукта с платным рекламным трафиком это
+    значит узнавать об оплате через сутки."""
+
+    def _mail(self, monkeypatch):
+        import app.main as m
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        sent = []
+        monkeypatch.setattr(m.mailer, "send", lambda to, subject, body, **kw: sent.append((subject, body)))
+        return sent
+
+    def _check(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand", json={"idea": "Идея достаточно длинная для уведомления"}).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def test_unpaid_live_test_request_reaches_owner(self, monkeypatch):
+        sent = self._mail(monkeypatch)
+        rid = self._check()
+        r = client.post("/api/live-test", json={"check_id": rid, "contact": "lead@example.com"})
+        assert r.status_code == 200 and r.json()["paid"] is False
+        assert len(sent) == 1
+        subject, body = sent[0]
+        assert "живой тест" in subject and "заявка без оплаты" in subject
+        assert "lead@example.com" in body
+        assert "довести вручную" in body
+
+    def test_unpaid_report_request_reaches_owner(self, monkeypatch):
+        sent = self._mail(monkeypatch)
+        rid = self._check()
+        r = client.post("/api/report", json={"check_id": rid, "tier": "full", "contact": "rep@example.com"})
+        assert r.status_code == 200
+        assert len(sent) == 1
+        subject, body = sent[0]
+        assert "Бизнес-план" in subject and "rep@example.com" in body
+        assert f"/report/{rid}" in body
+
+    def test_paid_webhook_notifies_owner_once(self, monkeypatch):
+        """Вебхук ЮКассы может прийти повторно -- письмо должно уйти один раз."""
+        import app.main as m
+        from app.main import LiveTestOrder, Session, engine, select
+        monkeypatch.setattr(m.payments, "configured", lambda: True)
+        sent = self._mail(monkeypatch)
+        rid = self._check()
+        async def fake_create(order_id, amount, desc, url, kind="livetest", contact="", _post=None):
+            return ("pay_a2", "https://pay.example/x")
+        monkeypatch.setattr(m.payments, "create_payment", fake_create)
+        client.post("/api/live-test", json={"check_id": rid, "contact": "buyer_a2@example.com"})
+        assert sent == []          # оплата ещё не подтверждена -- писать не о чем
+        with Session(engine) as s:
+            oid = s.exec(select(LiveTestOrder).where(LiveTestOrder.contact == "buyer_a2@example.com")).first().id
+        async def fake_fetch(pid, _post=None):
+            return {"status": "succeeded", "metadata": {"order_id": str(oid), "kind": "livetest"}}
+        monkeypatch.setattr(m.payments, "fetch_payment", fake_fetch)
+
+        client.post("/api/yookassa/webhook", json={"object": {"id": "pay_a2"}})
+        assert len(sent) == 1
+        subject, body = sent[0]
+        assert "оплачено" in subject and "1490" in body
+
+        client.post("/api/yookassa/webhook", json={"object": {"id": "pay_a2"}})
+        assert len(sent) == 1      # повтор вебхука не шлёт второе письмо
+
+    def test_paid_notice_does_not_swallow_failure_notice(self, monkeypatch):
+        """Флаги уведомлений разведены: письмо об оплате не должно гасить
+        более важное письмо о том, что оплаченная услуга не оказана."""
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        from app.report_engine import ReportEngineError
+        monkeypatch.setattr(m.payments, "configured", lambda: True)
+        sent = self._mail(monkeypatch)
+        rid = self._check()
+        async def fake_create(order_id, amount, desc, url, kind="livetest", contact="", _post=None):
+            return ("pay_a2b", "https://pay.example/y")
+        monkeypatch.setattr(m.payments, "create_payment", fake_create)
+        client.post("/api/report", json={"check_id": rid, "tier": "quick", "contact": "both_a2@example.com"})
+        with Session(engine) as s:
+            oid = s.exec(select(ReportPurchase).where(ReportPurchase.contact == "both_a2@example.com")).first().id
+        async def fake_fetch(pid, _post=None):
+            return {"status": "succeeded", "metadata": {"order_id": str(oid), "kind": "report"}}
+        monkeypatch.setattr(m.payments, "fetch_payment", fake_fetch)
+        client.post("/api/yookassa/webhook", json={"object": {"id": "pay_a2b"}})
+        assert len(sent) == 1 and "оплачено" in sent[0][0]
+
+        async def failing(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
+        monkeypatch.setattr(m, "generate_report", failing)
+        client.get(f"/report/{rid}")
+        assert len(sent) == 2                      # письмо о сбое всё-таки ушло
+        assert "не собрался" in sent[1][0]
+
+    def test_broken_mail_does_not_break_the_order(self, monkeypatch):
+        """Заявка должна приниматься, даже если почта владельца легла."""
+        import app.main as m
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        def boom(*a, **kw):
+            raise RuntimeError("SMTP лёг")
+        monkeypatch.setattr(m.mailer, "send", boom)
+        rid = self._check()
+        r = client.post("/api/live-test", json={"check_id": rid, "contact": "still@example.com"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+
+    def test_no_owner_email_configured_is_silent(self, monkeypatch):
+        import app.main as m
+        monkeypatch.delenv("SOZDATEL_OWNER_EMAIL", raising=False)
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        sent = []
+        monkeypatch.setattr(m.mailer, "send", lambda *a, **kw: sent.append(a))
+        rid = self._check()
+        client.post("/api/live-test", json={"check_id": rid, "contact": "quiet@example.com"})
+        assert sent == []
+
+
 class TestPaidReportFailureIsNoticed:
     """A1 из PRODUCT_ROADMAP: оплата прошла, отчёт не собрался -- самый дорогой
     сценарий отказа. До этого единственным, кто знал о сбое, был покупатель:
@@ -2177,7 +2301,7 @@ class TestPaidReportFailureIsNoticed:
         assert f"buyer{rid}@example.com" in body and "ИИ думал слишком долго" in body
         with Session(engine) as s:
             p = s.get(ReportPurchase, oid)
-            assert p.gen_error and p.owner_notified is True
+            assert p.gen_error and p.fail_notified is True
 
         # покупатель перезагружает страницу -- второго письма быть не должно
         client.get(f"/report/{rid}")

@@ -167,6 +167,7 @@ class LiveTestOrder(SQLModel, table=True):
     payment_id: str = ""
     amount: int = 0
     chosen_offer: str = ""    # JSON: полный оффер, выбранный на /r/{id} -- см. LAUNCH_REQUIRED_FIELDS
+    paid_notified: bool = False   # владельцу сообщили об оплате/заявке
     idea_id: Optional[str] = None   # проставляется автозапуском/владельцем -- ссылка на запущенный SmokeProject
 
 
@@ -185,10 +186,12 @@ class ReportPurchase(SQLModel, table=True):
     amount: int = 0
     report_json: str = ""     # заполняется лениво после оплаты
     # Оплата прошла, а генерация упала -- худший сценарий платного продукта.
-    # Причина видна владельцу в /desk, owner_notified не даёт слать письмо
-    # заново на каждую перезагрузку страницы покупателем.
+    # Причина видна владельцу в /desk. Два РАЗНЫХ флага уведомлений: об
+    # оплате и о сбое доставки. Один на двоих означал бы, что письмо об
+    # оплате гасит более важное письмо о том, что услуга не оказана.
     gen_error: str = ""
-    owner_notified: bool = False
+    fail_notified: bool = False   # владельцу сообщили о сорванной доставке
+    paid_notified: bool = False   # владельцу сообщили о самой оплате/заявке
 
 
 class MagicLinkToken(SQLModel, table=True):
@@ -234,7 +237,9 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS purpose VARCHAR DEFAULT 'business'"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS gen_error VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS owner_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS fail_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -434,6 +439,11 @@ async def live_test_order(data: LiveTestIn, request: Request):
         s.add(order); s.commit(); s.refresh(order)
         order_id = order.id
     if not payments.configured():
+        # Заявку без оплаты доводит владелец руками -- значит он должен о ней
+        # узнать, а не обнаружить, открыв /desk через несколько дней.
+        if _notify_owner_order(request, what="живой тест", order_id=order_id, idea=idea,
+                               contact=contact, amount=LIVE_TEST_PRICE, paid=False):
+            _mark_notified(LiveTestOrder, order_id)
         return {"ok": True, "paid": False,
                 "message": "Заявка принята. Мы свяжемся в течение дня, запустим страницу и рекламу вашей идеи."}
     try:
@@ -470,11 +480,26 @@ async def yookassa_webhook(request: Request):
     order_id = meta.get("order_id")
     kind = meta.get("kind", "livetest")   # старые платежи до kind -- считаем livetest
     model = {"livetest": LiveTestOrder, "report": ReportPurchase}.get(kind, LiveTestOrder)
+    notify = None
     try:
         with Session(engine) as s:
             order = s.get(model, int(order_id)) if order_id else None
             if order and order.status != "paid":
                 order.status = "paid"; s.add(order); s.commit()
+            if order is not None and not order.paid_notified:
+                # Собираем данные письма ВНУТРИ сессии, а шлём после неё:
+                # SMTP может отвечать секундами, держать на нём транзакцию
+                # и ответ вебхуку ЮКассы незачем.
+                if kind == "report":
+                    label = REPORT_PRICES.get(order.tier, {}).get("label", order.tier)
+                    notify = {"what": f"отчёт «{label}»", "order_id": order.id,
+                              "idea": order.idea, "contact": order.contact,
+                              "amount": order.amount,
+                              "link": f"/report/{order.check_id}" if order.check_id else ""}
+                else:
+                    notify = {"what": "живой тест", "order_id": order.id,
+                              "idea": order.idea, "contact": order.contact,
+                              "amount": order.amount, "link": ""}
             # Автозапуск: если на /r/ выбрали заострённый вариант (полный
             # оффер, не только angle/h1/sub -- см. pickOffer в result.html),
             # запускаем проект сразу при оплате, без ручного вмешательства
@@ -492,6 +517,8 @@ async def yookassa_webhook(request: Request):
                     s.add(order); s.commit()
     except Exception:
         logging.getLogger(__name__).warning("webhook order update failed", exc_info=True)
+    if notify and _notify_owner_order(request, paid=True, **notify):
+        _mark_notified(model, notify["order_id"])
     return {"ok": True}
 
 
@@ -577,6 +604,11 @@ async def report_order(data: ReportIn, request: Request):
         s.add(order); s.commit(); s.refresh(order)
         order_id = order.id
     if not payments.configured():
+        if _notify_owner_order(request, what=f"отчёт «{REPORT_PRICES[tier]['label']}»",
+                               order_id=order_id, idea=idea, contact=contact,
+                               amount=price, paid=False,
+                               link=f"/report/{data.check_id}" if data.check_id else ""):
+            _mark_notified(ReportPurchase, order_id)
         return {"ok": True, "paid": False,
                 "message": "Заявка принята. Мы соберём отчёт вручную и пришлём в течение дня."}
     try:
@@ -601,6 +633,44 @@ def report_status(rid: int):
     return {"paid": bool(purchase), "tier": purchase.tier if purchase else None}
 
 
+def _notify_owner_order(request: Request, *, what: str, order_id: int, idea: str,
+                        contact: str, amount: int, paid: bool, link: str = "") -> bool:
+    """Письмо владельцу о новом заказе -- оплаченном или заявке без оплаты.
+
+    До этого владелец узнавал о деньгах и заявках, только открыв /desk
+    глазами: продукт с платным рекламным трафиком так работать не может
+    (A2 в PRODUCT_ROADMAP). Никогда не бросает -- см. mailer.notify_owner,
+    сбой уведомления не имеет права сломать оплату или заявку.
+    """
+    base = str(request.base_url).rstrip("/")
+    head = "оплачено" if paid else "заявка без оплаты"
+    body = (f"{what}\n"
+            f"Заказ №{order_id}\n"
+            f"Идея: {(idea or '—')[:200]}\n"
+            f"Контакт: {contact or '—'}\n")
+    if paid:
+        body += f"Сумма: {amount} ₽\n"
+    else:
+        body += "Оплаты не было: связаться и довести вручную.\n"
+    if link:
+        body += f"\n{base}{link}\n"
+    body += f"\nВсе заказы: {base}/desk\n"
+    return mailer.notify_owner(f"Создатель: {head} — {what}", body)
+
+
+def _mark_notified(model, order_id: int) -> None:
+    """Флаг «владельцу уже написали» отдельной короткой транзакцией: вебхук
+    ЮКассы может прийти повторно, а страницу заказа можно перезагрузить."""
+    try:
+        with Session(engine) as s:
+            row = s.get(model, order_id)
+            if row is not None:
+                row.paid_notified = True
+                s.add(row); s.commit()
+    except Exception:
+        logging.getLogger(__name__).warning("mark notified failed", exc_info=True)
+
+
 def _record_report_failure(purchase_id: int, error: str, request: Request, check_id: int) -> None:
     """Оплата прошла, отчёт не собрался -- самый дорогой сценарий отказа для
     платного продукта: деньги списаны, услуга не оказана, и до этой правки
@@ -617,7 +687,7 @@ def _record_report_failure(purchase_id: int, error: str, request: Request, check
             if purchase is None:
                 return
             purchase.gen_error = error[:500]
-            already_notified = purchase.owner_notified
+            already_notified = purchase.fail_notified
             # Заявка без оплаты (status="new") -- не денежный сбой, владелец
             # и так собирает такие вручную; письмо шлём только когда заплатили.
             paid = purchase.status == "paid"
@@ -644,7 +714,7 @@ def _record_report_failure(purchase_id: int, error: str, request: Request, check
             with Session(engine) as s:
                 fresh = s.get(ReportPurchase, purchase_id)
                 if fresh is not None:
-                    fresh.owner_notified = True
+                    fresh.fail_notified = True
                     s.add(fresh); s.commit()
     except Exception:
         logging.getLogger(__name__).warning("report failure notice failed", exc_info=True)
