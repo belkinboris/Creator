@@ -850,6 +850,50 @@ class TestWordstatDualPath:
         assert "num_phrases" in captured
         assert 1 <= captured["num_phrases"] <= 2000
 
+    def test_cloud_path_sends_both_num_phrases_spellings(self, monkeypatch):
+        """Публичные примеры использования этого эндпоинта используют camelCase
+        (numPhrases), офдока недоступна для проверки -- шлём оба варианта имени
+        поля, чтобы не зависеть от неподтверждённой схемы."""
+        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
+        captured = {}
+        async def post(provider, payload):
+            captured.update(payload)
+            return {"totalCount": 123}
+        asyncio.run(wordstat_count("тест фраза", _post=post))
+        assert captured.get("num_phrases") == captured.get("numPhrases")
+        assert captured["numPhrases"] > 1   # не 1 -- иначе похожие формулировки не увидим
+
+    def test_cloud_path_prefers_higher_related_phrase_count(self, monkeypatch):
+        """Кастдев-находка: LLM угадала «создание рекламного видео» (157/мес),
+        а Вордстат сам предлагает рядом реальный ходовой запрос «нейросеть для
+        рекламы» (902/мес) в topRequests -- этот сигнал раньше отбрасывался,
+        читался только totalCount дословно запрошенной фразы."""
+        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
+        async def post(provider, payload):
+            return {"totalCount": 157, "topRequests": [
+                {"phrase": "нейросеть для рекламы", "count": 902},
+                {"phrase": "создать рекламное видео онлайн", "count": 40},
+            ]}
+        out = asyncio.run(wordstat_count("создание рекламного видео", _post=post))
+        assert out == 902
+
+    def test_related_phrases_never_lower_the_count(self, monkeypatch):
+        """Похожие формулировки с меньшей частотностью не должны понижать
+        totalCount дословно запрошенной фразы -- берём максимум, не среднее."""
+        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
+        async def post(provider, payload):
+            return {"totalCount": 5000, "topRequests": [{"phrase": "похожий запрос", "count": 10}]}
+        out = asyncio.run(wordstat_count("популярная фраза", _post=post))
+        assert out == 5000
+
+    def test_malformed_related_phrases_do_not_crash(self, monkeypatch):
+        """topRequests может прийти в неожиданной форме -- деградация, не 500."""
+        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
+        async def post(provider, payload):
+            return {"totalCount": 200, "topRequests": ["не словарь", {"phrase": "x"}, {"count": "не число"}]}
+        out = asyncio.run(wordstat_count("фраза", _post=post))
+        assert out == 200
+
 
 class TestDiagYandex:
     def test_requires_owner_key(self):
