@@ -877,6 +877,29 @@ class TestDemand:
         assert out["verdict"]["level"] == "unknown"
         assert out["competitors"] == {"found": None, "top": []}
 
+    def test_verdict_has_no_internal_jargon(self):
+        """A4 из PRODUCT_ROADMAP: вердикт видят обе аудитории, включая
+        самозанятую, которая рекламу вообще запускать не собирается."""
+        from app.demand import _verdict
+        texts = [_verdict(v)["text"] for v in (None, 10, 500, 5000)]
+        for t in texts:
+            low = t.lower()
+            for bad in ("трафик", "в холодную", "живой тест", "конверси",
+                        "гипотез", "частотность", "оффер", "лендинг"):
+                assert bad not in low, f"жаргон в вердикте: {bad!r} -> {t}"
+
+    def test_verdict_states_finding_not_next_step(self):
+        """Следующий шаг у аудиторий разный и подбирается CTA страницы по
+        purpose -- вердикт не должен тянуть человека в чужую воронку."""
+        from app.demand import _verdict
+        niche = _verdict(500)["text"]
+        assert "проверить на живом" not in niche.lower()
+        assert "реклам" not in niche.lower()
+
+    def test_verdict_keeps_the_number_it_reports(self):
+        from app.demand import _verdict
+        assert "5 000" in _verdict(5000)["text"]   # разряды через пробел
+
     def test_verdict_tiers(self):
         assert _verdict(None)["level"] == "unknown"
         assert _verdict(100)["level"] == "weak"
