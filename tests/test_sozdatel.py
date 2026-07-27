@@ -3682,7 +3682,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__RESULT_JSON__", "__SAVED__", "__PURPOSE_JSON__", "__CHOSEN_BLOCK__",
             "__PREVIEW_JSON__", "__REPORT_JSON__", "__UNLOCKED_TIER__", "__ORDER_STATUS__",
             "__GEN_ERROR__", "__PRICES_JSON__", "__SECTIONS_JSON__", "__QUICK_KEYS_JSON__",
-            "__OWNER_BAR__", "__TIER_KEYS_JSON__",
+            "__OWNER_BAR__", "__TIER_KEYS_JSON__", "__SAMPLE_JSON__",
             "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
         }
@@ -3775,7 +3775,10 @@ class TestOwnerReportPreview:
         rid = self._check()
         client.get(f"/report/{rid}?preview=full", headers=OWNER)
         text = client.get(f"/report/{rid}").text          # посторонний, без ключа
-        assert "Разбор идеи по данным проверки." not in text
+        # Бесплатный образец (балл + один раздел) посторонний видит — это
+        # витрина. А вот платный разбор обязан остаться запертым.
+        assert "const UNLOCKED_TIER = null;" in text
+        assert "const TIER_KEYS = [];" in text
         assert client.get(f"/api/report/{rid}/status").json()["paid"] is False
 
     def test_preview_requires_the_owner_key(self, monkeypatch):
@@ -4306,3 +4309,132 @@ class TestReportBuildsProgressively:
         text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
         assert 'id="build-progress"' in text
         assert "Можно читать уже готовые разделы" in text
+
+
+class TestFreeSampleSellsTheReport:
+    """Бесплатная часть страницы отчёта была пересказом цифр со страницы
+    спроса — ни строчки сгенерированного анализа. Человек, решающий отдать
+    990–2990 ₽, не мог оценить качество того, что покупает. У dimeadozen
+    бесплатно открыты полное резюме, балл и названные риски — это и есть
+    продающий инструмент."""
+
+    def _check(self, purpose="business"):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand", json={"idea": "Пошив штор на заказ",
+                                                    "purpose": purpose}).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def _stub(self, monkeypatch, calls=None):
+        import app.main as m
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            if calls is not None:
+                calls.append("core")
+            return {"viability_score": 61, "viability_summary": "Ниша держится на рекомендациях.",
+                    "top_risks": [{"title": "Заказы не повторяются",
+                                   "body": "Шторы покупают раз в несколько лет."}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            if calls is not None:
+                calls.append(key)
+            return {"key": key, "title": "Резюме", "body": "Настоящий текст разбора."}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
+
+    def test_unpaid_visitor_sees_real_analysis(self, monkeypatch):
+        self._stub(monkeypatch)
+        rid = self._check()
+        text = client.get(f"/report/{rid}").text
+        assert "Настоящий текст разбора." in text          # целый раздел
+        assert "Ниша держится на рекомендациях." in text   # объяснение балла
+        assert "Заказы не повторяются" in text             # названный риск
+        assert "Часть разбора — бесплатно" in text
+
+    def test_sample_is_built_once_and_cached(self, monkeypatch):
+        """Два вызова модели на человека — за них платит владелец."""
+        from app.main import DemandCheck, Session, engine
+        calls = []
+        self._stub(monkeypatch, calls)
+        rid = self._check()
+        client.get(f"/report/{rid}")
+        assert calls == ["core", "summary"]
+        client.get(f"/report/{rid}")
+        assert calls == ["core", "summary"]                # второй визит бесплатен
+        with Session(engine) as s:
+            assert s.get(DemandCheck, rid).sample_json
+
+    def test_sample_uses_the_audience_optics(self, monkeypatch):
+        """Соцконтракту нельзя показывать венчурный разбор даже в образце."""
+        seen = {}
+        import app.main as m
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            seen["core"] = purpose
+            return {"viability_score": 61, "viability_summary": "с",
+                    "top_risks": [{"title": "т", "body": "б"}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            seen["section"] = purpose
+            return {"key": key, "title": "Резюме", "body": "текст"}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
+        rid = self._check("social_contract")
+        client.get(f"/report/{rid}")
+        assert seen == {"core": "social_contract", "section": "social_contract"}
+
+    def test_buyer_does_not_pay_for_a_sample(self, monkeypatch):
+        """У покупателя весь разбор открыт — лишний вызов модели ему не нужен."""
+        from app.main import ReportPurchase, Session, engine, select
+        calls = []
+        self._stub(monkeypatch, calls)
+        rid = self._check()
+        contact = f"buyer_sample{rid}@example.com"
+        client.post("/api/report", json={"check_id": rid, "tier": "full", "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = "paid"; s.add(o); s.commit()
+        calls.clear()
+        client.get(f"/report/{rid}")
+        assert calls == ["core"]        # только ядро платного отчёта, образца нет
+
+    def test_page_survives_a_failed_sample(self, monkeypatch):
+        """Принцип 7: не собрался образец — страница всё равно работает."""
+        import app.main as m
+        async def boom(*a, **kw):
+            raise m.ReportEngineError("модель недоступна")
+        monkeypatch.setattr(m, "generate_core", boom)
+        monkeypatch.setattr(m, "generate_section", boom)
+        rid = self._check()
+        r = client.get(f"/report/{rid}")
+        assert r.status_code == 200
+        assert "const SAMPLE = null;" in r.text
+
+    def test_sample_does_not_leak_the_paid_tier(self, monkeypatch):
+        """Образец — один раздел, а не весь отчёт даром."""
+        import app.main as m
+        self._stub(monkeypatch)
+        rid = self._check()
+        text = client.get(f"/report/{rid}").text
+        assert "const UNLOCKED_TIER = null;" in text
+        assert "const TIER_KEYS = [];" in text
+        assert m.SAMPLE_SECTION == "summary"
+
+    def test_locked_sections_still_ask_their_questions(self, monkeypatch):
+        """После образца человек должен увидеть, на что отвечает остальное."""
+        from app.report_engine import SECTION_SPECS
+        self._stub(monkeypatch)
+        rid = self._check()
+        text = client.get(f"/report/{rid}").text
+        finance_ask = [s for s in SECTION_SPECS if s["key"] == "finance"][0]["ask"]
+        assert finance_ask in text

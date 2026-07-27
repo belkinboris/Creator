@@ -112,6 +112,11 @@
   .nav-group:first-child{margin-top:0}
   .build-progress{border-left:3px solid var(--marker);padding:6px 0 6px 12px;
     margin-top:16px;font-size:14px;color:var(--muted);max-width:46em}
+  /* Бесплатный образец: настоящий кусок платного разбора, не тизер. */
+  .sample-tag{font:600 12px "IBM Plex Sans";color:var(--muted);margin:22px 0 -6px}
+  .sample-section{border-top:0;padding-top:0}
+  .sample-foot{color:var(--muted);font-size:14px;max-width:46em;
+    border-left:3px solid var(--marker);padding:6px 0 6px 12px;margin-bottom:4px}
   .terms-note{margin-top:14px;font-size:13px;color:var(--muted);max-width:44em}
   .contact-row{margin-top:16px}
   .contact-row input{width:100%;max-width:360px;padding:11px 12px;border:1px solid var(--line);
@@ -161,6 +166,7 @@
 
   <div class="preview" id="preview"></div>
   <div class="build-progress" id="build-progress" style="display:none"></div>
+  <div id="sample"></div>
   <div id="score-section"></div>
   <div class="pricing no-print" id="pricing-top"></div>
   <div class="pdf-row no-print" id="pdf-row" style="display:none">
@@ -198,6 +204,7 @@ async function publishExample(checkId, tier){
 
 const CHECK_ID = __CHECK_ID__;
 const PREVIEW = __PREVIEW_JSON__;
+const SAMPLE = __SAMPLE_JSON__;
 const REPORT = __REPORT_JSON__;
 const UNLOCKED_TIER = __UNLOCKED_TIER__;
 const ORDER_STATUS = __ORDER_STATUS__;
@@ -264,6 +271,32 @@ if (REPORT && typeof REPORT.viability_score === 'number') {
     <div class="risks">${(REPORT.top_risks || []).map(r => `
       <div class="risk"><h4>${escapeHtml(r.title)}</h4><p>${escapeHtml(r.body)}</p></div>`).join('')}
     </div>`;
+}
+
+// --- Бесплатный образец ----------------------------------------------------
+// Человек не купит разбор, о качестве которого не может судить. Раньше
+// бесплатная часть была пересказом цифр со страницы спроса — ни строчки
+// анализа. Теперь отдаём настоящий кусок: балл с объяснением, названные
+// риски и один раздел целиком.
+if (!REPORT && SAMPLE) {
+  const paragraphs = String((SAMPLE.section || {}).body || '').split(/\n\n+/)
+    .filter(p => p.trim()).map(p => `<p>${escapeHtml(p)}</p>`).join('');
+  const cls = SAMPLE.viability_score >= 70 ? 'ok' : (SAMPLE.viability_score >= 40 ? 'warn' : 'bad');
+  document.getElementById('sample').innerHTML = `
+    <div class="sample-tag">Часть разбора — бесплатно</div>
+    <div class="score-card ${cls}">
+      <div class="num">${SAMPLE.viability_score}<small>/100</small></div>
+      <div class="note">${escapeHtml(SAMPLE.viability_summary || '')}</div>
+    </div>
+    <div class="risks">${(SAMPLE.top_risks || []).map(r => `
+      <div class="risk"><h4>${escapeHtml(r.title)}</h4><p>${escapeHtml(r.body)}</p></div>`).join('')}
+    </div>
+    <section class="section sample-section">
+      <h2>${escapeHtml((SAMPLE.section || {}).title || '')}</h2>
+      ${paragraphs}
+    </section>
+    <p class="sample-foot">Так написан весь разбор. Ниже — вопросы, на которые
+      отвечают остальные разделы.</p>`;
 }
 
 // --- Секции ---------------------------------------------------------------

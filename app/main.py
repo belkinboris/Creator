@@ -185,6 +185,10 @@ class DemandCheck(SQLModel, table=True):
     # "social_contract" (лендинг /social-contract, выплата от государства).
     # Определяет оптику платного отчёта -- см. PURPOSES в report_engine.
     purpose: str = "business"
+    # Бесплатный образец платного разбора: балл, объяснение, названные риски
+    # и один настоящий раздел. Генерируется лениво при первом открытии
+    # /report/{id} без оплаты и кэшируется навсегда -- см. _ensure_sample.
+    sample_json: str = ""
     # JSON выбранного на /r/ заострённого позиционирования. Живёт здесь, а не
     # на заказе, потому что отчёт заказывают уже со страницы /report/{check_id},
     # которая знает только check_id: иначе выбор человека до отчёта не доезжает.
@@ -282,6 +286,7 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS is_example BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS sample_json VARCHAR DEFAULT ''"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -613,6 +618,55 @@ def _report_preview(demand_data: dict) -> dict:
         "timing_note": notes.get("timing", ""),
         "execution_note": notes.get("execution", ""),
     }
+
+
+# Раздел, который отдаётся бесплатно целиком. Резюме — самый ценный раздел, и
+# именно поэтому он в образце: человек не купит разбор, о качестве которого
+# не может судить. Раньше бесплатная часть была пересказом цифр со страницы
+# спроса — ни строчки анализа, оценить нечего, платить не за что.
+SAMPLE_SECTION = "summary"
+
+
+async def _ensure_sample(check_id: int) -> dict | None:
+    """Бесплатный образец платного разбора: балл, объяснение, названные риски
+    и один настоящий раздел целиком.
+
+    Считается ОДИН раз на проверку и кэшируется навсегда: это два вызова
+    модели, и платит за них владелец. Генерируем лениво — только когда
+    человек реально открыл страницу отчёта, то есть думает о покупке.
+    Сбой не имеет права уронить страницу: без образца она просто остаётся
+    такой, какой была (принцип 7 — деградация вместо ошибки).
+    """
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, check_id)
+        if not rec or not rec.result_json:
+            return None
+        if rec.sample_json:
+            try:
+                return json.loads(rec.sample_json)
+            except ValueError:
+                pass
+        idea, purpose = rec.idea, rec.purpose
+        chosen = _chosen_offer(rec)
+        demand_data = json.loads(rec.result_json)
+
+    try:
+        core = await generate_core(idea, demand_data, "quick",
+                                   chosen_offer=chosen, purpose=purpose)
+        section = await generate_section(SAMPLE_SECTION, idea, demand_data, "quick",
+                                         chosen_offer=chosen, purpose=purpose)
+    except ReportEngineError:
+        logging.getLogger(__name__).info("sample not built for check %s", check_id,
+                                         exc_info=True)
+        return None
+
+    sample = {**core, "section": section}
+    with Session(engine) as s:
+        fresh = s.get(DemandCheck, check_id)
+        if fresh and not fresh.sample_json:
+            fresh.sample_json = json.dumps(sample, ensure_ascii=False)
+            s.add(fresh); s.commit()
+    return sample
 
 
 PREVIEW_STATUS = "preview"   # владельческий прогон без оплаты, см. _owner_preview
@@ -988,6 +1042,7 @@ def example_page(request: Request):
         .replace("__CHOSEN_BLOCK__", "")
         .replace("__IDEA__", html.escape(idea))
         .replace("__PREVIEW_JSON__", json.dumps(_report_preview(demand_data), ensure_ascii=False))
+        .replace("__SAMPLE_JSON__", "null")
         .replace("__REPORT_JSON__", json.dumps(report_full, ensure_ascii=False))
         .replace("__UNLOCKED_TIER__", json.dumps(tier))
         .replace("__ORDER_STATUS__", json.dumps("paid"))
@@ -1022,6 +1077,9 @@ async def report_page(rid: int, request: Request):
     preview = _report_preview(demand_data)
     report_full = None
     gen_error = ""
+    # Бесплатный образец нужен только тем, кто ещё не купил: у покупателя
+    # весь разбор и так открыт, лишний вызов модели ему ни к чему.
+    sample = None if purchase else await _ensure_sample(rid)
 
     if purchase:
         if not purchase.report_json:
@@ -1090,6 +1148,7 @@ async def report_page(rid: int, request: Request):
         .replace("__CHOSEN_BLOCK__", chosen_block)
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__PREVIEW_JSON__", json.dumps(preview, ensure_ascii=False))
+        .replace("__SAMPLE_JSON__", json.dumps(sample, ensure_ascii=False) if sample else "null")
         .replace("__REPORT_JSON__", json.dumps(report_full, ensure_ascii=False) if report_full else "null")
         .replace("__UNLOCKED_TIER__", json.dumps(purchase.tier if purchase else None))
         .replace("__ORDER_STATUS__", json.dumps(purchase.status if purchase else None))
