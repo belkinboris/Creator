@@ -6073,3 +6073,69 @@ class TestUnmeasuredDemandIsNotSoldAsMeasured:
         text = client.get(f"/r/{self._check()}").text
         block = text.split("v.level === 'unknown'")[1][:2200]
         assert "IS_SOCIAL_CONTRACT ? '/social-contract' : '/'" in block
+
+
+class TestLandingPromisesNothingOnTheOwnersBehalf:
+    """A14: страница, за которую платят 1490 ₽ нам и 3–5 тысяч Яндексу,
+    несла зашитые обещания, которых владелец идеи не давал.
+
+    Найдено кастдев-проходом по `/l/`. Три вещи сразу:
+      · «Ранним — 50% на первый месяц» — скидку мы придумали за него и
+        показывали живым людям;
+      · «Запускаемся скоро» / «продукт готовится к запуску» — предполагало,
+        что продукта ещё нет. Для услуги (пошив штор, груминг, пекарня)
+        человек ищет исполнителя СЕГОДНЯ, и такая рамка его отпугивает —
+        а мы потом по этой конверсии выносим вердикт «спроса нет»;
+      · слово «лендинг» в подвале — запрещено во всех текстах для
+        пользователя, но тесты сканировали только `static/`, а шаблон
+        лежит в `app/`.
+    """
+
+    def _text(self):
+        import re
+        html = main_module.render_landing(VALID_OFFER)
+        body = html[html.index('<div class="wrap">'):html.index("<script>")]
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body))
+
+    def test_no_invented_discount(self):
+        """Скидка на чужой продукт — обещание, которое владелец не давал и
+        может не сдержать."""
+        t = self._text().lower()
+        assert "50%" not in t
+        assert "скидк" not in t
+        assert "первый месяц" not in t
+
+    def test_does_not_assume_the_product_is_unlaunched(self):
+        """Услугу заказывают сегодня, а не «когда откроем доступ»."""
+        t = self._text().lower()
+        for bad in ("запускаемся скоро", "готовится к запуску",
+                    "ранний доступ", "ранним", "откроем доступ"):
+            assert bad not in t, bad
+
+    def test_forbidden_words_are_absent_from_the_landing_too(self):
+        """Файл лежит в app/, поэтому под сторожа по static/ не попадал —
+        а это единственная страница, которую видят посторонние люди."""
+        t = self._text().lower()
+        for bad in ("лендинг", "оффер", "смоук", "smoke", "гипотез", "конверси"):
+            assert bad not in t, bad
+
+    def test_it_still_says_what_will_happen_next(self):
+        """Убрать обещание не значит оставить человека без ответа."""
+        t = self._text()
+        assert "Оставить заявку" in t
+        assert "напишем вам" in t.lower()
+        assert "Заявка принята" in t
+
+    def test_privacy_consent_survived(self):
+        """152-ФЗ и модерация Директа: без ссылки на политику страница не
+        имеет права собирать контакты."""
+        html = main_module.render_landing(VALID_OFFER)
+        assert 'href="/legal"' in html
+        assert "политикой персональных данных" in html
+
+    def test_the_offer_itself_still_reaches_the_page(self):
+        """Правка текстов вокруг формы не должна съесть саму идею."""
+        html = main_module.render_landing(VALID_OFFER)
+        assert VALID_OFFER["h1"] in html
+        assert VALID_OFFER["sub"] in html
+        assert VALID_OFFER["pains"][0]["h2"] in html
