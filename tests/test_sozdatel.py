@@ -3081,15 +3081,30 @@ class TestCustomerDevPass:
         result_text = client.get(f"/r/{pub(rid)}").text
         assert "сами запустим рекламу" not in result_text
 
-    def test_no_data_wording_reads_as_finding_not_error(self):
-        """"нет данных" рядом с частотностью читалось как «сайт сломан» --
-        по фидбеку заменили на формулировку-вывод о рынке."""
+    def test_missing_frequency_is_not_called_a_finding(self):
+        """Прежнее решение здесь ОТМЕНЕНО, и вот почему.
+
+        Когда-то «нет данных» рядом с частотностью читалось как «сайт
+        сломан», и по фидбеку это заменили на «почти не ищут» -- на
+        формулировку-вывод о рынке. Но `count = None` означает «оба пути
+        Вордстата не дали числа» (так и написано в докстринге
+        `wordstat_best`), а не «спроса нет»: это вывод, которого мы не
+        вправе делать (принцип 1). Хуже того, при неработающем Вордстате
+        КАЖДЫЙ посетитель видел три строки «почти не ищут» и уходил
+        хоронить живую идею.
+
+        Исходная жалоба решается не враньём в другую сторону, а словами:
+        «нет данных у Яндекса» называет источник, поэтому не читается как
+        наша поломка. Плюс рядом теперь есть вердикт и блок «Проверка не
+        состоялась», которых тогда не было.
+        """
         result_text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
-        assert '>нет данных<' not in result_text
-        assert result_text.count("почти не ищут") >= 2   # freq-row и score-cell
+        assert "нет данных у Яндекса" in result_text
+        # вывод про рынок на месте отсутствующего числа больше не появляется
+        assert "почти не ищут" not in result_text.split("v.level === 'weak'")[0]
         report_text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
-        assert "'нет данных'" not in report_text
-        assert "почти не ищут" in report_text
+        # в отчёте фраза осталась только там, где спрос ПОДТВЕРЖДЁННО слабый
+        assert "verdict_level === 'weak'" in report_text
 
     def test_report_has_single_pricing_block_not_duplicated(self):
         """Цены дублировались сверху и снизу отчёта -- по фидбеку нижний
@@ -5956,3 +5971,79 @@ class TestCabinetLinksSurvivedTheAddressChange:
             assert client.get("/api/account/me").json()["orders"][0]["continue_url"] is None
         finally:
             client.post("/api/account/logout")
+
+
+class TestUnmeasuredDemandIsNotSoldAsMeasured:
+    """A12: когда Вордстат не дал числа, страница вела себя так, будто дала.
+    Напротив каждой фразы стояло «почти не ищут» — вывод о рынке на месте
+    отсутствующего числа, — а финал продавал тест и разбор как обычно.
+
+    Это самое вероятное состояние прода сегодня: у владельца ещё нет
+    OAuth-токена Вордстата. То есть каждый посетитель видел три строки
+    «почти не ищут» и уходил хоронить живую идею.
+
+    Разметка блока лежит на странице всегда, показывает его скрипт по уровню
+    вердикта — поэтому поведение сторожит браузерный тест
+    tests/test_mobile.py::test_unmeasured_demand_stops_selling_in_a_real_browser,
+    а проверки ниже отвечают за тексты."""
+
+    def _check(self):
+        from app.main import DemandCheck, Session, engine
+        data = {"formulations": [{"phrase": "пошив штор", "count": None},
+                                 {"phrase": "сшить шторы", "count": None}],
+                "best_phrase": "пошив штор",
+                "verdict": {"level": "unknown",
+                            "text": "Данные Яндекса о числе запросов сейчас недоступны."},
+                "competitors": {"found": None, "top": []},
+                "scores": [], "overall": None}
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Идея без цифр",
+                              result_json=json.dumps(data, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.public_id
+
+    def test_absent_number_is_not_called_a_market_finding(self):
+        """`count = None` означает «оба пути Вордстата не дали числа» (см.
+        докстринг wordstat_best), а не «спроса нет»."""
+        text = client.get(f"/r/{self._check()}").text
+        assert "нет данных у Яндекса" in text
+        assert "почти не ищут" not in text.split("v.level === 'weak'")[0]
+
+    def test_page_says_the_check_did_not_happen(self):
+        text = client.get(f"/r/{self._check()}").text
+        assert "v.level === 'unknown'" in text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "не состоялась" in block
+        assert "не значит, что спроса нет" in block
+
+    def test_free_retry_becomes_the_main_action(self):
+        """Единственное честное действие здесь бесплатное — повторить."""
+        text = client.get(f"/r/{self._check()}").text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "Проверить ещё раз" in block
+        assert "getElementById('order').className = 'alt-path'" in block
+        assert "getElementById('alt-report').className = 'alt-path'" in block
+
+    def test_buttons_are_still_there(self):
+        """Отговариваем, но не решаем за человека."""
+        text = client.get(f"/r/{self._check()}").text
+        assert 'id="order-btn"' in text and 'id="alt-report"' in text
+
+    def test_report_block_stops_claiming_we_counted_something(self):
+        """«Разбор на данных, которые мы уже честно посчитали» на экране, где
+        ничего не посчитано, — то же враньё, только ниже."""
+        text = client.get(f"/r/{self._check()}").text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "alt-p" in block
+        assert "цифр спроса" in block
+
+    def test_header_stops_promising_the_next_stage(self):
+        text = client.get(f"/r/{self._check()}").text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "path-next-text" in block and "повторить проверку" in block
+
+    def test_retry_leads_to_the_right_showcase(self):
+        """Получателя соцконтракта нельзя возвращать на витрину фаундеров."""
+        text = client.get(f"/r/{self._check()}").text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "IS_SOCIAL_CONTRACT ? '/social-contract' : '/'" in block

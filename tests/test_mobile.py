@@ -126,6 +126,20 @@ with Session(engine) as s:
                       purpose="business", result_json=json.dumps(weak, ensure_ascii=False))
     s.add(rec); s.commit(); s.refresh(rec)
     out["weak"] = rec.public_id
+    # Вордстат не дал чисел вовсе -- самое вероятное состояние прода, пока у
+    # владельца нет OAuth-токена. Не то же самое, что «спроса нет» (A12).
+    nodata = dict(data)
+    nodata["formulations"] = [{"phrase": "пошив штор на заказ", "count": None},
+                              {"phrase": "сшить шторы на дому", "count": None}]
+    nodata["verdict"] = {"level": "unknown",
+                         "text": "Данные Яндекса о числе запросов сейчас недоступны."}
+    nodata["competitors"] = {"found": None, "top": []}
+    nodata["scores"] = []
+    nodata["overall"] = None
+    rec = DemandCheck(idea="Идея, которую не удалось измерить", best_count=None,
+                      purpose="business", result_json=json.dumps(nodata, ensure_ascii=False))
+    s.add(rec); s.commit(); s.refresh(rec)
+    out["nodata"] = rec.public_id
     s.commit()
 print(json.dumps(out))
 '''
@@ -509,5 +523,53 @@ def test_cabinet_ranks_ideas_so_they_can_be_compared(site, browser):
         # подпись объясняет, почему такой порядок
         assert "самой сильной" in page.inner_text(".list-note")
         _assert_clean(page, "кабинет со сравнением идей")
+    finally:
+        ctx.close()
+
+
+def test_unmeasured_demand_stops_selling_in_a_real_browser(site, browser):
+    """A12. Блок включает скрипт по уровню вердикта — подстроками в HTML это
+    не проверить. Смотрим, что видно на экране, когда Вордстат не дал цифр,
+    и что при настоящих цифрах ничего не изменилось."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['nodata']}")
+    try:
+        for _ in range(6):
+            btns = page.locator(".step-next .btn:visible, #skip-sharpen:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+
+        assert page.locator("#weak-lead").is_visible(), \
+            "без цифр спроса главным действием обязано стать бесплатное"
+        lead = page.inner_text("#weak-lead")
+        assert "не состоялась" in lead, lead
+        assert "не значит, что спроса нет" in lead
+
+        # напротив фраз — «нет данных», а не вывод о рынке
+        freqs = page.eval_on_selector_all(".freq-num", "e => e.map(x => x.innerText)")
+        assert freqs and all("нет данных" in f for f in freqs), freqs
+        assert not any("почти не ищут" in f for f in freqs), freqs
+
+        cls = page.evaluate("""() => ({o: document.getElementById('order').className,
+                                       r: document.getElementById('alt-report').className})""")
+        assert cls == {"o": "alt-path", "r": "alt-path"}, cls
+        assert page.locator("#order-btn").is_visible()   # купить всё ещё можно
+        _assert_clean(page, "результат без цифр спроса")
+    finally:
+        ctx.close()
+
+    # обратная сторона: с настоящими цифрами блок не появляется
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}")
+    try:
+        for _ in range(6):
+            btns = page.locator(".step-next .btn:visible, #skip-sharpen:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+        assert not page.locator("#weak-lead").is_visible()
+        assert page.evaluate(
+            "() => document.getElementById('order').className") == "next"
     finally:
         ctx.close()

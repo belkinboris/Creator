@@ -391,7 +391,7 @@ document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
       ${f.matched_phrase ? `<span class="freq-match">Вордстат подсказал более ходовую формулировку: «${escapeHtml(f.matched_phrase)}» — цифра справа про неё</span>` : ''}
     </span>
     <span>${f.count === null
-      ? '<span class="freq-num na">почти не ищут</span>'
+      ? '<span class="freq-num na">нет данных у Яндекса</span>'
       : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`}
     </span>
   </div>`).join('');
@@ -414,7 +414,7 @@ if (hasScores) {
   document.getElementById('scores').innerHTML = sc.map(s => `
     <div class="score-cell">
       ${s.value === null
-        ? `<div class="score-val na">почти не ищут</div>`
+        ? `<div class="score-val na">нет данных</div>`
         : `<div><span class="score-val">${escapeHtml(String(s.value))}</span><span class="score-max">/10</span></div>`}
       <div class="score-label">${escapeHtml(s.label)}</div>
       <div class="score-note">${escapeHtml(s.note || (s.value === null ? 'Частотность недоступна — проверьте формулировки в Вордстате вручную.' : ''))}</div>
@@ -488,6 +488,39 @@ if (IS_SOCIAL_CONTRACT) {
 // запросам, а судим мы по __CLICK_TARGET__ визитам, которых при такой
 // частотности просто неоткуда взять. Кнопки не прячем — человек вправе
 // купить, — но главным действием становится бесплатное (принцип 2).
+// Отдельный случай: частотность НЕ ПОЛУЧЕНА. Это не «спроса нет» — это
+// «мы не смогли посчитать». Продавать тест и разбор так, будто проверка
+// состоялась, значит брать деньги за вывод, которого мы не делали
+// (принцип 1). Кнопки, как и при слабом спросе, не прячем.
+if (v.level === 'unknown') {
+  document.querySelector('#weak-lead h3').innerHTML =
+    'Проверка <span class="hl">не состоялась</span> — цифр Яндекса сейчас нет';
+  document.getElementById('weak-lead-p').textContent =
+    'Мы не смогли получить частотность: у Яндекса не оказалось данных или он ' +
+    'не ответил. Это не значит, что спроса нет, — значит, что мы его не ' +
+    'измерили. Попробуйте запустить проверку ещё раз через несколько минут.';
+  const again = document.getElementById('weak-lead-btn');
+  again.textContent = 'Проверить ещё раз — бесплатно';
+  again.setAttribute('href', IS_SOCIAL_CONTRACT ? '/social-contract' : '/');
+  document.getElementById('weak-lead').classList.add('show');
+
+  const cav = document.getElementById('weak-caveat');
+  cav.textContent = 'Честно предупреждаем: цифр спроса по этой идее у нас нет, ' +
+    'и разбор с тестом будут строиться без них.';
+  cav.classList.add('show');
+
+  document.getElementById('order').className = 'alt-path';
+  document.getElementById('alt-report').className = 'alt-path';
+  document.getElementById('path-next-text').textContent =
+    'Сначала стоит повторить проверку — без цифр спроса следующий этап вслепую';
+  // «Разбор на данных, которые мы уже честно посчитали» на экране, где мы
+  // ничего не посчитали, -- то же самое противоречие, что и вывод о рынке
+  // на месте отсутствующего числа.
+  document.getElementById('alt-p').textContent =
+    'Разбор рынка, конкурентов и рисков по вашей идее. Учтите: цифр спроса ' +
+    'сейчас нет, и этот раздел разбора будет построен без них.';
+}
+
 if (v.level === 'weak') {
   const known = (DATA.formulations || []).filter(f => f.count !== null);
   const top = known.length ? Math.max(...known.map(f => f.count)) : 0;
