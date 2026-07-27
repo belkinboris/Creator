@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Отчёт по идее — Создатель</title>
 <meta name="robots" content="noindex">
+<!-- В адресе страницы лежит токен покупателя от его отчёта. Любая ссылка
+     наружу утащила бы его в Referer чужому серверу. -->
+<meta name="referrer" content="same-origin">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2712%27 fill=%27%23FFDE59%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-family=%27Arial,sans-serif%27 font-size=%2736%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%231B1C20%27%3EС%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/fonts/fonts.css">
 <style>
@@ -163,6 +166,7 @@
     __CHOSEN_BLOCK__
   </div>
   __OWNER_BAR__
+  __ACCESS_NOTE__
 
   <div class="preview" id="preview"></div>
   <div class="build-progress" id="build-progress" style="display:none"></div>
@@ -383,13 +387,17 @@ render();
 // Дозаказываем недостающие разделы ПО ОДНОМУ: параллельные запросы к модели
 // ничего не ускорят, а лимиты провайдера выберут мгновенно.
 async function fillMissing(){
-  const key = new URLSearchParams(location.search).get('key') || '';
+  const qs = new URLSearchParams(location.search);
+  const key = qs.get('key') || '';
   const headers = key ? {'X-Owner-Key': key} : {};
+  // Токен из адреса страницы -- тот же ключ покупателя от своего отчёта,
+  // что открыл саму страницу; без него сервер не станет собирать разделы.
+  const tok = qs.get('t') ? `&t=${encodeURIComponent(qs.get('t'))}` : '';
   for (const k of TIER_KEYS) {
     if (gotMap[k] || pending[k]) continue;
     pending[k] = true;
     try {
-      const r = await fetch(`/api/report/${CHECK_ID}/section?key=${encodeURIComponent(k)}`,
+      const r = await fetch(`/api/report/${CHECK_ID}/section?key=${encodeURIComponent(k)}${tok}`,
                             {method: 'POST', headers});
       const d = await r.json();
       if (d.ok && d.section) { gotMap[k] = d.section; render(); }
@@ -434,7 +442,12 @@ function tierCard(key){
     <button class="btn" type="button" onclick="order('${key}')">Получить отчёт</button>
   </div>`;
 }
-if (UNLOCKED_TIER === 'full') {
+// Отчёт по этой идее уже куплен, просто открыт не тем (или тем, но без
+// своей ссылки). Показывать здесь кнопку оплаты нельзя: покупатель,
+// потерявший ссылку, заплатил бы за одно и то же дважды.
+if (document.getElementById('access-note')) {
+  pricing.style.display = 'none';
+} else if (UNLOCKED_TIER === 'full') {
   pricing.style.display = 'none';
 } else if (UNLOCKED_TIER === 'quick') {
   pricing.innerHTML = `<h3>Докупить <span class="hl">бизнес-план</span></h3>

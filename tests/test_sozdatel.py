@@ -1800,7 +1800,8 @@ class TestReportFlow:
         client.post("/api/report", json={"check_id": rid, "tier": "quick", "contact": "@unlock_test"})
         with Session(engine) as s:
             order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == "@unlock_test")).first()
-            order.status = "paid"; s.add(order); s.commit(); oid = order.id
+            order.status = "paid"; s.add(order); s.commit()
+            oid, tok = order.id, order.access_token
 
         calls = {"core": 0, "sections": 0}
         async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
@@ -1816,21 +1817,21 @@ class TestReportFlow:
         monkeypatch.setattr(m, "generate_section", fake_section)
 
         # страница отдаётся сразу: ядро есть, разделы придут отдельными запросами
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{rid}?t={tok}").text
         assert "Ниша занята." in text
         assert calls["core"] == 1 and calls["sections"] == 0
         with Session(engine) as s:
             assert s.get(ReportPurchase, oid).report_json   # ядро сохранено
 
-        r = client.post(f"/api/report/{rid}/section?key=summary")
+        r = client.post(f"/api/report/{rid}/section?key=summary&t={tok}")
         assert r.status_code == 200
         assert r.json()["section"]["body"] == "Тестовый текст отчёта."
 
         # повторный визит не должен звать модель снова -- всё уже сохранено
         monkeypatch.setattr(m, "generate_core", None)
         monkeypatch.setattr(m, "generate_section", None)
-        assert "Тестовый текст отчёта." in client.get(f"/report/{rid}").text
-        assert client.post(f"/api/report/{rid}/section?key=summary").json()["cached"] is True
+        assert "Тестовый текст отчёта." in client.get(f"/report/{rid}?t={tok}").text
+        assert client.post(f"/api/report/{rid}/section?key=summary&t={tok}").json()["cached"] is True
 
     def test_report_generation_failure_shows_friendly_error(self, monkeypatch):
         import app.main as m
@@ -2009,12 +2010,13 @@ class TestSocialContractPurpose:
         with Session(engine) as s:
             order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == "@soc_purpose")).first()
             order.status = "paid"; s.add(order); s.commit()
+            tok = order.access_token
         seen = {}
         async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             seen["purpose"] = purpose
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{rid}?t={tok}")
         assert seen["purpose"] == "social_contract"
 
 
@@ -2334,7 +2336,9 @@ class TestOwnerLearnsAboutOrders:
         async def failing(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
         monkeypatch.setattr(m, "generate_core", failing)
-        client.get(f"/report/{rid}")
+        with Session(engine) as s:
+            tok = s.get(ReportPurchase, oid).access_token
+        client.get(f"/report/{rid}?t={tok}")
         assert len(sent) == 2                      # письмо о сбое всё-таки ушло
         assert "не собрался" in sent[1][0]
 
@@ -2384,8 +2388,9 @@ class TestPaidReportFailureIsNoticed:
         client.post("/api/report", json={"check_id": rid, "tier": "full", "contact": contact})
         with Session(engine) as s:
             o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
-            o.status = "paid"; s.add(o); s.commit(); oid = o.id
-        return rid, oid
+            o.status = "paid"; s.add(o); s.commit()
+            oid, tok = o.id, o.access_token
+        return rid, oid, tok
 
     def _break_generation(self, monkeypatch):
         import app.main as m
@@ -2397,14 +2402,14 @@ class TestPaidReportFailureIsNoticed:
     def test_failure_is_recorded_and_owner_notified_once(self, monkeypatch):
         import app.main as m
         from app.main import ReportPurchase, Session, engine
-        rid, oid = self._paid_purchase(monkeypatch)
+        rid, oid, tok = self._paid_purchase(monkeypatch)
         self._break_generation(monkeypatch)
         monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
         monkeypatch.setattr(m.mailer, "configured", lambda: True)
         sent = []
         monkeypatch.setattr(m.mailer, "send", lambda to, subject, body, **kw: sent.append((to, subject, body)))
 
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{rid}?t={tok}")
         assert len(sent) == 1
         to, subject, body = sent[0]
         assert to == "owner@example.com"
@@ -2415,8 +2420,8 @@ class TestPaidReportFailureIsNoticed:
             assert p.gen_error and p.fail_notified is True
 
         # покупатель перезагружает страницу -- второго письма быть не должно
-        client.get(f"/report/{rid}")
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{rid}?t={tok}")
         assert len(sent) == 1
 
     def test_unpaid_request_does_not_alarm_owner(self, monkeypatch):
@@ -2446,31 +2451,32 @@ class TestPaidReportFailureIsNoticed:
         """Принцип «деградация вместо ошибки»: покупатель и так видит сбой
         отчёта -- он не должен получить сверху ещё и 500 из-за почты."""
         import app.main as m
-        rid, _ = self._paid_purchase(monkeypatch)
+        rid, _, tok = self._paid_purchase(monkeypatch)
         self._break_generation(monkeypatch)
         monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
         monkeypatch.setattr(m.mailer, "configured", lambda: True)
         def boom(*a, **kw):
             raise RuntimeError("SMTP лёг")
         monkeypatch.setattr(m.mailer, "send", boom)
-        r = client.get(f"/report/{rid}")
+        r = client.get(f"/report/{rid}?t={tok}")
         assert r.status_code == 200
         assert "Не получилось собрать отчёт" in r.text
 
     def test_owner_sees_report_purchases_in_orders(self, monkeypatch):
         """Покупки отчётов не были видны владельцу нигде: оплата на 2990 ₽
         и несостоявшаяся доставка выглядели одинаково -- никак."""
-        rid, oid = self._paid_purchase(monkeypatch)
+        rid, oid, tok = self._paid_purchase(monkeypatch)
         self._break_generation(monkeypatch)
         monkeypatch.delenv("SOZDATEL_OWNER_EMAIL", raising=False)
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{rid}?t={tok}")
         data = client.get("/api/orders", headers=OWNER).json()
         row = [r for r in data["reports"] if r["id"] == oid][0]
         assert row["status"] == "paid"
         assert row["delivered"] is False
         assert "ИИ думал слишком долго" in row["gen_error"]
         assert row["tier_label"] == "Бизнес-план"
-        assert row["report_url"] == f"/report/{rid}"
+        # ссылка из /desk ведёт прямо в отчёт -- вместе с токеном покупателя
+        assert row["report_url"] == f"/report/{rid}?t={tok}"
 
     def test_desk_renders_failed_delivery(self):
         text = (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
@@ -3187,6 +3193,7 @@ class TestChosenOfferReachesReport:
         with Session(engine) as s:
             order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
             order.status = "paid"; s.add(order); s.commit()
+            return order.access_token      # ссылка покупателя на свой отчёт
 
     def test_choice_is_stored_on_the_check(self):
         from app.main import DemandCheck, Session, engine
@@ -3206,13 +3213,13 @@ class TestChosenOfferReachesReport:
         import app.main as m
         rid = self._make_check()
         client.post(f"/api/demand/{rid}/chosen", json={"offer": self.OFFER})
-        self._pay_report(rid, f"chosen{rid}@example.com")
+        tok = self._pay_report(rid, f"chosen{rid}@example.com")
         seen = {}
         async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             seen["offer"] = chosen_offer
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{rid}?t={tok}")
         assert seen["offer"] is not None
         assert seen["offer"]["h1"] == self.OFFER["h1"]
 
@@ -3221,13 +3228,13 @@ class TestChosenOfferReachesReport:
         собраться и без выбора, просто по исходной идее."""
         import app.main as m
         rid = self._make_check()
-        self._pay_report(rid, f"nochoice{rid}@example.com")
+        tok = self._pay_report(rid, f"nochoice{rid}@example.com")
         seen = {}
         async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             seen["offer"] = chosen_offer
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
-        assert client.get(f"/report/{rid}").status_code == 200
+        assert client.get(f"/report/{rid}?t={tok}").status_code == 200
         assert seen["offer"] is None
 
     def test_broken_json_does_not_break_paid_report(self, monkeypatch):
@@ -3237,12 +3244,12 @@ class TestChosenOfferReachesReport:
         rid = self._make_check()
         with Session(engine) as s:
             rec = s.get(DemandCheck, rid); rec.chosen_offer = "{не json"; s.add(rec); s.commit()
-        self._pay_report(rid, f"broken{rid}@example.com")
+        tok = self._pay_report(rid, f"broken{rid}@example.com")
         async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             assert chosen_offer is None
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
-        assert client.get(f"/report/{rid}").status_code == 200
+        assert client.get(f"/report/{rid}?t={tok}").status_code == 200
 
     def test_saved_check_of_another_cabinet_is_protected(self):
         """id проверок перебираются, а выбор влияет на платный отчёт."""
@@ -3682,7 +3689,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__RESULT_JSON__", "__SAVED__", "__PURPOSE_JSON__", "__CHOSEN_BLOCK__",
             "__PREVIEW_JSON__", "__REPORT_JSON__", "__UNLOCKED_TIER__", "__ORDER_STATUS__",
             "__GEN_ERROR__", "__PRICES_JSON__", "__SECTIONS_JSON__", "__QUICK_KEYS_JSON__",
-            "__OWNER_BAR__", "__TIER_KEYS_JSON__", "__SAMPLE_JSON__",
+            "__OWNER_BAR__", "__TIER_KEYS_JSON__", "__SAMPLE_JSON__", "__ACCESS_NOTE__",
             "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
         }
@@ -4192,7 +4199,10 @@ class TestReportBuildsProgressively:
         with Session(engine) as s:
             o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
             o.status = "paid"; s.add(o); s.commit()
-        return rid
+            tok = o.access_token
+        # Токен -- ключ покупателя от своего отчёта: именно с ним его
+        # возвращает оплата (см. _report_access_ok).
+        return rid, tok
 
     def _stub(self, monkeypatch, calls=None):
         import app.main as m
@@ -4214,18 +4224,18 @@ class TestReportBuildsProgressively:
         """Главное: открытие страницы стоит ОДНОГО вызова модели, не двадцати."""
         calls = []
         self._stub(monkeypatch, calls)
-        rid = self._paid_check(monkeypatch)
-        assert client.get(f"/report/{rid}").status_code == 200
+        rid, tok = self._paid_check(monkeypatch)
+        assert client.get(f"/report/{rid}?t={tok}").status_code == 200
         assert calls == ["core"]
 
     def test_sections_arrive_one_by_one(self, monkeypatch):
         from app.report_engine import section_keys
         calls = []
         self._stub(monkeypatch, calls)
-        rid = self._paid_check(monkeypatch)
-        client.get(f"/report/{rid}")
+        rid, tok = self._paid_check(monkeypatch)
+        client.get(f"/report/{rid}?t={tok}")
         for key in section_keys("full")[:3]:
-            r = client.post(f"/api/report/{rid}/section?key={key}")
+            r = client.post(f"/api/report/{rid}/section?key={key}&t={tok}")
             assert r.status_code == 200, key
             assert r.json()["section"]["body"] == f"Текст {key}."
         assert calls == ["core"] + section_keys("full")[:3]
@@ -4234,10 +4244,10 @@ class TestReportBuildsProgressively:
         """Каждый повтор — деньги за вызов модели."""
         calls = []
         self._stub(monkeypatch, calls)
-        rid = self._paid_check(monkeypatch)
-        client.get(f"/report/{rid}")
-        client.post(f"/api/report/{rid}/section?key=summary")
-        again = client.post(f"/api/report/{rid}/section?key=summary")
+        rid, tok = self._paid_check(monkeypatch)
+        client.get(f"/report/{rid}?t={tok}")
+        client.post(f"/api/report/{rid}/section?key=summary&t={tok}")
+        again = client.post(f"/api/report/{rid}/section?key=summary&t={tok}")
         assert again.json()["cached"] is True
         assert calls.count("summary") == 1
 
@@ -4248,11 +4258,11 @@ class TestReportBuildsProgressively:
         from app.main import ReportPurchase, Session, engine, select
         from app.report_engine import section_keys
         self._stub(monkeypatch)
-        rid = self._paid_check(monkeypatch)
-        client.get(f"/report/{rid}")
+        rid, tok = self._paid_check(monkeypatch)
+        client.get(f"/report/{rid}?t={tok}")
         order = section_keys("full")
         for key in (order[3], order[0], order[1]):
-            client.post(f"/api/report/{rid}/section?key={key}")
+            client.post(f"/api/report/{rid}/section?key={key}&t={tok}")
         with Session(engine) as s:
             row = s.exec(select(ReportPurchase).where(
                 ReportPurchase.check_id == rid)).first()
@@ -4278,25 +4288,25 @@ class TestReportBuildsProgressively:
 
     def test_cheap_tier_cannot_pull_full_tier_sections(self, monkeypatch):
         self._stub(monkeypatch)
-        rid = self._paid_check(monkeypatch, tier="quick")
-        client.get(f"/report/{rid}")
-        assert client.post(f"/api/report/{rid}/section?key=finance").status_code == 404
-        assert client.post(f"/api/report/{rid}/section?key=summary").status_code == 200
+        rid, tok = self._paid_check(monkeypatch, tier="quick")
+        client.get(f"/report/{rid}?t={tok}")
+        assert client.post(f"/api/report/{rid}/section?key=finance&t={tok}").status_code == 404
+        assert client.post(f"/api/report/{rid}/section?key=summary&t={tok}").status_code == 200
 
     def test_one_broken_section_does_not_break_the_report(self, monkeypatch):
         """Сбой одного раздела не должен выглядеть как сбой всего отчёта."""
         import app.main as m
         self._stub(monkeypatch)
-        rid = self._paid_check(monkeypatch)
-        client.get(f"/report/{rid}")
-        client.post(f"/api/report/{rid}/section?key=summary")
+        rid, tok = self._paid_check(monkeypatch)
+        client.get(f"/report/{rid}?t={tok}")
+        client.post(f"/api/report/{rid}/section?key=summary&t={tok}")
         async def boom(key, *a, **kw):
             raise m.ReportEngineError("модель недоступна")
         monkeypatch.setattr(m, "generate_section", boom)
-        r = client.post(f"/api/report/{rid}/section?key=market")
+        r = client.post(f"/api/report/{rid}/section?key=market&t={tok}")
         assert r.status_code == 502 and "недоступна" in r.json()["error"]
         # уже собранный раздел на месте
-        assert "Текст summary." in client.get(f"/report/{rid}").text
+        assert "Текст summary." in client.get(f"/report/{rid}?t={tok}").text
 
     def test_locked_section_shows_its_question(self):
         """Запертый раздел продаёт вопросом, на который отвечает, а не
@@ -4404,8 +4414,9 @@ class TestFreeSampleSellsTheReport:
         with Session(engine) as s:
             o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
             o.status = "paid"; s.add(o); s.commit()
+            tok = o.access_token
         calls.clear()
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{rid}?t={tok}")
         assert calls == ["core"]        # только ядро платного отчёта, образца нет
 
     def test_page_survives_a_failed_sample(self, monkeypatch):
@@ -4640,3 +4651,266 @@ class TestOwnerFunnel:
         assert 'id="funnel"' in text and "/api/funnel" in text
         assert "дошли" in text          # доля от предыдущего шага
         assert "Получено денег" in text
+
+
+class TestPaidReportIsNotPublic:
+    """Страница отчёта адресуется порядковым номером бесплатной проверки, и
+    до этой правки оплаченный бизнес-план отдавался КАЖДОМУ, кто наберёт
+    номер: 42 -> 41. Утекал не только текст за 2990 ₽ и чужая идея с чужими
+    деньгами в смете -- посторонний мог через /api/report/{id}/section гонять
+    генерацию по чужой покупке, и платили бы за это мы."""
+
+    def _paid(self, monkeypatch, contact="owner_of_report@example.com", tier="full"):
+        """Оплаченный отчёт: возвращает (номер проверки, токен покупателя)."""
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        client.post("/api/report", json={"check_id": rid, "tier": tier, "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = "paid"
+            o.report_json = json.dumps({
+                "viability_score": 62, "viability_summary": "СЕКРЕТНЫЙ ВЫВОД.",
+                "top_risks": [{"title": "Риск", "body": "Объяснение."}],
+                "sections": [{"key": "summary", "title": "Резюме проекта",
+                              "body": "ВЫРУЧКА 400 000 РУБЛЕЙ В МЕСЯЦ"}]}, ensure_ascii=False)
+            s.add(o); s.commit()
+            return rid, o.access_token
+
+    def _login(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_acc_" + contact, contact=contact)); s.commit()
+        assert client.get(f"/account/verify?token=tok_acc_{contact}",
+                          follow_redirects=False).status_code in (302, 307)
+
+    def _publish_example(self, contact):
+        """Пример в сервисе ровно один: публикация снимает старый. Ставим
+        флаг руками, поэтому чужой пример от соседнего теста снимаем сами --
+        иначе /example отдаст его, а не наш."""
+        from app.main import ReportPurchase, Session, engine, select
+        with Session(engine) as s:
+            for row in s.exec(select(ReportPurchase).where(
+                    ReportPurchase.is_example == True)).all():      # noqa: E712
+                row.is_example = False; s.add(row)
+            mine = s.exec(select(ReportPurchase).where(
+                ReportPurchase.contact == contact)).first()
+            mine.is_example = True; s.add(mine); s.commit()
+
+    def _logout(self):
+        client.post("/api/account/logout")
+
+    # --- дыра, ради которой всё это ---
+
+    def test_stranger_cannot_read_a_paid_report_by_guessing_the_number(self, monkeypatch):
+        rid, _ = self._paid(monkeypatch, contact="secret_buyer@example.com")
+        self._logout()
+        text = client.get(f"/report/{rid}").text
+        assert "СЕКРЕТНЫЙ ВЫВОД" not in text
+        assert "400 000 РУБЛЕЙ" not in text
+        assert 'const UNLOCKED_TIER = null' in text or "UNLOCKED_TIER = null" in text
+
+    def test_stranger_cannot_spend_our_money_on_someone_elses_report(self, monkeypatch):
+        """Худшее в дыре было не чтение, а запись: посторонний запускал
+        генерацию раздела по чужой оплаченной покупке."""
+        import app.main as m
+        rid, _ = self._paid(monkeypatch, contact="money_buyer@example.com")
+        self._logout()
+        calls = []
+        async def fake_section(key, *a, **kw):
+            calls.append(key)
+            return {"key": key, "title": "Раздел", "body": "Текст"}
+        monkeypatch.setattr(m, "generate_section", fake_section)
+        r = client.post(f"/api/report/{rid}/section?key=market")
+        assert r.status_code == 403
+        assert calls == []                     # модель не звали вовсе
+
+    def test_stranger_does_not_pay_for_a_sample_of_a_sold_report(self, monkeypatch):
+        """Образец продаёт отчёт по этой идее, а он уже продан: звать модель
+        ради постороннего не за что."""
+        import app.main as m
+        calls = []
+        async def fake_core(*a, **kw):
+            calls.append("core")
+            return {"viability_score": 50, "viability_summary": "я", "top_risks": []}
+        async def fake_section(key, *a, **kw):
+            calls.append(key)
+            return {"key": key, "title": "Раздел", "body": "Текст"}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
+        rid, _ = self._paid(monkeypatch, contact="sample_buyer@example.com")
+        self._logout()
+        calls.clear()
+        assert client.get(f"/report/{rid}").status_code == 200
+        assert calls == []
+
+    def test_lost_link_is_not_offered_to_pay_a_second_time(self, monkeypatch):
+        """Покупатель, открывший свою же ссылку без токена, видит «уже
+        оплачен». Кнопка оплаты рядом с этой фразой — прямой путь заплатить
+        за одно и то же дважды."""
+        rid, _ = self._paid(monkeypatch, contact="double_pay@example.com")
+        self._logout()
+        text = client.get(f"/report/{rid}").text
+        assert 'id="access-note"' in text
+        # витрину гасит сама страница по наличию этой плашки
+        assert "getElementById('access-note')" in text
+
+    def test_stranger_is_told_how_to_reach_his_own_report(self, monkeypatch):
+        """Деградация, а не 403: свою же ссылку можно открыть в другом
+        браузере, и глухая ошибка человеку ничего не объяснит (принцип 7)."""
+        rid, _ = self._paid(monkeypatch, contact="lost_link@example.com")
+        self._logout()
+        r = client.get(f"/report/{rid}")
+        assert r.status_code == 200
+        assert "уже оплачен" in r.text
+        assert "/account" in r.text
+
+    # --- три двери настоящего покупателя ---
+
+    def test_buyer_opens_his_report_by_the_link_payment_returned_him(self, monkeypatch):
+        rid, tok = self._paid(monkeypatch, contact="link_buyer@example.com")
+        self._logout()
+        text = client.get(f"/report/{rid}?t={tok}").text
+        assert "СЕКРЕТНЫЙ ВЫВОД" in text and "400 000 РУБЛЕЙ" in text
+
+    def test_buyer_who_lost_the_link_opens_it_from_his_cabinet(self, monkeypatch):
+        """Токен потерялся вместе с вкладкой -- вход по своей почте обязан
+        работать и без него, иначе оплаченная услуга просто пропадает."""
+        rid, _ = self._paid(monkeypatch, contact="cabinet_buyer@example.com")
+        self._login("cabinet_buyer@example.com")
+        try:
+            assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{rid}").text
+        finally:
+            self._logout()
+
+    def test_owner_still_sees_everything_by_key(self, monkeypatch):
+        rid, _ = self._paid(monkeypatch, contact="key_buyer@example.com")
+        self._logout()
+        assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{rid}", headers=OWNER).text
+
+    # --- чужие ключи не подходят ---
+
+    def test_someone_elses_cabinet_does_not_open_the_report(self, monkeypatch):
+        rid, _ = self._paid(monkeypatch, contact="mine@example.com")
+        self._login("notmine@example.com")
+        try:
+            assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{rid}").text
+        finally:
+            self._logout()
+
+    def test_token_of_another_purchase_does_not_open_this_one(self, monkeypatch):
+        rid_a, _ = self._paid(monkeypatch, contact="a_buyer@example.com")
+        _, tok_b = self._paid(monkeypatch, contact="b_buyer@example.com")
+        self._logout()
+        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{rid_a}?t={tok_b}").text
+
+    def test_empty_token_is_not_a_master_key(self, monkeypatch):
+        """Покупки, оформленные до появления токена, досыпаются при старте.
+        Но если у строки токен всё-таки пуст, пустой ?t= не имеет права
+        открыть отчёт."""
+        from app.main import ReportPurchase, Session, engine, select
+        rid, _ = self._paid(monkeypatch, contact="legacy@example.com")
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(
+                ReportPurchase.contact == "legacy@example.com")).first()
+            o.access_token = ""; s.add(o); s.commit()
+        self._logout()
+        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{rid}?t=").text
+        # но по своей почте покупатель входит и без токена
+        self._login("legacy@example.com")
+        try:
+            assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{rid}").text
+        finally:
+            self._logout()
+
+    # --- ссылки, которые мы сами раздаём, обязаны работать ---
+
+    def test_cabinet_link_carries_the_token(self, monkeypatch):
+        """Иначе скопированная из кабинета ссылка не откроется в другом
+        браузере -- ровно та ситуация, из-за которой человек и потерял её."""
+        rid, tok = self._paid(monkeypatch, contact="cablink@example.com")
+        self._login("cablink@example.com")
+        try:
+            reports = client.get("/api/account/me").json()["reports"]
+        finally:
+            self._logout()
+        row = [r for r in reports if r["check_id"] == rid][0]
+        assert row["report_url"] == f"/report/{rid}?t={tok}"
+
+    def test_payment_returns_the_buyer_with_his_token(self, monkeypatch):
+        """Вернувшись с оплаты, человек обязан увидеть отчёт сразу, ещё не
+        заходя в кабинет."""
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "п", "count": 10}], "best_phrase": "п",
+                    "verdict": {"level": "niche", "text": "т"},
+                    "competitors": {"found": 1, "top": []},
+                    "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея для возврата с оплаты"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        seen = {}
+        async def fake_create(order_id, amount, desc, url, kind="livetest", contact="", _post=None):
+            seen["url"] = url
+            return ("pay_ret", "https://pay.example/x")
+        monkeypatch.setattr(m.payments, "configured", lambda: True)
+        monkeypatch.setattr(m.payments, "create_payment", fake_create)
+        client.post("/api/report", json={"check_id": rid, "tier": "full",
+                                         "contact": "return@example.com"})
+        with Session(engine) as s:
+            tok = s.exec(select(ReportPurchase).where(
+                ReportPurchase.contact == "return@example.com")).first().access_token
+        assert f"/report/{rid}?t={tok}" in seen["url"]
+        assert "paid=1" in seen["url"]
+
+    def test_token_does_not_leak_through_referer(self):
+        """Токен лежит в адресе страницы: ссылка наружу утащила бы его в
+        Referer чужому серверу."""
+        text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
+        assert '<meta name="referrer" content="same-origin">' in text
+
+    def test_page_passes_the_token_when_ordering_sections(self):
+        """Без этого страница покупателя упёрлась бы в собственную защиту."""
+        text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
+        assert "qs.get('t')" in text
+        assert "/section?key=" in text
+
+    # --- публичный пример не должен пострадать ---
+
+    def test_published_example_stays_open_to_everyone(self, monkeypatch):
+        """Пример на /example -- единственный отчёт, который мы показываем
+        всем намеренно."""
+        rid, _ = self._paid(monkeypatch, contact="example_buyer@example.com")
+        self._publish_example("example_buyer@example.com")
+        self._logout()
+        text = client.get("/example").text
+        assert "СЕКРЕТНЫЙ ВЫВОД" in text
+        # ...но по номеру проверки он по-прежнему закрыт
+        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{rid}").text
+
+    def test_example_does_not_generate_on_visitors_behalf(self, monkeypatch):
+        """Опубликованный пример мог оказаться неполным. Полный список
+        разделов тарифа заставил бы каждую вкладку посетителя дозаказывать
+        недостающее -- вызовы модели по чужой покупке на каждого зрителя."""
+        rid, _ = self._paid(monkeypatch, contact="partial_example@example.com")
+        self._publish_example("partial_example@example.com")
+        self._logout()
+        text = client.get("/example").text
+        keys = json.loads(re.search(r"const TIER_KEYS = (\[.*?\]);", text).group(1))
+        assert keys == ["summary"]        # ровно то, что опубликовано

@@ -236,6 +236,12 @@ class ReportPurchase(SQLModel, table=True):
     # написанный руками: показывать более гладкий текст, чем отдаёт движок,
     # значит продавать не то, что отдаём (принцип 3). Помечает владелец.
     is_example: bool = False
+    # Ключ от собственного отчёта. Страница /report/{check_id} адресуется
+    # порядковым номером проверки, то есть чужой оплаченный бизнес-план
+    # открывался перебором: 42 -> 41. Токен уходит в return_url оплаты и в
+    # ссылку из кабинета; кто вошёл в кабинет своей почтой, проходит и без
+    # него (см. _report_access_ok).
+    access_token: str = Field(default_factory=lambda: secrets.token_urlsafe(16))
 
 
 class MagicLinkToken(SQLModel, table=True):
@@ -287,9 +293,25 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS is_example BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS sample_json VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS access_token VARCHAR DEFAULT ''"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
+
+try:  # Покупки, оформленные до появления токена, остались бы без ключа от
+    # собственного отчёта: в кабинет по своей почте владелец покупки войдёт,
+    # а прямая ссылка перестала бы работать. Досыпаем по строке, не пачкой --
+    # токен на то и токен, что у каждой покупки свой.
+    with Session(engine) as _s:
+        _old = _s.exec(select(ReportPurchase).where(
+            (ReportPurchase.access_token == "") | (ReportPurchase.access_token.is_(None)))).all()
+        for _row in _old:
+            _row.access_token = secrets.token_urlsafe(16)
+            _s.add(_row)
+        if _old:
+            _s.commit()
+except Exception:
+    logging.getLogger(__name__).warning("backfill access_token failed", exc_info=True)
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -350,6 +372,39 @@ def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
         return True
     contact = _current_contact(request)
     return bool(contact and proj.contact and contact == proj.contact)
+
+
+def _report_access_ok(request: Request, purchase: "ReportPurchase") -> bool:
+    """Кому открывать ОПЛАЧЕННЫЙ отчёт на /report/{check_id}.
+
+    Страница адресуется порядковым номером проверки спроса, и до этого
+    оплаченный бизнес-план отдавался любому, кто наберёт номер: 42 -> 41.
+    Утекал не только текст за 2990 ₽, но и чужие деньги -- посторонний мог
+    через /api/report/{id}/section гонять генерацию по чужой покупке.
+
+    Три двери, все три -- у настоящего покупателя:
+      · владелец по ключу (как везде);
+      · ссылка с токеном -- уходит в return_url оплаты и в кабинет;
+      · сессия кабинета с той же почтой, на которую оформлен заказ, --
+        человек, потерявший ссылку, входит по magic-link и открывает отчёт
+        без всякого токена.
+    """
+    if _is_owner(request):
+        return True
+    token = (request.query_params.get("t") or "").strip()
+    if token and purchase.access_token and secrets.compare_digest(token, purchase.access_token):
+        return True
+    contact = _current_contact(request)
+    return bool(contact and purchase.contact and contact == purchase.contact)
+
+
+def _report_link(purchase: "ReportPurchase") -> str:
+    """Ссылка на отчёт для его покупателя -- сразу с токеном, чтобы
+    скопированная из кабинета ссылка открывалась и в другом браузере."""
+    if not purchase.check_id:
+        return ""
+    tok = purchase.access_token or ""
+    return f"/report/{purchase.check_id}" + (f"?t={tok}" if tok else "")
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +607,7 @@ async def yookassa_webhook(request: Request):
                     notify = {"what": f"отчёт «{label}»", "order_id": order.id,
                               "idea": order.idea, "contact": order.contact,
                               "amount": order.amount,
-                              "link": f"/report/{order.check_id}" if order.check_id else ""}
+                              "link": _report_link(order)}
                 else:
                     notify = {"what": "живой тест", "order_id": order.id,
                               "idea": order.idea, "contact": order.contact,
@@ -717,20 +772,23 @@ async def report_order(data: ReportIn, request: Request):
         order = ReportPurchase(check_id=data.check_id, idea=idea, tier=tier, contact=contact[:200],
                                amount=price, status="pending_payment" if payments.configured() else "new")
         s.add(order); s.commit(); s.refresh(order)
-        order_id = order.id
+        order_id, order_link = order.id, _report_link(order)
     if not payments.configured():
         if _notify_owner_order(request, what=f"отчёт «{REPORT_PRICES[tier]['label']}»",
                                order_id=order_id, idea=idea, contact=contact,
-                               amount=price, paid=False,
-                               link=f"/report/{data.check_id}" if data.check_id else ""):
+                               amount=price, paid=False, link=order_link):
             _mark_notified(ReportPurchase, order_id)
         return {"ok": True, "paid": False,
                 "message": "Заявка принята. Мы соберём отчёт вручную и пришлём в течение дня."}
     try:
         base = str(request.base_url).rstrip("/")
+        # Токен в адресе возврата -- это и есть ключ покупателя от своего
+        # отчёта: вернувшись с оплаты, он открывает страницу сразу, ещё не
+        # заходя в кабинет.
+        sep = "&" if "?" in order_link else "?"
         pid, url = await payments.create_payment(
             order_id, REPORT_PRICES[tier]["price"], f"Создатель · отчёт по идее (заказ {order_id})",
-            f"{base}/report/{data.check_id}?paid=1", kind="report", contact=contact)
+            f"{base}{order_link}{sep}paid=1", kind="report", contact=contact)
         with Session(engine) as s:
             order = s.get(ReportPurchase, order_id)
             order.payment_id = pid; s.add(order); s.commit()
@@ -951,6 +1009,13 @@ async def report_section(rid: int, request: Request, key: str):
         if not purchase:
             return JSONResponse({"ok": False, "error": "Раздел доступен после оплаты."},
                                 status_code=403)
+        # Проверяем доступ ДО генерации: иначе посторонний, набравший чужой
+        # номер проверки, не просто читал бы чужой отчёт, а оплачивал бы нам
+        # вызовы модели по чужой покупке.
+        if not _report_access_ok(request, purchase):
+            return JSONResponse({"ok": False, "error": "Этот отчёт открывается по вашей ссылке "
+                                                       "или из личного кабинета."},
+                                status_code=403)
         if key not in section_keys(purchase.tier):
             return JSONResponse({"ok": False, "error": "Такого раздела нет в вашем тарифе."},
                                 status_code=404)
@@ -1034,10 +1099,15 @@ def example_page(request: Request):
             f'тариф «{html.escape(REPORT_PRICES.get(tier, {}).get("label", tier))}», '
             f'открыт целиком. Ваш будет по вашей идее и вашим цифрам спроса.</div>')
     _purpose = rec.purpose if rec else PURPOSE_DEFAULT
-    _tier_keys = section_keys(tier)
+    # Только те разделы, что реально опубликованы. Полный список тарифа
+    # заставил бы страницу дозаказывать недостающее -- то есть жечь вызовы
+    # модели по чужой покупке на каждого посетителя примера, а с закрытым
+    # доступом (_report_access_ok) он бы ещё и упирался в 403.
+    _tier_keys = [s["key"] for s in (report_full.get("sections") or []) if s.get("key")]
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(ex.check_id or 0))
+        .replace("__ACCESS_NOTE__", "")
         .replace("__OWNER_BAR__", note)
         .replace("__CHOSEN_BLOCK__", "")
         .replace("__IDEA__", html.escape(idea))
@@ -1074,13 +1144,29 @@ async def report_page(rid: int, request: Request):
             return HTMLResponse(_static("index.html"), status_code=404)
         purchase = _best_report_purchase(s, rid, include_preview=owner)
 
+    # Покупка есть, но открывает её посторонний -- показываем тизер и
+    # объясняем, как попасть в свой отчёт. Не 403: человек мог просто
+    # открыть свою же ссылку без токена в другом браузере, и глухая ошибка
+    # ему ничего не объяснит (принцип 7).
+    access_note = ""
+    locked_other = bool(purchase) and not _report_access_ok(request, purchase)
+    if locked_other:
+        access_note = (
+            '<div class="status-note no-print" id="access-note">Этот отчёт уже оплачен. Откройте его '
+            'по ссылке, на которую вас вернула оплата, — или войдите в '
+            '<a href="/account">личный кабинет</a> с той же почтой, что указывали '
+            'при заказе, и отчёт будет там.</div>')
+        purchase = None
+
     demand_data = json.loads(rec.result_json)
     preview = _report_preview(demand_data)
     report_full = None
     gen_error = ""
     # Бесплатный образец нужен только тем, кто ещё не купил: у покупателя
-    # весь разбор и так открыт, лишний вызов модели ему ни к чему.
-    sample = None if purchase else await _ensure_sample(rid)
+    # весь разбор и так открыт, лишний вызов модели ему ни к чему. Постороннему
+    # на чужой оплаченной проверке -- тем более: образец продаёт отчёт по этой
+    # идее, а он уже продан, и платить за вызов модели тут не за что.
+    sample = None if (purchase or locked_other) else await _ensure_sample(rid)
 
     if purchase:
         if not purchase.report_json:
@@ -1145,6 +1231,7 @@ async def report_page(rid: int, request: Request):
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rid))
+        .replace("__ACCESS_NOTE__", access_note)
         .replace("__OWNER_BAR__", owner_bar)
         .replace("__CHOSEN_BLOCK__", chosen_block)
         .replace("__IDEA__", html.escape(rec.idea))
@@ -1187,7 +1274,7 @@ def orders_list(request: Request):
                          "amount": r.amount,
                          "delivered": bool(r.report_json),
                          "gen_error": r.gen_error,
-                         "report_url": f"/report/{r.check_id}" if r.check_id else None}
+                         "report_url": _report_link(r)}
                         for r in reversed(reports)]}
 
 
@@ -1999,7 +2086,7 @@ def account_me(request: Request):
         "reports": [{"check_id": r.check_id, "idea": r.idea, "tier": r.tier,
                      "tier_label": REPORT_PRICES.get(r.tier, {}).get("label", r.tier),
                      "status": _effective_status(r.status, r.created_at),
-                     "report_url": f"/report/{r.check_id}"} for r in reports],
+                     "report_url": _report_link(r)} for r in reports],
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
                     "status": _effective_status(o.status, o.created_at),
                     "continue_url": f"/r/{o.check_id}" if o.check_id else None} for o in orders],
