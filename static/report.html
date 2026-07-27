@@ -26,6 +26,13 @@
   .head{padding:24px 0 6px}
   h1{font-size:clamp(22px,3.8vw,28px);font-weight:600;letter-spacing:-.015em}
   .idea{color:var(--muted);font-size:15px;margin-top:6px;max-width:46em}
+  .chosen{border-left:2px solid var(--line);padding-left:11px;margin-top:12px;max-width:46em}
+  .chosen-tag{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:2px}
+  .chosen-h1{font-size:15px;color:var(--ink)}
+  /* Панель владельца — служебная, у покупателя её нет вовсе. */
+  .owner-bar{border:1px solid var(--line);background:var(--box);border-radius:8px;
+    padding:12px 14px;margin-top:16px;font-size:13px;color:var(--muted)}
+  .owner-bar a{color:var(--ink)}
 
   /* Бесплатный тизер — виден всегда, разбор на данных бесплатной проверки
      спроса (частотность, конкуренты, LLM-заметки по шкалам), а не витрина
@@ -134,7 +141,9 @@
   <div class="head">
     <h1>Отчёт по идее</h1>
     <p class="idea" id="idea">__IDEA__</p>
+    __CHOSEN_BLOCK__
   </div>
+  __OWNER_BAR__
 
   <div class="preview" id="preview"></div>
   <div id="score-section"></div>
@@ -299,7 +308,7 @@ if (UNLOCKED_TIER === 'full') {
   pricing.style.display = 'none';
 } else if (UNLOCKED_TIER === 'quick') {
   pricing.innerHTML = `<h3>Докупить <span class="hl">бизнес-план</span></h3>
-    <p>У вас есть быстрый разбор. Бизнес-план добавляет аудиторию, финансовую модель, риски и план запуска.</p>
+    <p>У вас тариф «__QUICK_LABEL__». «__FULL_LABEL__» добавляет аудиторию, финансовую модель, риски и план запуска.</p>
     <div class="tiers">${tierCard('full')}</div>
     <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
     <p class="err" id="order-err" role="alert"></p>`;

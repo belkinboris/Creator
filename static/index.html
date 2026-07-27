@@ -131,6 +131,10 @@
     .hero{padding-top:30px;padding-bottom:24px}
     .sub{font-size:16px}
     .checker{padding:15px}
+    /* На узком экране пример идеи занимает три строки и не помещался в поле:
+       последняя строка обрезалась ровно на первом экране воронки. Заодно
+       высокое поле само говорит, что можно писать не одну фразу. */
+    .checker textarea{min-height:112px}
     .checker-foot .btn,.checker-foot .btn-ghost{width:100%;text-align:center}
     .freq-row{flex-direction:column;align-items:flex-start;gap:3px}
     .score-grid{grid-template-columns:1fr 1fr}
@@ -176,7 +180,7 @@
       <div class="step"><span class="n">1</span><div><h3>Идея <span class="tag free-tag">бесплатно</span></h3><p>Формулируем, кому и чем помогает продукт. Заостряем до предложения, за которое люди готовы платить.</p></div></div>
       <div class="step"><span class="n">2</span><div><h3>Спрос <span class="tag free-tag">бесплатно</span></h3><p>Смотрим цифры Яндекса: сколько людей ищут решение и какими словами. И кто уже в выдаче.</p></div></div>
       <div class="step"><span class="n">3</span><div><h3><span class="hl">Тест на реальных людях</span></h3><p>Мы сами соберём вам страницу под лучшую формулировку — дизайн, тексты, форма для заявок. Дальше вы по нашей <a href="/guide/direct">пошаговой инструкции</a> запускаете рекламу в Яндекс Директе — так узнаете, сколько реальных людей оставят заявку на вашу идею.</p></div></div>
-      <div class="step"><span class="n">4</span><div><h3>Заявки</h3><p>Считаем конверсию из визита в заявку. Выше 2,5% — идея живая, ниже — меняем предложение или аудиторию.</p></div></div>
+      <div class="step"><span class="n">4</span><div><h3>Заявки</h3><p>Считаем, сколько из зашедших оставили заявку. Больше __SIGNAL_PCT__ — идея живая, меньше __DEAD_PCT__ — меняем предложение или аудиторию. Раньше __CLICK_TARGET__ визитов не судим: меньше — ещё не статистика.</p></div></div>
       <div class="step"><span class="n">5</span><div><h3>Первые продажи <span class="tag future-tag">в Создателе 2.0</span></h3><p>Превращаем заявки в деньги: цена, способ оплаты.</p></div></div>
       <div class="step"><span class="n">6</span><div><h3>Повторяемость <span class="tag future-tag">в Создателе 2.0</span></h3><p>Проверяем, что продажи — не случайность: канал стабильно приводит клиентов по известной цене.</p></div></div>
       <div class="step"><span class="n">7</span><div><h3>Удержание <span class="tag future-tag">в Создателе 2.0</span></h3><p>Клиенты возвращаются и рекомендуют. Здесь идея становится бизнесом.</p></div></div>

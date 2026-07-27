@@ -54,6 +54,7 @@
   .paid-note{display:none;border-left:3px solid var(--ok);padding:2px 0 2px 12px;
     margin-top:14px;font-size:15px}
   .paid-note.show{display:block}
+  .budget-note{color:var(--muted);font-size:13px;margin-top:10px;max-width:40em}
 
   /* Лента: один активный фокус, пройденные шаги сжимаются в одну строку итога.
      Шаг без .active и без .done не отрисован вовсе -- нет данных, нет блока. */
@@ -76,6 +77,8 @@
 
   .freq-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:9px 0}
   .freq-row + .freq-row{border-top:1px solid var(--line)}
+  .freq-phrase{display:block}
+  .freq-match{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
   .freq-num{font:600 18px/1 "IBM Plex Mono",monospace;white-space:nowrap;
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
   .freq-num.na{color:var(--muted);font-size:14px;font-weight:500;background:none}
@@ -87,6 +90,10 @@
   .overall-val{font:600 40px/1 "IBM Plex Mono",monospace;
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 4px}
   .overall-note{color:var(--muted);font-size:15px}
+  /* Откуда взялось число. Голое «6/10» не объясняет ничего, а правило
+     «спрос это ворота» без слов читается как ошибка счёта. */
+  .overall-how{color:var(--muted);font-size:13.5px;max-width:44em;margin:-8px 0 14px}
+  .overall-how:empty{display:none}
   .score-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
     background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .score-cell{background:var(--box);padding:14px 12px}
@@ -151,7 +158,9 @@
   .next{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:20px;margin:0 0 40px}
   .next h3{font-size:18px;font-weight:600;margin-bottom:6px}
   .next p{color:var(--muted);font-size:15px;margin-bottom:14px;max-width:38em}
-  .next input{width:100%;padding:11px 12px;border:1px solid var(--line);
+  /* Блоки .next/.alt-path меняются ролями для соцконтракта -- поле ввода
+     должно выглядеть одинаково в обоих, а не терять стили при перестановке. */
+  .next input,.alt-path input{width:100%;padding:11px 12px;border:1px solid var(--line);
     border-radius:6px;background:#fff;color:var(--ink);font:inherit;margin-bottom:10px}
   .btn{appearance:none;border:0;cursor:pointer;border-radius:6px;display:inline-block;
     background:var(--btn);color:#fff;font:600 15px "IBM Plex Sans";padding:11px 18px;text-decoration:none}
@@ -194,7 +203,7 @@
     <div class="path-bar">
       <i class="done"></i><i class="done"></i><i></i><i></i><i></i><i></i><i></i>
     </div>
-    <div class="path-next"><span class="path-next-tag">Дальше</span>Этап 3 — соберём проверочную страницу под вашу идею и запустим первую рекламу</div>
+    <div class="path-next"><span class="path-next-tag">Дальше</span><span id="path-next-text">Этап 3 — соберём проверочную страницу под вашу идею, рекламу вы запустите сами по инструкции</span></div>
   </div>
 
   <div class="head">
@@ -210,7 +219,10 @@
     </div>
     <p class="err" id="save-err" role="alert"></p>
     <p class="okmsg" id="save-ok"></p>
-    <p class="paid-note" id="paid-note">Оплата принята. Мы запускаем живой тест вашей идеи — вернёмся с первыми цифрами.</p>
+    <!-- Прежний текст обещал, что рекламу запустим мы и сами принесём цифры.
+         Неправда дважды: страницу собираем мы, рекламу запускает человек,
+         а цифры он смотрит в кабинете, когда ему удобно. -->
+    <p class="paid-note" id="paid-note">Оплата принята. Собираем вашу проверочную страницу — ссылка и пошаговая инструкция по запуску рекламы появятся в <a href="/account">личном кабинете</a>.</p>
   </div>
 
   <section class="step" data-step="1" id="step-1">
@@ -250,6 +262,7 @@
         <span class="overall-val" id="overall-val"></span>
         <span class="overall-note" id="overall-note"></span>
       </div>
+      <p class="overall-how" id="overall-how"></p>
       <button class="detail-toggle" id="score-detail-toggle" type="button">Почему такая оценка? →</button>
       <div class="score-grid" id="scores" hidden></div>
       <div class="step-next"><button class="btn" type="button" onclick="advance(3)" id="step3-next"></button></div>
@@ -273,17 +286,21 @@
 
   <section class="step" data-step="5" id="step-5">
     <div class="next" id="order">
-      <h3>Дальше — соберём страницу и <span class="hl">скажем, приносит ли идея деньги</span></h3>
-      <p>Полностью соберём проверочную страницу под вашу идею — дизайн, тексты, форма заявки. Дальше вы сами запускаете рекламу в Яндекс Директе — у нас есть <a href="/guide/direct">пошаговая инструкция</a>, которая обходит типичные ошибки новичков, а мы посчитаем цифры, которые она приведёт. Через пару недель у вас будут не догадки, а реальные цифры: сколько людей готовы оставить заявку на вашу идею.</p>
+      <h3 id="order-h3">Дальше — соберём страницу и <span class="hl">скажем, приносит ли идея деньги</span></h3>
+      <p id="order-p">Полностью соберём проверочную страницу под вашу идею — дизайн, тексты, форма заявки. Дальше вы сами запускаете рекламу в Яндекс Директе — у нас есть <a href="/guide/direct">пошаговая инструкция</a>, которая обходит типичные ошибки новичков, а мы посчитаем цифры, которые она приведёт. Через пару недель у вас будут не догадки, а реальные цифры: сколько людей готовы оставить заявку на вашу идею.</p>
       <p class="chosen-note" id="chosen-note"></p>
       <input id="contact" placeholder="Почта или телефон">
       <button class="btn" id="order-btn" type="button"></button>
+      <!-- Про рекламный бюджет до оплаты не говорилось нигде, хотя в оферте
+           это записано, а на деле он больше самой услуги. Узнать об этом
+           после оплаты -- законный повод требовать возврат. -->
+      <p class="budget-note" id="budget-note">Рекламный бюджет в цену не входит: его вы платите Яндексу напрямую, на тест обычно хватает __AD_BUDGET__. <a href="/guide/direct">Как это устроено</a></p>
       <p class="err" id="order-err" role="alert"></p>
       <p class="okmsg" id="order-ok"></p>
     </div>
-    <div class="alt-path">
-      <h4>Или получите <span class="hl">отчёт по идее</span> — без ожидания рекламы</h4>
-      <p>Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни. От 990 ₽.</p>
+    <div class="alt-path" id="alt-report">
+      <h4 id="alt-h4">Или получите <span class="hl">отчёт по идее</span> — без ожидания рекламы</h4>
+      <p id="alt-p">Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни. От __MIN_REPORT_PRICE__ ₽.</p>
       <a class="btn" href="/report/__CHECK_ID__">Посмотреть отчёт</a>
     </div>
   </section>
@@ -302,6 +319,7 @@ const PRICE = __PRICE__;
 const PAY_ENABLED = __PAY_ENABLED__;
 const IDEA = __IDEA_JSON__;
 const SAVED = __SAVED__;
+const PURPOSE = __PURPOSE_JSON__;
 
 function fmt(n){ return n.toLocaleString('ru-RU'); }
 function escapeHtml(s){
@@ -316,7 +334,10 @@ function serviceName(domain){
 
 document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
   <div class="freq-row">
-    <span>${escapeHtml(f.phrase)}</span>
+    <span>
+      <span class="freq-phrase">${escapeHtml(f.phrase)}</span>
+      ${f.matched_phrase ? `<span class="freq-match">Вордстат подсказал более ходовую формулировку: «${escapeHtml(f.matched_phrase)}» — цифра справа про неё</span>` : ''}
+    </span>
     <span>${f.count === null
       ? '<span class="freq-num na">почти не ищут</span>'
       : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`}
@@ -336,6 +357,7 @@ if (hasScores) {
     document.getElementById('overall-val').textContent = ov.value + '/10';
     document.getElementById('overall-note').textContent =
       ov.weakest ? 'Слабое место — ' + ov.weakest.toLowerCase() : '';
+    document.getElementById('overall-how').textContent = ov.basis || '';
   }
   document.getElementById('scores').innerHTML = sc.map(s => `
     <div class="score-cell">
@@ -371,7 +393,44 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
 
 // --- Лента: один активный фокус, шаги без данных пропускаются целиком ---
 
-const ARRIVAL = {2: 'конкуренты', 3: 'оценка идеи', 4: 'заострим идею', 5: 'живой тест'};
+// --- Финальный шаг разворачиваем под ту аудиторию, которая пришла ---
+// Человек с /social-contract пришёл за бизнес-планом для комиссии: рекламный
+// платный рекламный тест ему не нужен, а именно он стоял главной кнопкой, пока
+// бизнес-план прятался в «Или...». Для фаундера с главной порядок прежний.
+const IS_SOCIAL_CONTRACT = PURPOSE === 'social_contract';
+
+if (IS_SOCIAL_CONTRACT) {
+  document.getElementById('path-next-text').textContent =
+    'Этап 3 — соберём бизнес-план с расчётами: смета, план доходов, окупаемость';
+
+  const order = document.getElementById('order');
+  const alt = document.getElementById('alt-report');
+
+  // Бизнес-план поднимаем на место главного блока...
+  alt.className = 'next';
+  document.getElementById('alt-h4').innerHTML =
+    'Дальше — <span class="hl">бизнес-план для комиссии</span>';
+  document.getElementById('alt-p').innerHTML =
+    'Разбор на цифрах, которые мы только что честно посчитали: рынок, конкуренты, риски. ' +
+    'В тарифе «__FULL_LABEL__» — ещё и смета расходов построчно, план доходов на год, ' +
+    'точка безубыточности и срок окупаемости. Готово за пару минут, не за дни.';
+
+  // ...а рекламный тест опускаем в необязательное дополнение.
+  order.className = 'alt-path';
+  document.getElementById('order-h3').innerHTML =
+    'Или проверьте идею <span class="hl">на реальных людях</span> — до подачи заявления';
+  document.getElementById('order-p').innerHTML =
+    'Необязательно, но сильный аргумент для комиссии: соберём страницу под вашу идею, ' +
+    'вы по <a href="/guide/direct">пошаговой инструкции</a> запускаете рекламу — и в заявлении ' +
+    'вы говорите не «думаю, будет спрос», а «столько-то человек уже оставили заявку».';
+
+  order.parentNode.insertBefore(alt, order);
+
+  document.getElementById('skip-sharpen').textContent = 'Пропустить — сразу к бизнес-плану';
+}
+
+const ARRIVAL = {2: 'конкуренты', 3: 'оценка идеи', 4: 'заострим идею',
+                 5: IS_SOCIAL_CONTRACT ? 'бизнес-план' : 'живой тест'};
 const STEP_ORDER = [1, hasComp ? 2 : null, hasScores ? 3 : null, 4, 5].filter(Boolean);
 
 function nextLabel(afterStep){
@@ -453,6 +512,13 @@ function pickOffer(offer, btn){
   const displayH1 = stripTags(offer.h1);
   chosenNote.textContent = 'Тестируем: ' + displayH1;
   chosenNote.classList.add('show');
+  // Отчёт заказывают уже на /report/{id}, где выбора на экране нет -- если
+  // не запомнить его здесь, платный разбор соберётся по сырой идее, а не по
+  // тому, что человек выбрал. Молча: сбой сохранения не должен мешать выбору.
+  fetch('/api/demand/' + CHECK_ID + '/chosen', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({offer: offer})
+  }).catch(() => {});
   advance(4, 'Выбрано: ' + displayH1);
 }
 
@@ -505,9 +571,12 @@ sharpenBtn.addEventListener('click', async () => {
 });
 
 const orderBtn = document.getElementById('order-btn');
+// «Живой тест» -- наше внутреннее название услуги; человеку из соцконтракта
+// оно ничего не говорит, поэтому там кнопка описывает действие словами.
 orderBtn.textContent = PAY_ENABLED
   ? `Оплатить и запустить — ${fmt(PRICE)} ₽`
-  : 'Оставить заявку на живой тест';
+  : (IS_SOCIAL_CONTRACT ? 'Оставить заявку на проверку идеи'
+                        : 'Оставить заявку на живой тест');
 // Чек 54-ФЗ уходит только при реальной оплате -- без кассы это просто
 // заявка для связи, обещать чек в её плейсхолдере было бы неточно.
 document.getElementById('contact').placeholder = PAY_ENABLED

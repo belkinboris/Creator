@@ -59,6 +59,7 @@ from app.offer_engine import OfferEngineError, sharpen_idea  # noqa: E402
 from app.demand import DemandError, check_demand, generate_idea, diagnose  # noqa: E402
 from app.report_engine import (  # noqa: E402
     ReportEngineError, generate_report, ALL_SECTIONS, QUICK_KEYS,
+    PURPOSES as report_purposes,
 )
 from app import payments  # noqa: E402
 from app import mailer  # noqa: E402
@@ -75,6 +76,36 @@ def utcnow() -> datetime:
 # лету при чтении (created_at + порог < сейчас), не мутирует БД: ни воркеров,
 # ни крона нет, статус просто перестаёт звать на оплату уже неживую ссылку.
 PENDING_PAYMENT_TIMEOUT_MINUTES = 20
+
+# Пороги вердикта теста на реальных людях -- ЕДИНСТВЕННЫЙ источник правды.
+# Раньше числа были зашиты в модель, а витрины называли совсем другие: главная
+# обещала «выше 2,5% — идея живая», плейбук — «дождитесь ~100 визитов», тогда
+# как движок считал по 8% и 40 визитам. Человек с 3% читал на главной «идея
+# живая», а в кабинете видел «СПРОСА НЕТ» -- прямое нарушение принципа 3.
+# Рекламный бюджет в цену живого теста НЕ входит (так и записано в оферте) --
+# человек платит его Яндексу напрямую. До оплаты об этом не говорилось нигде,
+# хотя это удваивает-утраивает реальную стоимость шага (A7 в PRODUCT_ROADMAP).
+AD_BUDGET_HINT = "3–5 тысяч ₽"
+
+CLICK_TARGET = 40       # раньше этого числа визитов цифры -- шум, не результат
+SIGNAL_RATE = 0.08      # заявок/визитов, с которых интерес считается настоящим
+DEAD_RATE = 0.04        # и ниже -- интереса нет
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """«1 заявка», «3 заявки», «5 заявок». Без этого вердикт писал «1 заявок»
+    -- мелочь, по которой сразу видно, что текст собран машиной."""
+    n = abs(n)
+    if n % 100 in range(11, 15):
+        return many
+    last = n % 10
+    return one if last == 1 else few if last in (2, 3, 4) else many
+
+
+def _pct(rate: float) -> str:
+    """8% / 2,5% -- дробные без хвоста .0 и с запятой, как принято в русском."""
+    v = round(rate * 100, 1)
+    return (f"{v:.1f}".rstrip("0").rstrip(".").replace(".", ",")) + "%"
 
 
 def _effective_status(status: str, created_at: datetime) -> str:
@@ -95,9 +126,9 @@ class SmokeProject(SQLModel, table=True):
     idea_text: str
     offer_json: str          # выбранный оффер целиком (для повторных генераций)
     landing_html: str        # захощенный лендинг
-    click_target: int = 40
-    lead_rate_signal: float = 0.08
-    lead_rate_dead: float = 0.04
+    click_target: int = CLICK_TARGET
+    lead_rate_signal: float = SIGNAL_RATE
+    lead_rate_dead: float = DEAD_RATE
     status: str = "running"  # running | signal | dead | gray
     created_at: datetime = Field(default_factory=utcnow)
     contact: str = ""        # почта покупателя -- показывается в его личном кабинете (/account)
@@ -148,6 +179,14 @@ class DemandCheck(SQLModel, table=True):
     # Пусто, пока человек не привязал бесплатную проверку к кабинету -- см.
     # POST /api/demand/{id}/save и автопривязку на /r/ для уже вошедших.
     contact: str = ""
+    # С какой стороны человек пришёл: "business" (главная, фаундер) или
+    # "social_contract" (лендинг /social-contract, выплата от государства).
+    # Определяет оптику платного отчёта -- см. PURPOSES в report_engine.
+    purpose: str = "business"
+    # JSON выбранного на /r/ заострённого позиционирования. Живёт здесь, а не
+    # на заказе, потому что отчёт заказывают уже со страницы /report/{check_id},
+    # которая знает только check_id: иначе выбор человека до отчёта не доезжает.
+    chosen_offer: str = ""
 
 
 class LiveTestOrder(SQLModel, table=True):
@@ -162,6 +201,7 @@ class LiveTestOrder(SQLModel, table=True):
     payment_id: str = ""
     amount: int = 0
     chosen_offer: str = ""    # JSON: полный оффер, выбранный на /r/{id} -- см. LAUNCH_REQUIRED_FIELDS
+    paid_notified: bool = False   # владельцу сообщили об оплате/заявке
     idea_id: Optional[str] = None   # проставляется автозапуском/владельцем -- ссылка на запущенный SmokeProject
 
 
@@ -179,6 +219,13 @@ class ReportPurchase(SQLModel, table=True):
     payment_id: str = ""
     amount: int = 0
     report_json: str = ""     # заполняется лениво после оплаты
+    # Оплата прошла, а генерация упала -- худший сценарий платного продукта.
+    # Причина видна владельцу в /desk. Два РАЗНЫХ флага уведомлений: об
+    # оплате и о сбое доставки. Один на двоих означал бы, что письмо об
+    # оплате гасит более важное письмо о том, что услуга не оказана.
+    gen_error: str = ""
+    fail_notified: bool = False   # владельцу сообщили о сорванной доставке
+    paid_notified: bool = False   # владельцу сообщили о самой оплате/заявке
 
 
 class MagicLinkToken(SQLModel, table=True):
@@ -222,6 +269,12 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS idea_id VARCHAR"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS purpose VARCHAR DEFAULT 'business'"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS gen_error VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS fail_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -235,7 +288,7 @@ async def _lifespan(_app: FastAPI):
             s.exec(select(SmokeProject.id).limit(1)).first()
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
-    for name in ("index.html", "portfolio.html", "project.html", "guide-direct.html", "result.html", "report.html",
+    for name in ("index.html", "project.html", "guide-direct.html", "result.html", "report.html",
                  "social-contract.html", "account.html"):
         try:
             _static(name)
@@ -267,6 +320,14 @@ def _check_owner(request: Request) -> None:
         raise HTTPException(401, "Нужен ключ владельца (X-Owner-Key).")
 
 
+def _is_owner(request: Request) -> bool:
+    """Тот же ключ, что и в _check_owner, но без исключения -- нужен там, где
+    владельцу показывается что-то сверх обычной страницы, а посторонний
+    должен просто увидеть обычную."""
+    provided = request.headers.get("X-Owner-Key") or request.query_params.get("key") or ""
+    return bool(OWNER_KEY and provided == OWNER_KEY)
+
+
 def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
     """Доступ к цифрам проекта на /p/{id}: владелец по ключу (как везде на
     /desk), либо покупатель по своей сессии кабинета -- /p/ теперь открыт
@@ -285,6 +346,9 @@ def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
 
 class IdeaIn(BaseModel):
     idea: str
+    # Откуда пришёл человек -- /social-contract шлёт "social_contract",
+    # обычная главная ничего не шлёт и получает дефолт (см. DemandCheck.purpose).
+    purpose: str = "business"
 
 
 @app.post("/api/offers")
@@ -330,8 +394,10 @@ async def demand_check(data: IdeaIn, request: Request):
         # Уже вошедший в кабинет человек получает автопривязку без лишних
         # действий -- проверка сразу видна в /account, без отдельного "Сохранить".
         contact = _current_contact(request) or ""
+        purpose = data.purpose if data.purpose in report_purposes else "business"
         rec = DemandCheck(idea=data.idea[:300], best_count=max(known) if known else None,
-                          result_json=json.dumps(result, ensure_ascii=False), contact=contact)
+                          result_json=json.dumps(result, ensure_ascii=False), contact=contact,
+                          purpose=purpose)
         with Session(engine) as s:
             s.add(rec); s.commit(); s.refresh(rec)
             check_id = rec.id
@@ -372,12 +438,17 @@ def result_page(rid: int):
     html_out = (tpl
         .replace("__CHECK_ID__", str(rec.id))
         .replace("__PRICE__", str(LIVE_TEST_PRICE))
+        .replace("__AD_BUDGET__", AD_BUDGET_HINT)
         .replace("__PAY_ENABLED__", "true" if payments.configured() else "false")
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__IDEA_JSON__", idea_json)
         .replace("__RESULT_JSON__", safe_json)
-        .replace("__SAVED__", "true" if rec.contact else "false"))
-    return HTMLResponse(html_out)
+        .replace("__SAVED__", "true" if rec.contact else "false")
+        # Человек с /social-contract пришёл за бизнес-планом для комиссии, а
+        # не за рекламным тестом -- страница результата разворачивает финальный
+        # шаг под него, см. PURPOSE в result.html.
+        .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False)))
+    return HTMLResponse(_fill_server_values(html_out))
 
 
 class LiveTestIn(SQLModel):
@@ -412,8 +483,14 @@ async def live_test_order(data: LiveTestIn, request: Request):
         s.add(order); s.commit(); s.refresh(order)
         order_id = order.id
     if not payments.configured():
+        # Заявку без оплаты доводит владелец руками -- значит он должен о ней
+        # узнать, а не обнаружить, открыв /desk через несколько дней.
+        if _notify_owner_order(request, what="живой тест", order_id=order_id, idea=idea,
+                               contact=contact, amount=LIVE_TEST_PRICE, paid=False):
+            _mark_notified(LiveTestOrder, order_id)
         return {"ok": True, "paid": False,
-                "message": "Заявка принята. Мы свяжемся в течение дня, запустим страницу и рекламу вашей идеи."}
+                "message": "Заявка принята. Свяжемся в течение дня и соберём проверочную "
+                           "страницу под вашу идею — рекламу вы запустите сами по нашей инструкции."}
     try:
         base = str(request.base_url).rstrip("/")
         # Без check_id ссылка /r/ ведёт в никуда (404) -- возвращаем на главную,
@@ -448,11 +525,26 @@ async def yookassa_webhook(request: Request):
     order_id = meta.get("order_id")
     kind = meta.get("kind", "livetest")   # старые платежи до kind -- считаем livetest
     model = {"livetest": LiveTestOrder, "report": ReportPurchase}.get(kind, LiveTestOrder)
+    notify = None
     try:
         with Session(engine) as s:
             order = s.get(model, int(order_id)) if order_id else None
             if order and order.status != "paid":
                 order.status = "paid"; s.add(order); s.commit()
+            if order is not None and not order.paid_notified:
+                # Собираем данные письма ВНУТРИ сессии, а шлём после неё:
+                # SMTP может отвечать секундами, держать на нём транзакцию
+                # и ответ вебхуку ЮКассы незачем.
+                if kind == "report":
+                    label = REPORT_PRICES.get(order.tier, {}).get("label", order.tier)
+                    notify = {"what": f"отчёт «{label}»", "order_id": order.id,
+                              "idea": order.idea, "contact": order.contact,
+                              "amount": order.amount,
+                              "link": f"/report/{order.check_id}" if order.check_id else ""}
+                else:
+                    notify = {"what": "живой тест", "order_id": order.id,
+                              "idea": order.idea, "contact": order.contact,
+                              "amount": order.amount, "link": ""}
             # Автозапуск: если на /r/ выбрали заострённый вариант (полный
             # оффер, не только angle/h1/sub -- см. pickOffer в result.html),
             # запускаем проект сразу при оплате, без ручного вмешательства
@@ -470,6 +562,8 @@ async def yookassa_webhook(request: Request):
                     s.add(order); s.commit()
     except Exception:
         logging.getLogger(__name__).warning("webhook order update failed", exc_info=True)
+    if notify and _notify_owner_order(request, paid=True, **notify):
+        _mark_notified(model, notify["order_id"])
     return {"ok": True}
 
 
@@ -514,11 +608,20 @@ def _report_preview(demand_data: dict) -> dict:
     }
 
 
-def _best_report_purchase(s: Session, check_id: int):
+PREVIEW_STATUS = "preview"   # владельческий прогон без оплаты, см. _owner_preview
+
+
+def _best_report_purchase(s: Session, check_id: int, *, include_preview: bool = False):
     """Самая полная ОПЛАЧЕННАЯ покупка отчёта для этой проверки спроса --
-    full перекрывает quick, если куплены оба."""
+    full перекрывает quick, если куплены оба.
+
+    include_preview включается ТОЛЬКО для владельца: превью открывает платный
+    отчёт бесплатно, и если пустить его сюда для всех, человек, чья проверка
+    попала во владельческий прогон, получит бизнес-план за 2990 ₽ даром.
+    """
+    allowed = ["paid", PREVIEW_STATUS] if include_preview else ["paid"]
     rows = s.exec(select(ReportPurchase).where(
-        ReportPurchase.check_id == check_id, ReportPurchase.status == "paid"
+        ReportPurchase.check_id == check_id, ReportPurchase.status.in_(allowed)
     ).order_by(ReportPurchase.created_at.desc())).all()
     if not rows:
         return None
@@ -555,6 +658,11 @@ async def report_order(data: ReportIn, request: Request):
         s.add(order); s.commit(); s.refresh(order)
         order_id = order.id
     if not payments.configured():
+        if _notify_owner_order(request, what=f"отчёт «{REPORT_PRICES[tier]['label']}»",
+                               order_id=order_id, idea=idea, contact=contact,
+                               amount=price, paid=False,
+                               link=f"/report/{data.check_id}" if data.check_id else ""):
+            _mark_notified(ReportPurchase, order_id)
         return {"ok": True, "paid": False,
                 "message": "Заявка принята. Мы соберём отчёт вручную и пришлём в течение дня."}
     try:
@@ -579,16 +687,141 @@ def report_status(rid: int):
     return {"paid": bool(purchase), "tier": purchase.tier if purchase else None}
 
 
+def _notify_owner_order(request: Request, *, what: str, order_id: int, idea: str,
+                        contact: str, amount: int, paid: bool, link: str = "") -> bool:
+    """Письмо владельцу о новом заказе -- оплаченном или заявке без оплаты.
+
+    До этого владелец узнавал о деньгах и заявках, только открыв /desk
+    глазами: продукт с платным рекламным трафиком так работать не может
+    (A2 в PRODUCT_ROADMAP). Никогда не бросает -- см. mailer.notify_owner,
+    сбой уведомления не имеет права сломать оплату или заявку.
+    """
+    base = str(request.base_url).rstrip("/")
+    head = "оплачено" if paid else "заявка без оплаты"
+    body = (f"{what}\n"
+            f"Заказ №{order_id}\n"
+            f"Идея: {(idea or '—')[:200]}\n"
+            f"Контакт: {contact or '—'}\n")
+    if paid:
+        body += f"Сумма: {amount} ₽\n"
+    else:
+        body += "Оплаты не было: связаться и довести вручную.\n"
+    if link:
+        body += f"\n{base}{link}\n"
+    body += f"\nВсе заказы: {base}/desk\n"
+    return mailer.notify_owner(f"Создатель: {head} — {what}", body)
+
+
+def _mark_notified(model, order_id: int) -> None:
+    """Флаг «владельцу уже написали» отдельной короткой транзакцией: вебхук
+    ЮКассы может прийти повторно, а страницу заказа можно перезагрузить."""
+    try:
+        with Session(engine) as s:
+            row = s.get(model, order_id)
+            if row is not None:
+                row.paid_notified = True
+                s.add(row); s.commit()
+    except Exception:
+        logging.getLogger(__name__).warning("mark notified failed", exc_info=True)
+
+
+def _record_report_failure(purchase_id: int, error: str, request: Request, check_id: int) -> None:
+    """Оплата прошла, отчёт не собрался -- самый дорогой сценарий отказа для
+    платного продукта: деньги списаны, услуга не оказана, и до этой правки
+    единственным, кто об этом знал, был сам покупатель.
+
+    Записываем причину (владелец видит её в /desk) и ОДИН раз пишем владельцу.
+    Один -- потому что страницу можно перезагружать сколько угодно, и каждая
+    перезагрузка заново дёргает генерацию. Всё внутри fail-soft: сбой записи
+    или письма не имеет права уронить страницу, которую и так уже видит
+    расстроенный покупатель."""
+    try:
+        with Session(engine) as s:
+            purchase = s.get(ReportPurchase, purchase_id)
+            if purchase is None:
+                return
+            purchase.gen_error = error[:500]
+            already_notified = purchase.fail_notified
+            # Заявка без оплаты (status="new") -- не денежный сбой, владелец
+            # и так собирает такие вручную; письмо шлём только когда заплатили.
+            paid = purchase.status == "paid"
+            contact, tier, idea = purchase.contact, purchase.tier, purchase.idea
+            s.add(purchase); s.commit()
+
+        if already_notified or not paid:
+            return
+
+        base = str(request.base_url).rstrip("/")
+        label = REPORT_PRICES.get(tier, {}).get("label", tier)
+        sent = mailer.notify_owner(
+            f"Создатель: оплачен отчёт, но он не собрался (заказ {purchase_id})",
+            f"Тариф: {label}\n"
+            f"Идея: {idea[:200]}\n"
+            f"Покупатель: {contact}\n"
+            f"Ошибка генерации: {error}\n\n"
+            f"Страница отчёта: {base}/report/{check_id}\n"
+            f"Заказы: {base}/desk\n\n"
+            "Покупатель видит на странице сообщение об ошибке. Отчёт пересоберётся "
+            "сам при следующем открытии страницы -- если причина была временной. "
+            "Если нет, деньги придётся вернуть.")
+        if sent:
+            with Session(engine) as s:
+                fresh = s.get(ReportPurchase, purchase_id)
+                if fresh is not None:
+                    fresh.fail_notified = True
+                    s.add(fresh); s.commit()
+    except Exception:
+        logging.getLogger(__name__).warning("report failure notice failed", exc_info=True)
+
+
+def _owner_preview(check_id: int, tier: str) -> None:
+    """Заводит владельческий прогон отчёта: та же генерация, тот же промпт,
+    те же данные -- просто без оплаты и с нулевой суммой, чтобы не попасть в
+    выручку. Повторный вызов ничего не дублирует."""
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, check_id)
+        if not rec:
+            return
+        exists = s.exec(select(ReportPurchase).where(
+            ReportPurchase.check_id == check_id, ReportPurchase.tier == tier,
+            ReportPurchase.status == PREVIEW_STATUS)).first()
+        if exists:
+            return
+        s.add(ReportPurchase(check_id=check_id, idea=rec.idea, tier=tier,
+                             contact="", status=PREVIEW_STATUS, amount=0))
+        s.commit()
+
+
+def _chosen_offer(rec: "DemandCheck") -> dict | None:
+    """Заострение, выбранное на /r/. Битый JSON не имеет права уронить
+    платный отчёт -- лучше собрать разбор по исходной идее, чем не собрать."""
+    if not rec.chosen_offer:
+        return None
+    try:
+        offer = json.loads(rec.chosen_offer)
+    except ValueError:
+        return None
+    return offer if isinstance(offer, dict) else None
+
+
 @app.get("/report/{rid}", response_class=HTMLResponse)
-async def report_page(rid: int):
+async def report_page(rid: int, request: Request):
     """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
     после оплаты, генерируются лениво при первом открытии (без воркеров,
     тот же принцип, что и во всём проекте)."""
+    # Владелец может собрать любой тариф без оплаты -- иначе проверить, что
+    # именно получает человек за 2990 ₽, можно только заплатив себе самому.
+    # Промпты правились вслепую, а качество отчёта -- это весь платный продукт.
+    owner = _is_owner(request)
+    want_preview = request.query_params.get("preview") or ""
+    if owner and want_preview in REPORT_PRICES:
+        _owner_preview(rid, want_preview)
+
     with Session(engine) as s:
         rec = s.get(DemandCheck, rid)
         if not rec or not rec.result_json:
             return HTMLResponse(_static("index.html"), status_code=404)
-        purchase = _best_report_purchase(s, rid)
+        purchase = _best_report_purchase(s, rid, include_preview=owner)
 
     demand_data = json.loads(rec.result_json)
     preview = _report_preview(demand_data)
@@ -598,7 +831,14 @@ async def report_page(rid: int):
     if purchase:
         if not purchase.report_json:
             try:
-                report = await generate_report(rec.idea, demand_data, purchase.tier)
+                # purpose определяет оптику отчёта: для соцконтракта это
+                # обоснование сметы для комиссии, а не венчурный разбор.
+                # chosen_offer -- заострение, выбранное человеком на /r/:
+                # разбирать надо ту формулировку, которую он выбрал, а не
+                # сырую первую фразу (A6 в PRODUCT_ROADMAP).
+                report = await generate_report(rec.idea, demand_data, purchase.tier,
+                                               chosen_offer=_chosen_offer(rec),
+                                               purpose=rec.purpose)
                 with Session(engine) as s:
                     fresh = s.get(ReportPurchase, purchase.id)
                     fresh.report_json = json.dumps(report, ensure_ascii=False)
@@ -606,12 +846,39 @@ async def report_page(rid: int):
                     purchase = fresh
             except ReportEngineError as e:
                 gen_error = str(e)
+                _record_report_failure(purchase.id, gen_error, request, rid)
         if purchase.report_json:
             report_full = json.loads(purchase.report_json)
+
+    # Если человек выбрал заострённую формулировку на /r/, он должен видеть,
+    # что разбор построен именно вокруг неё, а не вокруг сырой первой фразы.
+    chosen = _chosen_offer(rec)
+    chosen_h1 = re.sub(r"<[^>]+>", "", str(chosen.get("h1", ""))).strip() if chosen else ""
+    chosen_block = (f'<div class="chosen"><span class="chosen-tag">Разбираем формулировку</span>'
+                    f'<span class="chosen-h1">{html.escape(chosen_h1)}</span></div>') if chosen_h1 else ""
+
+    # Панель владельца: собрать любой тариф без оплаты. Видна только по ключу,
+    # чтобы не пришлось помнить синтаксис query-параметра.
+    owner_bar = ""
+    if owner:
+        key = html.escape(request.query_params.get("key") or "", quote=True)
+        links = " · ".join(
+            f'<a href="/report/{rid}?key={key}&preview={t}">{html.escape(cfg["label"])}</a>'
+            for t, cfg in REPORT_PRICES.items())
+        if not purchase:
+            state = "отчёт не куплен, человек видит только бесплатный тизер"
+        elif purchase.status == PREVIEW_STATUS:
+            state = "показан владельческий прогон, оплаты не было"
+        else:
+            state = "оплаченный отчёт покупателя"
+        owner_bar = (f'<div class="owner-bar">Владелец · {html.escape(state)}. '
+                     f'Собрать без оплаты: {links}</div>')
 
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rid))
+        .replace("__OWNER_BAR__", owner_bar)
+        .replace("__CHOSEN_BLOCK__", chosen_block)
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__PREVIEW_JSON__", json.dumps(preview, ensure_ascii=False))
         .replace("__REPORT_JSON__", json.dumps(report_full, ensure_ascii=False) if report_full else "null")
@@ -621,7 +888,7 @@ async def report_page(rid: int):
         .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
         .replace("__SECTIONS_JSON__", json.dumps([{"key": k, "title": t} for k, t in ALL_SECTIONS], ensure_ascii=False))
         .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
-    return HTMLResponse(html_out)
+    return HTMLResponse(_fill_server_values(html_out))
 
 
 @app.get("/api/orders")
@@ -629,12 +896,28 @@ def orders_list(request: Request):
     _check_owner(request)
     with Session(engine) as s:
         rows = s.exec(select(LiveTestOrder)).all()
+        # Покупки отчётов раньше не были видны владельцу НИГДЕ -- ни успешные,
+        # ни сорванные. Для платного продукта это значит, что оплата на 2990 ₽
+        # и несостоявшаяся доставка выглядели одинаково: никак.
+        # Владельческие прогоны без оплаты -- не заказы. В списке заказов они
+        # выглядели бы как «ожидает оплаты» и путали бы картину продаж.
+        reports = s.exec(select(ReportPurchase).where(
+            ReportPurchase.status != PREVIEW_STATUS)).all()
     return {"orders": [{"id": o.id, "created_at": str(o.created_at), "idea": o.idea,
                         "contact": o.contact, "status": _effective_status(o.status, o.created_at),
                         "amount": o.amount, "idea_id": o.idea_id,
                         "project_url": f"/p/{o.idea_id}" if o.idea_id else None,
                         "chosen_offer": json.loads(o.chosen_offer) if o.chosen_offer else None}
-                       for o in reversed(rows)]}
+                       for o in reversed(rows)],
+            "reports": [{"id": r.id, "created_at": str(r.created_at), "idea": r.idea,
+                         "contact": r.contact, "tier": r.tier,
+                         "tier_label": REPORT_PRICES.get(r.tier, {}).get("label", r.tier),
+                         "status": _effective_status(r.status, r.created_at),
+                         "amount": r.amount,
+                         "delivered": bool(r.report_json),
+                         "gen_error": r.gen_error,
+                         "report_url": f"/report/{r.check_id}" if r.check_id else None}
+                        for r in reversed(reports)]}
 
 
 @app.get("/api/stats")
@@ -808,20 +1091,37 @@ async def smoke_event(request: Request):
 
 
 def compute_verdict(views: int, leads: int, target: int, signal: float, dead: float) -> dict:
-    """Детерминированный вердикт этапа ① — те же честные слова, что везде."""
+    """Детерминированный вердикт теста на реальных людях.
+
+    Тексты называют пороги вслух. Голое «12% — сигнал есть» не объясняет
+    ничего: человек не знает ни откуда взялось число, ни с чем его сравнили
+    (B3 в PRODUCT_ROADMAP). Слова -- покупательские: этот вердикт видит и
+    самозанятая из соцконтракта, а не только фаундер.
+    """
     rate = (leads / views) if views else 0.0
+    n_leads = f"{leads} {_plural(leads, 'заявка', 'заявки', 'заявок')}"
+    n_views = f"{views} {_plural(views, 'визит', 'визита', 'визитов')}"
+    # «N визитов, из них M заявок», а не «M заявок с N визитов»: предлог «с»
+    # требует родительного падежа, и на числах вроде 52 фраза начинает хромать.
+    got = f"{n_views}, из них {n_leads} — это {_pct(rate)}"
     if views < target:
         return {"verdict": "РАНО СУДИТЬ",
-                "detail": f"{views}/{target} визитов, заявок {leads}. Копим клики, ничего не менять."}
+                "detail": f"Пока {n_views} из {target}, заявок {leads}. "
+                          f"Меньше {target} визитов — это ещё не статистика: случайность легко "
+                          "принять за результат. Ничего не меняйте, пусть наберётся."}
     if rate >= signal:
         return {"verdict": "СИГНАЛ ЕСТЬ",
-                "detail": f"{leads} заявок с {views} визитов ({rate:.0%}). Идея — в очередь на MVP."}
+                "detail": f"{got}, при пороге {_pct(signal)} и выше. Люди не просто смотрят — "
+                          "оставляют контакты. Идею стоит делать."}
     if rate <= dead:
         return {"verdict": "СПРОСА НЕТ",
-                "detail": f"{rate:.0%} заявок при {views} визитах. Кампанию остановить, идею в архив — "
-                          "сэкономлены месяцы разработки."}
+                "detail": f"{got}, при пороге {_pct(dead)} и ниже. Страницу видели, но не "
+                          "откликнулись. Рекламу можно останавливать — это сэкономленные деньги "
+                          "и месяцы работы над тем, что не купят."}
     return {"verdict": "СЕРАЯ ЗОНА",
-            "detail": f"{rate:.0%} заявок. Попробовать второй оффер (другой заголовок) на том же трафике."}
+            "detail": f"{got} — между {_pct(dead)} (интереса нет) и {_pct(signal)} (интерес есть). "
+                      "Однозначного ответа цифры не дают: попробуйте другой заголовок на "
+                      "той же странице."}
 
 
 def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
@@ -1281,6 +1581,35 @@ async def demand_save(rid: int, data: DemandSaveIn, request: Request):
     return {"ok": True, "message": "Сохранили. Письмо со ссылкой для входа в кабинет уже отправлено."}
 
 
+class ChosenOfferIn(BaseModel):
+    offer: dict
+
+
+@app.post("/api/demand/{rid}/chosen")
+def demand_chosen(rid: int, data: ChosenOfferIn, request: Request):
+    """Запомнить, какой из трёх заострённых вариантов человек выбрал на /r/.
+
+    Заказ отчёта идёт со страницы /report/{check_id}, где выбора уже нет на
+    экране, — без этой привязки человек выбирал позиционирование, а платный
+    разбор молча строился по исходной сырой формулировке идеи.
+    """
+    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+        or (request.client.host if request.client else "?")
+    if _rate_limited(client_ip):
+        raise HTTPException(429, "слишком часто")
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+        # Проверка, уже привязанная к кабинету, редактируется только своим
+        # владельцем: id перебираются, а выбор влияет на платный отчёт.
+        if rec.contact and rec.contact != _current_contact(request):
+            return JSONResponse({"ok": False, "error": "Эта проверка принадлежит другому кабинету."}, status_code=409)
+        rec.chosen_offer = json.dumps(data.offer, ensure_ascii=False)[:6000]
+        s.add(rec); s.commit()
+    return {"ok": True}
+
+
 @app.get("/api/account/me")
 def account_me(request: Request):
     contact = _current_contact(request)
@@ -1308,6 +1637,11 @@ def account_me(request: Request):
         checks = s.exec(select(DemandCheck).where(
             DemandCheck.contact == contact
         ).order_by(DemandCheck.created_at.desc())).all()
+        # С какой стороны человек пришёл -- по самой свежей его проверке (до
+        # отсева тех, что уже выросли в отчёт). Кабинет по ней решает, куда
+        # вести за следующей идеей: получателя соцконтракта незачем
+        # возвращать на витрину для фаундеров (принцип 4).
+        purpose = checks[0].purpose if checks else "business"
         checks = [c for c in checks if c.id not in promoted_ids]
         from collections import defaultdict
         idea_ids = [p.idea_id for p in projects]
@@ -1317,10 +1651,14 @@ def account_me(request: Request):
                                       .where(SmokeEvent.idea.in_(idea_ids))).all():
                 counts[(idea, event)] += 1
     return {
-        "ok": True, "contact": contact,
+        "ok": True, "contact": contact, "purpose": purpose,
         "projects": [_smoke_card(p, counts[(p.idea_id, "page_view")],
                                  counts[(p.idea_id, "lead_submitted")]) for p in projects],
+        # tier_label приходит с сервера, а не зашит в кабинете: тариф уже
+        # переименовывали ("Полный отчёт" -> "Бизнес-план"), и вторая копия
+        # названия в статике разъезжается с витриной незаметно.
         "reports": [{"check_id": r.check_id, "idea": r.idea, "tier": r.tier,
+                     "tier_label": REPORT_PRICES.get(r.tier, {}).get("label", r.tier),
                      "status": _effective_status(r.status, r.created_at),
                      "report_url": f"/report/{r.check_id}"} for r in reports],
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
@@ -1344,7 +1682,7 @@ def legal_page():
 def guide_direct():
     """Этап 3 из 7 — пошаговый запуск Директа, часть «Тест на реальных людях»
     (режим эксперта, только Поиск)."""
-    return HTMLResponse(_static("guide-direct.html"))
+    return HTMLResponse(_with_server_values("guide-direct.html"))
 
 
 @app.get("/social-contract", response_class=HTMLResponse)
@@ -1354,12 +1692,14 @@ def social_contract_page():
     CLAUDE.md), чтобы не отпугивать массового пользователя упоминанием
     грантов/соцконтракта. Ведёт в тот же бесплатный /api/demand -> /r/{id},
     что и главная страница."""
-    return HTMLResponse(_static("social-contract.html"))
+    return HTMLResponse(_with_server_values("social-contract.html"))
 
 
 @app.get("/oferta", response_class=HTMLResponse)
 def oferta_page():
-    return HTMLResponse(_static("oferta.html"))
+    # Оферта называет порог сбора данных числом -- это условие договора, оно
+    # обязано совпадать с тем, по которому реально считает движок.
+    return HTMLResponse(_with_server_values("oferta.html"))
 
 
 @app.get("/agreement", response_class=HTMLResponse)
@@ -1473,6 +1813,38 @@ def project_page(idea_id: str):
                            .replace("{{PRODUCT_NAME}}", proj.product_name))
 
 
+def _fill_server_values(html: str) -> str:
+    """Подставляет в статику всё, чему в коде есть единственный источник:
+    цены, названия тарифов, пороги вердикта, рекламный бюджет.
+
+    Зашитая в HTML копия такого значения — уже трижды пойманный источник
+    вранья: кабинет звал тариф «Полный отчёт», когда витрина звала его
+    «Бизнес-план»; главная обещала порог 2,5% при реальных 8%; про рекламный
+    бюджет цифра жила только в плейбуке. Заметить это можно было, лишь
+    сравнив две страницы с кодом глазами (B5 в PRODUCT_ROADMAP).
+    """
+    for slot, value in (
+        ("__CLICK_TARGET__", str(CLICK_TARGET)),
+        ("__SIGNAL_PCT__", _pct(SIGNAL_RATE)),
+        ("__DEAD_PCT__", _pct(DEAD_RATE)),
+        ("__AD_BUDGET__", AD_BUDGET_HINT),
+        ("__LIVE_TEST_PRICE__", str(LIVE_TEST_PRICE)),
+        ("__MIN_REPORT_PRICE__", str(min(t["price"] for t in REPORT_PRICES.values()))),
+        ("__QUICK_LABEL__", REPORT_PRICES["quick"]["label"]),
+        ("__QUICK_PRICE__", str(REPORT_PRICES["quick"]["price"])),
+        ("__QUICK_WAS__", str(REPORT_PRICES["quick"]["was"])),
+        ("__FULL_LABEL__", REPORT_PRICES["full"]["label"]),
+        ("__FULL_PRICE__", str(REPORT_PRICES["full"]["price"])),
+        ("__FULL_WAS__", str(REPORT_PRICES["full"]["was"])),
+    ):
+        html = html.replace(slot, value)
+    return html
+
+
+def _with_server_values(name: str) -> str:
+    return _fill_server_values(_static(name))
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return HTMLResponse(_static("index.html"))
+    return HTMLResponse(_with_server_values("index.html"))

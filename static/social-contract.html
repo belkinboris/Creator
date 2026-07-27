@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Бизнес-план для социального контракта — с обоснованными цифрами</title>
-<meta name="description" content="Опишите идею — бесплатно проверим реальный спрос и конкурентов по данным Яндекса, это ляжет в основу расчётов. Дальше — готовый текст бизнес-плана: рынок, финансовая оценка, риски. От 990 ₽.">
+<meta name="description" content="Опишите идею — бесплатно проверим реальный спрос и конкурентов по данным Яндекса, это ляжет в основу расчётов. Дальше — готовый текст бизнес-плана: рынок, финансовая оценка, риски. От __MIN_REPORT_PRICE__ ₽.">
 <meta property="og:title" content="Бизнес-план для социального контракта — с обоснованными цифрами">
-<meta property="og:description" content="Реальные цифры спроса и конкурентов вместо «рынок большой». Готовый текст бизнес-плана от 990 ₽.">
+<meta property="og:description" content="Реальные цифры спроса и конкурентов вместо «рынок большой». Готовый текст бизнес-плана от __MIN_REPORT_PRICE__ ₽.">
 <meta property="og:type" content="website">
 <meta property="og:locale" content="ru_RU">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2712%27 fill=%27%23FFDE59%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-family=%27Arial,sans-serif%27 font-size=%2736%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%231B1C20%27%3EС%3C/text%3E%3C/svg%3E">
@@ -60,6 +60,7 @@
   .point + .point{border-top:1px solid var(--line)}
   .point .mark{width:8px;height:8px;border-radius:50%;background:var(--marker);margin-top:8px}
   .point h3{font-size:16px;font-weight:600}
+  .point h3 .in-tier{font-weight:500;font-size:13px;color:var(--muted);margin-left:6px}
   .point p{color:var(--muted);font-size:15px;max-width:40em;margin-top:3px}
 
   .tiers{display:grid;grid-template-columns:1fr 1fr;gap:16px}
@@ -83,6 +84,7 @@
     .hero{padding-top:28px;padding-bottom:22px}
     .sub{font-size:16px}
     .checker{padding:15px}
+    .checker textarea{min-height:112px}   /* как на главной -- пример идеи в три строки */
     .checker-foot .btn{width:100%;text-align:center}
     .tiers{grid-template-columns:1fr}
   }
@@ -120,8 +122,8 @@
       <p>Частотность запросов в Яндексе и список конкурентов из выдачи — вместо общих фраз о размере рынка.</p>
     </div></div>
     <div class="point"><span class="mark"></span><div>
-      <h3>Обоснование сметы</h3>
-      <p>Оценка выручки и затрат под вашу конкретную идею, а не типовой шаблон под все виды деятельности сразу.</p>
+      <h3>Обоснование сметы <span class="in-tier">в тарифе «__FULL_LABEL__»</span></h3>
+      <p>Смета расходов построчно с суммами, план доходов на первый год, точка безубыточности и срок окупаемости — под вашу конкретную идею, а не типовой шаблон под все виды деятельности сразу.</p>
     </div></div>
     <div class="point"><span class="mark"></span><div>
       <h3>Разбор рисков</h3>
@@ -137,15 +139,18 @@
     <h2>Стоимость</h2>
     <p class="band-sub">Разовая оплата, без подписки. Тариф можно повысить позже, доплатив разницу.</p>
     <div class="tiers">
+      <!-- Цены и названия тарифов подставляются из REPORT_PRICES. Зашитая
+           копия здесь означала бы, что после смены прайса витрина продолжает
+           продавать по старой цене, а списывается новая (B5). -->
       <div class="tier">
-        <h3>Быстрый разбор</h3>
-        <div><span class="price">990 ₽</span><span class="was">1490 ₽</span></div>
-        <p>Резюме идеи, спрос и рынок, конкуренты, вердикт.</p>
+        <h3>__QUICK_LABEL__</h3>
+        <div><span class="price">__QUICK_PRICE__ ₽</span><span class="was">__QUICK_WAS__ ₽</span></div>
+        <p>Резюме идеи, спрос и рынок, конкуренты, вердикт. <b>Без сметы и расчётов</b> — если план нужен для комиссии, берите «__FULL_LABEL__».</p>
       </div>
       <div class="tier full">
-        <h3>Полный отчёт</h3>
-        <div><span class="price">2990 ₽</span><span class="was">3990 ₽</span></div>
-        <p>Всё из быстрого разбора + аудитория, финансовая оценка, риски, план запуска.</p>
+        <h3>__FULL_LABEL__</h3>
+        <div><span class="price">__FULL_PRICE__ ₽</span><span class="was">__FULL_WAS__ ₽</span></div>
+        <p>Всё из быстрого разбора + смета расходов с суммами, план доходов и окупаемость, аудитория, риски, план запуска.</p>
       </div>
     </div>
   </section>
@@ -194,7 +199,9 @@ btn.addEventListener('click', async () => {
     const r = await fetch('/api/demand', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({idea})
+      // purpose переключает оптику платного отчёта: смета для комиссии
+      // вместо венчурного разбора (см. PURPOSES в app/report_engine.py).
+      body: JSON.stringify({idea, purpose: 'social_contract'})
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || data.detail || 'Сервис сейчас перегружен. Попробуйте через минуту.');

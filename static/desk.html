@@ -8,7 +8,7 @@
 <style>
   /* Та же система, что на главной: бумага, чернила, жёлтый маркер. */
   :root{--bg:#FBF6EA;--box:#FFFDF6;--line:#E9E1CB;--ink:#1B1C20;--muted:#6F6A5C;
-    --marker:#FFDE59;--btn:#1B1C20;--ok:#2E7D4F;--warn:#A87B00;--pad:22px}
+    --marker:#FFDE59;--btn:#1B1C20;--ok:#2E7D4F;--warn:#A87B00;--bad:#B23A3A;--pad:22px}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--ink);
     font:400 16px/1.55 "IBM Plex Sans",system-ui,sans-serif;min-height:100vh;
@@ -73,6 +73,8 @@
   .order-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
   .order-status{font:600 12px "IBM Plex Mono",monospace;color:var(--muted)}
   .order-status.paid{color:var(--ok)}
+  .order-status.bad{color:var(--bad)}
+  .order-offer.bad{border-left-color:var(--bad);color:var(--ink)}
   .order-status.pending{color:var(--warn)}
   .order-date{font-size:12.5px;color:var(--muted)}
   .order-idea{font-size:15px;margin-top:4px}
@@ -116,6 +118,11 @@
       <h1>Заявки на <span class="hl">живой тест</span></h1>
     </div>
     <div id="orders"></div>
+
+    <div class="orders-head">
+      <h1>Отчёты и <span class="hl">бизнес-планы</span></h1>
+    </div>
+    <div id="reports"></div>
 
     <div id="form">
       <h3 id="formTitle">Проект</h3>
@@ -177,8 +184,11 @@ async function loadOrders(){
   const box = document.getElementById("orders");
   const r = await fetch("/api/orders", {headers:{"X-Owner-Key": KEY}});
   if(!r.ok){ return; }
-  const {orders} = await r.json();
-  if(!orders.length){ box.innerHTML = '<p class="empty">Пока нет заявок на живой тест.</p>'; return; }
+  const data = await r.json();
+  const orders = data.orders || [];
+  if(!orders.length){
+    box.innerHTML = '<p class="empty">Пока нет заявок на живой тест.</p>';
+  } else {
   box.innerHTML = '<div class="orders">' + orders.map(o => {
     const [cls, label] = ORDER_STATUS[o.status] || ["", o.status];
     const parsed = new Date(o.created_at.replace(" ", "T") + "Z");
@@ -198,6 +208,38 @@ async function loadOrders(){
           : o.chosen_offer && o.chosen_offer.h1
             ? `<div class="order-offer">Выбрано позиционирование: ${escapeHtml(o.chosen_offer.h1)}</div>`
             : ""}
+    </div>`;
+  }).join('') + '</div>';
+  }
+
+  // Покупки отчётов -- отдельным списком. Главное, что тут надо увидеть с
+  // одного взгляда: оплачено, но НЕ доставлено (генерация упала).
+  const rbox = document.getElementById("reports");
+  const reports = data.reports || [];
+  if(!reports.length){ rbox.innerHTML = '<p class="empty">Пока нет заказов отчётов.</p>'; return; }
+  rbox.innerHTML = '<div class="orders">' + reports.map(r => {
+    const [cls, label] = ORDER_STATUS[r.status] || ["", r.status];
+    const parsed = new Date(r.created_at.replace(" ", "T") + "Z");
+    const date = isNaN(parsed) ? r.created_at
+      : parsed.toLocaleString("ru", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"});
+    const paid = r.status === "paid";
+    let state = "";
+    if (paid && r.gen_error) {
+      state = `<div class="order-offer bad">Оплачено, но отчёт не собрался: ${escapeHtml(r.gen_error)}<br>
+        Откроется заново — пересоберётся. Если нет, деньги придётся вернуть.</div>`;
+    } else if (paid && r.delivered) {
+      state = `<div class="order-offer">Отчёт собран и доступен покупателю${r.report_url ? ` <a href="${r.report_url}">→ открыть</a>` : ""}</div>`;
+    } else if (paid) {
+      state = `<div class="order-offer">Оплачено, отчёт соберётся при первом открытии страницы</div>`;
+    }
+    return `<div class="order-row">
+      <div class="order-top">
+        <span class="order-status ${paid && r.gen_error ? "bad" : cls}">${escapeHtml(paid && r.gen_error ? "сбой доставки" : label)}</span>
+        <span class="order-date">${date} · ${escapeHtml(r.tier_label)} · ${r.amount} ₽</span>
+      </div>
+      <div class="order-idea">${escapeHtml(r.idea || "—")}</div>
+      <div class="order-contact">${escapeHtml(r.contact || "—")}</div>
+      ${state}
     </div>`;
   }).join('') + '</div>';
 }
