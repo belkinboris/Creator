@@ -3621,6 +3621,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__RESULT_JSON__", "__SAVED__", "__PURPOSE_JSON__", "__CHOSEN_BLOCK__",
             "__PREVIEW_JSON__", "__REPORT_JSON__", "__UNLOCKED_TIER__", "__ORDER_STATUS__",
             "__GEN_ERROR__", "__PRICES_JSON__", "__SECTIONS_JSON__", "__QUICK_KEYS_JSON__",
+            "__OWNER_BAR__",
             "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
         }
@@ -3648,3 +3649,123 @@ class TestNoHardcodedServerValuesInStatic:
                     f"/r/{rid}", f"/report/{rid}", "/account"):
             text = client.get(url).text
             assert not re.search(r"__[A-Z][A-Z0-9_]*__", text), f"незаполненный слот на {url}"
+
+
+class TestOwnerReportPreview:
+    """Владелец должен уметь посмотреть, что человек получает за 2990 ₽, не
+    оплачивая заказ себе самому. Промпты правились вслепую (E1), а качество
+    платного отчёта — это весь платный продукт."""
+
+    def _check(self, purpose="business"):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand", json={"idea": "Пошив штор на заказ",
+                                                    "purpose": purpose}).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def _stub_generate(self, monkeypatch, seen=None):
+        import app.main as m
+        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            if seen is not None:
+                seen.update({"tier": tier, "purpose": purpose, "idea": idea})
+            return {"sections": [{"key": "summary", "title": "Резюме проекта",
+                                  "body": "Разбор идеи по данным проверки."}]}
+        monkeypatch.setattr(m, "generate_report", fake_generate)
+
+    def test_owner_gets_the_full_plan_without_paying(self, monkeypatch):
+        seen = {}
+        self._stub_generate(monkeypatch, seen)
+        rid = self._check()
+        r = client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        assert r.status_code == 200
+        assert seen["tier"] == "full"           # собрался именно платный тариф
+        assert "Разбор идеи по данным проверки." in r.text
+
+    def test_preview_uses_the_same_optics_as_a_real_purchase(self, monkeypatch):
+        """Иначе владелец проверит не тот продукт, который продаёт."""
+        seen = {}
+        self._stub_generate(monkeypatch, seen)
+        rid = self._check("social_contract")
+        client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        assert seen["purpose"] == "social_contract"
+
+    def test_preview_does_not_unlock_the_report_for_anyone_else(self, monkeypatch):
+        """Главный риск: владелец прогнал чужую проверку — и её автор получил
+        бизнес-план за 2990 ₽ даром."""
+        self._stub_generate(monkeypatch)
+        rid = self._check()
+        client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        text = client.get(f"/report/{rid}").text          # посторонний, без ключа
+        assert "Разбор идеи по данным проверки." not in text
+        assert client.get(f"/api/report/{rid}/status").json()["paid"] is False
+
+    def test_preview_requires_the_owner_key(self, monkeypatch):
+        from app.main import ReportPurchase, Session, engine, select
+        self._stub_generate(monkeypatch)
+        rid = self._check()
+        client.get(f"/report/{rid}?preview=full")          # без ключа
+        with Session(engine) as s:
+            rows = s.exec(select(ReportPurchase).where(ReportPurchase.check_id == rid)).all()
+        assert rows == []
+
+    def test_preview_is_not_counted_as_an_order(self, monkeypatch):
+        """Нулевая покупка не должна выглядеть как продажа или как
+        неоплаченная заявка в /desk."""
+        self._stub_generate(monkeypatch)
+        rid = self._check()
+        client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        reports = client.get("/api/orders", headers=OWNER).json()["reports"]
+        assert all(r["check_id"] != rid for r in reports if "check_id" in r)
+        assert all(rp["report_url"] != f"/report/{rid}" for rp in reports)
+
+    def test_preview_is_not_regenerated_on_every_open(self, monkeypatch):
+        """Каждый прогон стоит вызова модели — второй заход должен брать
+        уже собранное."""
+        import app.main as m
+        calls = []
+        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            calls.append(tier)
+            return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "т"}]}
+        monkeypatch.setattr(m, "generate_report", fake_generate)
+        rid = self._check()
+        client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        assert len(calls) == 1
+
+    def test_unknown_tier_is_ignored(self, monkeypatch):
+        from app.main import ReportPurchase, Session, engine, select
+        self._stub_generate(monkeypatch)
+        rid = self._check()
+        client.get(f"/report/{rid}?preview=../../etc/passwd", headers=OWNER)
+        with Session(engine) as s:
+            rows = s.exec(select(ReportPurchase).where(ReportPurchase.check_id == rid)).all()
+        assert rows == []
+
+    def test_owner_bar_is_invisible_to_everyone_else(self):
+        rid = self._check()
+        # проверяем отрисованный блок, а не описание класса в CSS
+        assert 'class="owner-bar"' not in client.get(f"/report/{rid}").text
+        assert 'class="owner-bar"' in client.get(f"/report/{rid}?key=test-owner-key").text
+
+    def test_failed_preview_does_not_email_the_owner(self, monkeypatch):
+        """Письмо про сорванную доставку — про оплаченный заказ. Свой же
+        прогон владельцу писать не надо."""
+        import app.main as m
+        sent = []
+        async def boom(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            raise m.ReportEngineError("модель недоступна")
+        monkeypatch.setattr(m, "generate_report", boom)
+        monkeypatch.setattr(m.mailer, "notify_owner", lambda *a, **k: sent.append(a) or True)
+        rid = self._check()
+        assert client.get(f"/report/{rid}?preview=full", headers=OWNER).status_code == 200
+        assert sent == []

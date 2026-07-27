@@ -29,6 +29,10 @@
   .chosen{border-left:2px solid var(--line);padding-left:11px;margin-top:12px;max-width:46em}
   .chosen-tag{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:2px}
   .chosen-h1{font-size:15px;color:var(--ink)}
+  /* Панель владельца — служебная, у покупателя её нет вовсе. */
+  .owner-bar{border:1px solid var(--line);background:var(--box);border-radius:8px;
+    padding:12px 14px;margin-top:16px;font-size:13px;color:var(--muted)}
+  .owner-bar a{color:var(--ink)}
 
   /* Бесплатный тизер — виден всегда, разбор на данных бесплатной проверки
      спроса (частотность, конкуренты, LLM-заметки по шкалам), а не витрина
@@ -139,6 +143,7 @@
     <p class="idea" id="idea">__IDEA__</p>
     __CHOSEN_BLOCK__
   </div>
+  __OWNER_BAR__
 
   <div class="preview" id="preview"></div>
   <div id="score-section"></div>

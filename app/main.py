@@ -320,6 +320,14 @@ def _check_owner(request: Request) -> None:
         raise HTTPException(401, "Нужен ключ владельца (X-Owner-Key).")
 
 
+def _is_owner(request: Request) -> bool:
+    """Тот же ключ, что и в _check_owner, но без исключения -- нужен там, где
+    владельцу показывается что-то сверх обычной страницы, а посторонний
+    должен просто увидеть обычную."""
+    provided = request.headers.get("X-Owner-Key") or request.query_params.get("key") or ""
+    return bool(OWNER_KEY and provided == OWNER_KEY)
+
+
 def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
     """Доступ к цифрам проекта на /p/{id}: владелец по ключу (как везде на
     /desk), либо покупатель по своей сессии кабинета -- /p/ теперь открыт
@@ -600,11 +608,20 @@ def _report_preview(demand_data: dict) -> dict:
     }
 
 
-def _best_report_purchase(s: Session, check_id: int):
+PREVIEW_STATUS = "preview"   # владельческий прогон без оплаты, см. _owner_preview
+
+
+def _best_report_purchase(s: Session, check_id: int, *, include_preview: bool = False):
     """Самая полная ОПЛАЧЕННАЯ покупка отчёта для этой проверки спроса --
-    full перекрывает quick, если куплены оба."""
+    full перекрывает quick, если куплены оба.
+
+    include_preview включается ТОЛЬКО для владельца: превью открывает платный
+    отчёт бесплатно, и если пустить его сюда для всех, человек, чья проверка
+    попала во владельческий прогон, получит бизнес-план за 2990 ₽ даром.
+    """
+    allowed = ["paid", PREVIEW_STATUS] if include_preview else ["paid"]
     rows = s.exec(select(ReportPurchase).where(
-        ReportPurchase.check_id == check_id, ReportPurchase.status == "paid"
+        ReportPurchase.check_id == check_id, ReportPurchase.status.in_(allowed)
     ).order_by(ReportPurchase.created_at.desc())).all()
     if not rows:
         return None
@@ -757,6 +774,24 @@ def _record_report_failure(purchase_id: int, error: str, request: Request, check
         logging.getLogger(__name__).warning("report failure notice failed", exc_info=True)
 
 
+def _owner_preview(check_id: int, tier: str) -> None:
+    """Заводит владельческий прогон отчёта: та же генерация, тот же промпт,
+    те же данные -- просто без оплаты и с нулевой суммой, чтобы не попасть в
+    выручку. Повторный вызов ничего не дублирует."""
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, check_id)
+        if not rec:
+            return
+        exists = s.exec(select(ReportPurchase).where(
+            ReportPurchase.check_id == check_id, ReportPurchase.tier == tier,
+            ReportPurchase.status == PREVIEW_STATUS)).first()
+        if exists:
+            return
+        s.add(ReportPurchase(check_id=check_id, idea=rec.idea, tier=tier,
+                             contact="", status=PREVIEW_STATUS, amount=0))
+        s.commit()
+
+
 def _chosen_offer(rec: "DemandCheck") -> dict | None:
     """Заострение, выбранное на /r/. Битый JSON не имеет права уронить
     платный отчёт -- лучше собрать разбор по исходной идее, чем не собрать."""
@@ -774,11 +809,19 @@ async def report_page(rid: int, request: Request):
     """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
     после оплаты, генерируются лениво при первом открытии (без воркеров,
     тот же принцип, что и во всём проекте)."""
+    # Владелец может собрать любой тариф без оплаты -- иначе проверить, что
+    # именно получает человек за 2990 ₽, можно только заплатив себе самому.
+    # Промпты правились вслепую, а качество отчёта -- это весь платный продукт.
+    owner = _is_owner(request)
+    want_preview = request.query_params.get("preview") or ""
+    if owner and want_preview in REPORT_PRICES:
+        _owner_preview(rid, want_preview)
+
     with Session(engine) as s:
         rec = s.get(DemandCheck, rid)
         if not rec or not rec.result_json:
             return HTMLResponse(_static("index.html"), status_code=404)
-        purchase = _best_report_purchase(s, rid)
+        purchase = _best_report_purchase(s, rid, include_preview=owner)
 
     demand_data = json.loads(rec.result_json)
     preview = _report_preview(demand_data)
@@ -814,9 +857,27 @@ async def report_page(rid: int, request: Request):
     chosen_block = (f'<div class="chosen"><span class="chosen-tag">Разбираем формулировку</span>'
                     f'<span class="chosen-h1">{html.escape(chosen_h1)}</span></div>') if chosen_h1 else ""
 
+    # Панель владельца: собрать любой тариф без оплаты. Видна только по ключу,
+    # чтобы не пришлось помнить синтаксис query-параметра.
+    owner_bar = ""
+    if owner:
+        key = html.escape(request.query_params.get("key") or "", quote=True)
+        links = " · ".join(
+            f'<a href="/report/{rid}?key={key}&preview={t}">{html.escape(cfg["label"])}</a>'
+            for t, cfg in REPORT_PRICES.items())
+        if not purchase:
+            state = "отчёт не куплен, человек видит только бесплатный тизер"
+        elif purchase.status == PREVIEW_STATUS:
+            state = "показан владельческий прогон, оплаты не было"
+        else:
+            state = "оплаченный отчёт покупателя"
+        owner_bar = (f'<div class="owner-bar">Владелец · {html.escape(state)}. '
+                     f'Собрать без оплаты: {links}</div>')
+
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rid))
+        .replace("__OWNER_BAR__", owner_bar)
         .replace("__CHOSEN_BLOCK__", chosen_block)
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__PREVIEW_JSON__", json.dumps(preview, ensure_ascii=False))
@@ -838,7 +899,10 @@ def orders_list(request: Request):
         # Покупки отчётов раньше не были видны владельцу НИГДЕ -- ни успешные,
         # ни сорванные. Для платного продукта это значит, что оплата на 2990 ₽
         # и несостоявшаяся доставка выглядели одинаково: никак.
-        reports = s.exec(select(ReportPurchase)).all()
+        # Владельческие прогоны без оплаты -- не заказы. В списке заказов они
+        # выглядели бы как «ожидает оплаты» и путали бы картину продаж.
+        reports = s.exec(select(ReportPurchase).where(
+            ReportPurchase.status != PREVIEW_STATUS)).all()
     return {"orders": [{"id": o.id, "created_at": str(o.created_at), "idea": o.idea,
                         "contact": o.contact, "status": _effective_status(o.status, o.created_at),
                         "amount": o.amount, "idea_id": o.idea_id,
