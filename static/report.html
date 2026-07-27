@@ -33,6 +33,12 @@
   .owner-bar{border:1px solid var(--line);background:var(--box);border-radius:8px;
     padding:12px 14px;margin-top:16px;font-size:13px;color:var(--muted)}
   .owner-bar a{color:var(--ink)}
+  .owner-bar button{appearance:none;background:transparent;border:1px solid var(--line);
+    border-radius:6px;padding:5px 10px;margin-left:8px;font:500 12px "IBM Plex Sans";
+    color:var(--ink);cursor:pointer}
+  /* Пример: тот же отчёт, но с пояснением, что человек смотрит чужой разбор. */
+  .example-note{border-left:3px solid var(--marker);padding:6px 0 6px 12px;margin-top:16px;
+    font-size:14px;color:var(--muted);max-width:44em}
 
   /* Бесплатный тизер — виден всегда, разбор на данных бесплатной проверки
      спроса (частотность, конкуренты, LLM-заметки по шкалам), а не витрина
@@ -171,6 +177,16 @@
 </footer>
 
 <script>
+// Публикация примера — служебное действие владельца. Кнопка приходит в
+// разметке только по ключу, ключ берётся из адресной строки этой же страницы.
+async function publishExample(checkId, tier){
+  const key = new URLSearchParams(location.search).get('key') || '';
+  const r = await fetch(`/api/example/publish?check_id=${checkId}&tier=${encodeURIComponent(tier)}`,
+                        {method: 'POST', headers: {'X-Owner-Key': key}});
+  const d = await r.json().catch(() => ({}));
+  alert(d.ok ? 'Опубликовано: /example' : (d.error || 'Не получилось опубликовать.'));
+}
+
 const CHECK_ID = __CHECK_ID__;
 const PREVIEW = __PREVIEW_JSON__;
 const REPORT = __REPORT_JSON__;

@@ -226,6 +226,10 @@ class ReportPurchase(SQLModel, table=True):
     gen_error: str = ""
     fail_notified: bool = False   # владельцу сообщили о сорванной доставке
     paid_notified: bool = False   # владельцу сообщили о самой оплате/заявке
+    # Публичный пример на /example. Настоящий сгенерированный отчёт, а не
+    # написанный руками: показывать более гладкий текст, чем отдаёт движок,
+    # значит продавать не то, что отдаём (принцип 3). Помечает владелец.
+    is_example: bool = False
 
 
 class MagicLinkToken(SQLModel, table=True):
@@ -275,6 +279,7 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS is_example BOOLEAN DEFAULT FALSE"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -774,6 +779,25 @@ def _record_report_failure(purchase_id: int, error: str, request: Request, check
         logging.getLogger(__name__).warning("report failure notice failed", exc_info=True)
 
 
+def _example_purchase(s: Session):
+    """Отчёт, помеченный как публичный пример, если он собран."""
+    return s.exec(select(ReportPurchase).where(
+        ReportPurchase.is_example == True)).first()          # noqa: E712
+
+
+def _example_link(text: str) -> str:
+    """Ссылка на пример — только когда пример реально существует.
+
+    Обещать «посмотрите пример» и привести на пустую страницу хуже, чем не
+    обещать вовсе (принципы 3 и 7). Поэтому витрины спрашивают об этом у
+    сервера, а не носят ссылку зашитой.
+    """
+    with Session(engine) as s:
+        if not _example_purchase(s):
+            return ""
+    return f'<a href="/example">{html.escape(text)}</a>'
+
+
 def _owner_preview(check_id: int, tier: str) -> None:
     """Заводит владельческий прогон отчёта: та же генерация, тот же промпт,
     те же данные -- просто без оплаты и с нулевой суммой, чтобы не попасть в
@@ -802,6 +826,70 @@ def _chosen_offer(rec: "DemandCheck") -> dict | None:
     except ValueError:
         return None
     return offer if isinstance(offer, dict) else None
+
+
+@app.post("/api/example/publish")
+def example_publish(request: Request, check_id: int, tier: str = "full"):
+    """Пометить уже собранный отчёт публичным примером (/example).
+
+    Пример обязан быть НАСТОЯЩИМ выводом движка: написанный руками текст
+    всегда получается глаже, и человек заплатит за одно, а получит другое.
+    Поэтому публикуется только уже сгенерированный отчёт -- собрать его
+    можно тем же владельческим прогоном, /report/{id}?key=...&preview=full.
+    """
+    _check_owner(request)
+    with Session(engine) as s:
+        target = s.exec(select(ReportPurchase).where(
+            ReportPurchase.check_id == check_id, ReportPurchase.tier == tier
+        ).order_by(ReportPurchase.created_at.desc())).first()
+        if not target:
+            return JSONResponse({"ok": False, "error": "Отчёт по этой проверке ещё не собран."},
+                                status_code=404)
+        if not target.report_json:
+            return JSONResponse({"ok": False, "error": "Отчёт пуст — сначала соберите его."},
+                                status_code=409)
+        # Пример ровно один: две «витрины правды» разъезжаются так же, как
+        # разъезжались копии цен (B5).
+        for row in s.exec(select(ReportPurchase).where(ReportPurchase.is_example == True)).all():  # noqa: E712
+            row.is_example = False
+            s.add(row)
+        target.is_example = True
+        s.add(target); s.commit()
+    return {"ok": True, "url": "/example"}
+
+
+@app.get("/example", response_class=HTMLResponse)
+def example_page(request: Request):
+    """Настоящий отчёт, собранный сервисом, — открыт целиком и бесплатно.
+    Владелец называл отсутствие примера блокером доверия: человек платит
+    990–2990 ₽, не видя ни строчки того, что получит."""
+    with Session(engine) as s:
+        ex = _example_purchase(s)
+        if not ex:
+            return HTMLResponse(_with_server_values("index.html"), status_code=404)
+        rec = s.get(DemandCheck, ex.check_id)
+        report_full = json.loads(ex.report_json)
+        tier, idea = ex.tier, ex.idea
+    demand_data = json.loads(rec.result_json) if rec and rec.result_json else {}
+
+    note = (f'<div class="example-note">Это настоящий отчёт, собранный сервисом — '
+            f'тариф «{html.escape(REPORT_PRICES.get(tier, {}).get("label", tier))}», '
+            f'открыт целиком. Ваш будет по вашей идее и вашим цифрам спроса.</div>')
+    tpl = _static("report.html")
+    html_out = (tpl
+        .replace("__CHECK_ID__", str(ex.check_id or 0))
+        .replace("__OWNER_BAR__", note)
+        .replace("__CHOSEN_BLOCK__", "")
+        .replace("__IDEA__", html.escape(idea))
+        .replace("__PREVIEW_JSON__", json.dumps(_report_preview(demand_data), ensure_ascii=False))
+        .replace("__REPORT_JSON__", json.dumps(report_full, ensure_ascii=False))
+        .replace("__UNLOCKED_TIER__", json.dumps(tier))
+        .replace("__ORDER_STATUS__", json.dumps("paid"))
+        .replace("__GEN_ERROR__", json.dumps(""))
+        .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
+        .replace("__SECTIONS_JSON__", json.dumps([{"key": k, "title": t} for k, t in ALL_SECTIONS], ensure_ascii=False))
+        .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
+    return HTMLResponse(_fill_server_values(html_out))
 
 
 @app.get("/report/{rid}", response_class=HTMLResponse)
@@ -871,8 +959,15 @@ async def report_page(rid: int, request: Request):
             state = "показан владельческий прогон, оплаты не было"
         else:
             state = "оплаченный отчёт покупателя"
+        pub = ""
+        if purchase and purchase.report_json:
+            with Session(engine) as s:
+                already = _example_purchase(s)
+            pub = ('<span> · это и есть публичный пример</span>' if already and already.id == purchase.id
+                   else f'<button type="button" onclick="publishExample({rid},\'{purchase.tier}\')">'
+                        'Опубликовать как пример</button>')
         owner_bar = (f'<div class="owner-bar">Владелец · {html.escape(state)}. '
-                     f'Собрать без оплаты: {links}</div>')
+                     f'Собрать без оплаты: {links}{pub}</div>')
 
     tpl = _static("report.html")
     html_out = (tpl
@@ -1838,6 +1933,10 @@ def _fill_server_values(html: str) -> str:
         ("__FULL_WAS__", str(REPORT_PRICES["full"]["was"])),
     ):
         html = html.replace(slot, value)
+    # Ссылка на пример стоит денег (запрос в БД) и появляется, только когда
+    # пример опубликован -- считаем её лишь если слот на странице есть.
+    if "__EXAMPLE_LINK__" in html:
+        html = html.replace("__EXAMPLE_LINK__", _example_link("Посмотреть пример отчёта"))
     return html
 
 
