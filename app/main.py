@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -349,7 +350,7 @@ async def _lifespan(_app: FastAPI):
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
     for name in ("index.html", "project.html", "guide-direct.html", "result.html", "report.html",
-                 "social-contract.html", "account.html"):
+                 "social-contract.html", "account.html", "verify.html"):
         try:
             _static(name)
         except Exception:
@@ -2161,21 +2162,86 @@ async def account_request_link(data: AccountLinkIn, request: Request):
     return {"ok": True, "message": "Если эта почта известна нам, письмо со ссылкой уже отправлено."}
 
 
+def _verify_page(heading: str, lead: str, action: str, *,
+                 who: str = "", fine: str = "", status: int = 200) -> HTMLResponse:
+    """Страница вокруг ссылки входа -- в дизайн-системе, а не голым `<p>`.
+
+    Раньше отказ отдавался фрагментом без doctype и стилей: человек, у
+    которого перестала работать ссылка на оплаченный отчёт, видел чёрный
+    Times New Roman на белом и решал, что сайт сломан.
+    """
+    html_out = (_static("verify.html")
+                .replace("__HEADING__", heading)
+                .replace("__LEAD__", lead)
+                .replace("__WHO__", who)
+                .replace("__ACTION__", action)
+                .replace("__FINE__", fine))
+    return HTMLResponse(_fill_server_values(html_out), status_code=status)
+
+
+def _expired_link_page() -> HTMLResponse:
+    return _verify_page(
+        "Ссылка недействительна или устарела",
+        f"Ссылки для входа живут {MAGIC_LINK_TTL_MINUTES} минут и открываются один раз. "
+        "Запросите новую — она придёт на ту же почту.",
+        '<a class="btn" href="/account">Запросить новую ссылку</a>',
+        fine="Если письмо не приходит, проверьте папку «Спам».",
+        status=400)
+
+
+def _find_live_link(s: Session, token: str) -> Optional["MagicLinkToken"]:
+    link = s.exec(select(MagicLinkToken).where(MagicLinkToken.token == token)).first()
+    if (not link or link.used
+            or link.created_at < utcnow() - timedelta(minutes=MAGIC_LINK_TTL_MINUTES)):
+        return None
+    return link
+
+
 @app.get("/account/verify")
+def account_verify_page(token: str):
+    """Показывает страницу с кнопкой -- и НЕ гасит ссылку.
+
+    Почтовые провайдеры и антивирусы (mail.ru, Яндекс, Kaspersky) открывают
+    ссылки из писем сами, до человека, чтобы проверить их на вредоносность.
+    Пока вход происходил прямо здесь, такой обход съедал одноразовый токен:
+    человек кликал и получал «ссылка недействительна», просил новую -- и
+    сканер съедал её тоже. Замкнутый круг, в котором покупатель не может
+    открыть то, за что заплатил. Хуже того, ответ нёс `Set-Cookie` на
+    180 дней, то есть кабинет открывался машине, проверявшей ссылку.
+
+    Вход перенесён на POST: сканеры ходят GET и HEAD, форму не отправляют.
+    Лишний клик здесь не потеря -- он ещё и называет почту, в чей кабинет
+    человек входит.
+    """
+    with Session(engine) as s:
+        link = _find_live_link(s, token)
+        if not link:
+            return _expired_link_page()
+        contact = link.contact
+    return _verify_page(
+        "Вход в личный кабинет",
+        "Остался один шаг — подтвердите, что это вы открыли письмо.",
+        # Токен уходит в query действия, а не полем формы: разбор тела
+        # потребовал бы python-multipart, лишней зависимости в проде.
+        f'<form method="post" action="/account/verify?token='
+        f'{urllib.parse.quote(token)}">'
+        f'<button class="btn" type="submit">Войти в кабинет</button></form>',
+        who=f'<div class="who"><span>Кабинет</span><b>{html.escape(contact)}</b></div>',
+        fine=f"Ссылка действует {MAGIC_LINK_TTL_MINUTES} минут с момента отправки письма.")
+
+
+@app.post("/account/verify")
 def account_verify(token: str):
     with Session(engine) as s:
-        link = s.exec(select(MagicLinkToken).where(MagicLinkToken.token == token)).first()
-        if (not link or link.used
-                or link.created_at < utcnow() - timedelta(minutes=MAGIC_LINK_TTL_MINUTES)):
-            return HTMLResponse(
-                "<p>Ссылка недействительна или устарела. "
-                '<a href="/account">Запросите новую</a>.</p>', status_code=400)
+        link = _find_live_link(s, token)
+        if not link:
+            return _expired_link_page()
         link.used = True
         s.add(link)
         session_token = secrets.token_urlsafe(32)
         s.add(AccountSession(token=session_token, contact=link.contact))
         s.commit()
-    resp = RedirectResponse(url="/account")
+    resp = RedirectResponse(url="/account", status_code=303)
     resp.set_cookie(SESSION_COOKIE, session_token, max_age=180 * 24 * 3600,
                      httponly=True, samesite="lax")
     return resp

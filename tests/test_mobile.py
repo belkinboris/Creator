@@ -107,6 +107,7 @@ with Session(engine) as s:
     # нужен свой -- иначе второй молча увидит страницу гостя.
     s.add(MagicLinkToken(token="sweep_token", contact="sweep@example.com"))
     s.add(MagicLinkToken(token="sweep_token2", contact="sweep@example.com"))
+    s.add(MagicLinkToken(token="sweep_token3", contact="sweep@example.com"))
     # Ещё две проверки того же человека — чтобы в кабинете было что сравнивать
     # между собой (E4): порядок строк и есть ответ «какая идея сильнее».
     for name, sc, cnt in (("Слабая идея для сравнения", 2, 40),
@@ -307,6 +308,15 @@ def _open(browser, url, *, width=NARROW, cookies=None):
     return ctx, page
 
 
+def _login(page, base, token):
+    """Вход в кабинет — так, как его проходит человек: страница подтверждения
+    и кнопка. GET по ссылке из письма намеренно НЕ пускает внутрь (A15:
+    иначе почтовый сканер съедал бы ссылку раньше человека)."""
+    _goto(page, f"{base}/account/verify?token={token}")
+    page.click("form[action^='/account/verify'] button")
+    page.wait_for_timeout(700)
+
+
 def _audit(page, width=NARROW):
     return {
         "page_scrolls_sideways": page.evaluate(
@@ -350,6 +360,9 @@ def test_public_pages_fit_narrow_screen(site, browser):
         ("отчёт", f"/report/{ids['business']}"),
         ("публичный пример отчёта", "/example"),
         ("кабинет до входа", "/account"),
+        # Обе стороны страницы входа: подтверждение и отказ по мёртвой ссылке.
+        ("подтверждение входа", "/account/verify?token=sweep_token3"),
+        ("отказ по мёртвой ссылке", "/account/verify?token=protuhla"),
         ("оферта", "/oferta"),
         ("соглашение", "/agreement"),
         ("конфиденциальность", "/privacy"),
@@ -411,7 +424,7 @@ def test_cabinet_fits_narrow_screen_when_logged_in(site, browser):
     ctx = _context(browser)
     page = ctx.new_page()
     try:
-        _goto(page, f"{site['base']}/account/verify?token=sweep_token")
+        _login(page, site["base"], "sweep_token")
         _goto(page, f"{site['base']}/account")
         assert page.locator("#known").is_visible(), "вход в кабинет не сработал"
         _assert_clean(page, "кабинет покупателя")
@@ -504,8 +517,9 @@ def test_owner_sees_mail_state_in_the_desk(site, browser):
 def test_cabinet_ranks_ideas_so_they_can_be_compared(site, browser):
     """E4. Сортировку делает сервер, а цифры рисует скрипт — проверяем то,
     что человек реально видит, а не подстроки в шаблоне."""
-    ctx, page = _open(browser, f"{site['base']}/account/verify?token=sweep_token2")
+    ctx, page = _open(browser, f"{site['base']}/")
     try:
+        _login(page, site["base"], "sweep_token2")
         _goto(page, f"{site['base']}/account")
         page.wait_for_selector(".item", timeout=10000)
         names = page.eval_on_selector_all(

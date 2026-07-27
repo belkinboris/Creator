@@ -2626,8 +2626,8 @@ class TestAccountCabinet:
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_" + contact, contact=contact))
             s.commit()
-        r = client.get(f"/account/verify?token=tok_{contact}", follow_redirects=False)
-        assert r.status_code in (302, 307)
+        r = client.post(f"/account/verify?token=tok_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
         return r.cookies.get("sozdatel_session")
 
     def test_verify_rejects_unknown_token(self):
@@ -2638,7 +2638,7 @@ class TestAccountCabinet:
         session_token = self._issue_session(monkeypatch, "reuse@example.com")
         assert session_token
         # тот же токен второй раз -- уже использован
-        r = client.get("/account/verify?token=tok_reuse@example.com", follow_redirects=False)
+        r = client.post("/account/verify?token=tok_reuse@example.com", follow_redirects=False)
         assert r.status_code == 400
         client.cookies.clear()
 
@@ -2829,8 +2829,8 @@ class TestSaveCheckToAccount:
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_save_" + contact, contact=contact))
             s.commit()
-        r = client.get(f"/account/verify?token=tok_save_{contact}", follow_redirects=False)
-        assert r.status_code in (302, 307)
+        r = client.post(f"/account/verify?token=tok_save_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
         return r.cookies.get("sozdatel_session")
 
     def test_result_page_exposes_saved_flag(self):
@@ -2978,8 +2978,8 @@ class TestProjectPageCustomerAccess:
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_proj_" + contact, contact=contact))
             s.commit()
-        r = client.get(f"/account/verify?token=tok_proj_{contact}", follow_redirects=False)
-        assert r.status_code in (302, 307)
+        r = client.post(f"/account/verify?token=tok_proj_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
         return r.cookies.get("sozdatel_session")
 
     def test_owner_key_still_works(self):
@@ -3372,8 +3372,8 @@ class TestAccountFirstEntry:
         from app.main import MagicLinkToken, Session, engine
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_fe_" + contact, contact=contact)); s.commit()
-        r = client.get(f"/account/verify?token=tok_fe_{contact}", follow_redirects=False)
-        assert r.status_code in (302, 307)
+        r = client.post(f"/account/verify?token=tok_fe_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
 
     def _check(self, contact, purpose="business"):
         from app.main import DemandCheck, Session, engine
@@ -3776,6 +3776,8 @@ class TestNoHardcodedServerValuesInStatic:
             "__PUBLIC_ID__",
             "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
+            # страница подтверждения входа -- заполняет _verify_page
+            "__HEADING__", "__LEAD__", "__WHO__", "__ACTION__", "__FINE__",
         }
         filled = set(re.findall(r'\("(__[A-Z0-9_]+__)"',
                                 inspect.getsource(m._fill_server_values)))
@@ -4777,8 +4779,8 @@ class TestPaidReportIsNotPublic:
         from app.main import MagicLinkToken, Session, engine
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_acc_" + contact, contact=contact)); s.commit()
-        assert client.get(f"/account/verify?token=tok_acc_{contact}",
-                          follow_redirects=False).status_code in (302, 307)
+        assert client.post(f"/account/verify?token=tok_acc_{contact}",
+                          follow_redirects=False).status_code in (302, 303, 307)
 
     def _publish_example(self, contact):
         """Пример в сервисе ровно один: публикация снимает старый. Ставим
@@ -5737,8 +5739,8 @@ class TestIdeaIsNotReadableByGuessing:
         from app.main import MagicLinkToken, Session, engine
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_e6_" + contact, contact=contact)); s.commit()
-        assert client.get(f"/account/verify?token=tok_e6_{contact}",
-                          follow_redirects=False).status_code in (302, 307)
+        assert client.post(f"/account/verify?token=tok_e6_{contact}",
+                          follow_redirects=False).status_code in (302, 303, 307)
 
     def _logout(self):
         client.post("/api/account/logout")
@@ -5873,8 +5875,8 @@ class TestIdeasCanBeCompared:
         from app.main import MagicLinkToken, Session, engine
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_e4_" + contact, contact=contact)); s.commit()
-        assert client.get(f"/account/verify?token=tok_e4_{contact}",
-                          follow_redirects=False).status_code in (302, 307)
+        assert client.post(f"/account/verify?token=tok_e4_{contact}",
+                          follow_redirects=False).status_code in (302, 303, 307)
 
     def _logout(self):
         client.post("/api/account/logout")
@@ -5971,8 +5973,8 @@ class TestCabinetLinksSurvivedTheAddressChange:
         from app.main import MagicLinkToken, Session, engine
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_lnk_" + contact, contact=contact)); s.commit()
-        assert client.get(f"/account/verify?token=tok_lnk_{contact}",
-                          follow_redirects=False).status_code in (302, 307)
+        assert client.post(f"/account/verify?token=tok_lnk_{contact}",
+                          follow_redirects=False).status_code in (302, 303, 307)
 
     def test_live_test_order_link_opens_for_its_buyer(self):
         from app.main import DemandCheck, LiveTestOrder, Session, engine
@@ -6201,3 +6203,99 @@ class TestBrokenLinkLandsOnAWorkingPage:
         сломает главную ровно так же."""
         r = client.get("/")
         assert "__" not in _slots(r.text), _slots(r.text)
+
+
+class TestMagicLinkSurvivesMailScanners:
+    """A15: почтовый сканер съедал ссылку входа раньше человека.
+
+    Найдено кастдев-проходом по пути «покупатель вернулся за своим отчётом».
+    Токен гасился прямо в GET-обработчике, а почтовые провайдеры и антивирусы
+    (mail.ru, Яндекс, Kaspersky) открывают ссылки из писем сами, до человека,
+    чтобы проверить их на вредоносность. Последствий было два, и оба тяжёлые:
+
+      · **человек не мог войти вообще.** Он кликает — «Ссылка недействительна»,
+        просит новую — сканер съедает и её. Замкнутый круг, из которого нет
+        выхода: заплатил 2990 ₽ и не может открыть купленное;
+      · **сессия выдавалась сканеру.** GET отвечал 307 с `Set-Cookie` на
+        180 дней — то есть кабинет покупателя открывался машине, которая
+        просто проверяла ссылку.
+
+    Лечится тем, что вход происходит на POST, а GET только показывает
+    страницу с кнопкой: сканеры ходят GET и HEAD, форму не отправляют.
+    Заодно страница отказа перестала быть голым `<p>` без стилей — человек,
+    потерявший доступ к оплаченному, видел чёрный Times New Roman на белом,
+    и это выглядит как сломанный сайт, а не как объяснение.
+    """
+
+    def _token(self, name, contact="scan@example.com", **kw):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token=name, contact=contact, **kw))
+            s.commit()
+        return name
+
+    def test_scanner_get_does_not_consume_the_link(self):
+        """Главное: после автоматического открытия ссылка ещё жива."""
+        self._token("scan_alive")
+        client.get("/account/verify?token=scan_alive", follow_redirects=False)
+        r = client.post("/account/verify?token=scan_alive", follow_redirects=False)
+        assert r.status_code in (302, 303, 307), r.status_code
+        client.cookies.clear()
+
+    def test_scanner_get_gets_no_session(self):
+        """Сессия на 180 дней не должна достаться машине, проверявшей ссылку."""
+        client.cookies.clear()
+        self._token("scan_nocookie")
+        r = client.get("/account/verify?token=scan_nocookie", follow_redirects=False)
+        assert r.status_code == 200
+        assert "sozdatel_session" not in r.cookies
+        client.cookies.clear()
+
+    def test_get_shows_a_page_with_a_button(self):
+        self._token("scan_page")
+        t = client.get("/account/verify?token=scan_page").text
+        assert "<!doctype" in t.lower()
+        assert 'method="post"' in t.lower()
+        assert "Войти" in t
+
+    def test_get_names_the_account_being_entered(self):
+        """Человек должен видеть, в чей кабинет входит: почт бывает две."""
+        self._token("scan_named", contact="buyer@example.com")
+        assert "buyer@example.com" in client.get("/account/verify?token=scan_named").text
+
+    def test_post_logs_in_and_burns_the_token(self):
+        self._token("scan_burn")
+        r = client.post("/account/verify?token=scan_burn", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
+        assert r.cookies.get("sozdatel_session")
+        client.cookies.clear()
+        again = client.post("/account/verify?token=scan_burn", follow_redirects=False)
+        assert again.status_code == 400
+        client.cookies.clear()
+
+    def test_expired_link_is_refused_on_both_verbs(self):
+        from app.main import utcnow
+        from datetime import timedelta
+        import app.main as m
+        self._token("scan_old",
+                    created_at=utcnow() - timedelta(minutes=m.MAGIC_LINK_TTL_MINUTES + 1))
+        assert client.get("/account/verify?token=scan_old").status_code == 400
+        assert client.post("/account/verify?token=scan_old",
+                           follow_redirects=False).status_code == 400
+
+    def test_refusal_is_a_real_page_not_a_bare_fragment(self):
+        """Потерявший доступ к оплаченному не должен решить, что сайт умер."""
+        t = client.get("/account/verify?token=no-such-token").text
+        assert "<!doctype" in t.lower()
+        assert "IBM Plex" in t
+        assert "устарела" in t or "недействительна" in t
+
+    def test_refusal_offers_the_way_back(self):
+        t = client.get("/account/verify?token=no-such-token").text
+        assert 'href="/account"' in t
+
+    def test_verify_page_has_no_raw_slots(self):
+        self._token("scan_slots")
+        for t in (client.get("/account/verify?token=scan_slots").text,
+                  client.get("/account/verify?token=nope").text):
+            assert "__" not in _slots(t), _slots(t)
