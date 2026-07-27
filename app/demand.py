@@ -395,7 +395,15 @@ async def check_demand(idea: str, *, _post=None) -> dict:
         # хорошим ни казался разбор конкуренции/своевременности/реализуемости --
         # без спроса они не имеют значения.
         value = min(avg, demand_value) if demand_value is not None else avg
-        overall = {"value": value, "weakest": weakest["label"]}
+        # Откуда взялось число -- словами. Без этого правило «спрос это ворота»
+        # выглядит как ошибка счёта: владелец сам спросил на живом прогоне,
+        # как при почти нулевом спросе идея получила 6/10 (B3 в PRODUCT_ROADMAP).
+        if demand_value is not None and demand_value < avg:
+            basis = (f"Среднее по четырём шкалам — {avg} из 10, но итог опущен до балла "
+                     "спроса: выше того, насколько идею ищут, она подняться не может.")
+        else:
+            basis = "Среднее по четырём шкалам: спрос, конкуренция, своевременность, реализуемость."
+        overall = {"value": value, "weakest": weakest["label"], "basis": basis}
     return {
         "formulations": rows,
         "best_phrase": search_phrase,

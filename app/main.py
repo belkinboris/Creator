@@ -77,6 +77,31 @@ def utcnow() -> datetime:
 # ни крона нет, статус просто перестаёт звать на оплату уже неживую ссылку.
 PENDING_PAYMENT_TIMEOUT_MINUTES = 20
 
+# Пороги вердикта теста на реальных людях -- ЕДИНСТВЕННЫЙ источник правды.
+# Раньше числа были зашиты в модель, а витрины называли совсем другие: главная
+# обещала «выше 2,5% — идея живая», плейбук — «дождитесь ~100 визитов», тогда
+# как движок считал по 8% и 40 визитам. Человек с 3% читал на главной «идея
+# живая», а в кабинете видел «СПРОСА НЕТ» -- прямое нарушение принципа 3.
+CLICK_TARGET = 40       # раньше этого числа визитов цифры -- шум, не результат
+SIGNAL_RATE = 0.08      # заявок/визитов, с которых интерес считается настоящим
+DEAD_RATE = 0.04        # и ниже -- интереса нет
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """«1 заявка», «3 заявки», «5 заявок». Без этого вердикт писал «1 заявок»
+    -- мелочь, по которой сразу видно, что текст собран машиной."""
+    n = abs(n)
+    if n % 100 in range(11, 15):
+        return many
+    last = n % 10
+    return one if last == 1 else few if last in (2, 3, 4) else many
+
+
+def _pct(rate: float) -> str:
+    """8% / 2,5% -- дробные без хвоста .0 и с запятой, как принято в русском."""
+    v = round(rate * 100, 1)
+    return (f"{v:.1f}".rstrip("0").rstrip(".").replace(".", ",")) + "%"
+
 
 def _effective_status(status: str, created_at: datetime) -> str:
     if status == "pending_payment" and utcnow() - created_at > timedelta(minutes=PENDING_PAYMENT_TIMEOUT_MINUTES):
@@ -96,9 +121,9 @@ class SmokeProject(SQLModel, table=True):
     idea_text: str
     offer_json: str          # выбранный оффер целиком (для повторных генераций)
     landing_html: str        # захощенный лендинг
-    click_target: int = 40
-    lead_rate_signal: float = 0.08
-    lead_rate_dead: float = 0.04
+    click_target: int = CLICK_TARGET
+    lead_rate_signal: float = SIGNAL_RATE
+    lead_rate_dead: float = DEAD_RATE
     status: str = "running"  # running | signal | dead | gray
     created_at: datetime = Field(default_factory=utcnow)
     contact: str = ""        # почта покупателя -- показывается в его личном кабинете (/account)
@@ -995,20 +1020,37 @@ async def smoke_event(request: Request):
 
 
 def compute_verdict(views: int, leads: int, target: int, signal: float, dead: float) -> dict:
-    """Детерминированный вердикт этапа ① — те же честные слова, что везде."""
+    """Детерминированный вердикт теста на реальных людях.
+
+    Тексты называют пороги вслух. Голое «12% — сигнал есть» не объясняет
+    ничего: человек не знает ни откуда взялось число, ни с чем его сравнили
+    (B3 в PRODUCT_ROADMAP). Слова -- покупательские: этот вердикт видит и
+    самозанятая из соцконтракта, а не только фаундер.
+    """
     rate = (leads / views) if views else 0.0
+    n_leads = f"{leads} {_plural(leads, 'заявка', 'заявки', 'заявок')}"
+    n_views = f"{views} {_plural(views, 'визит', 'визита', 'визитов')}"
+    # «N визитов, из них M заявок», а не «M заявок с N визитов»: предлог «с»
+    # требует родительного падежа, и на числах вроде 52 фраза начинает хромать.
+    got = f"{n_views}, из них {n_leads} — это {_pct(rate)}"
     if views < target:
         return {"verdict": "РАНО СУДИТЬ",
-                "detail": f"{views}/{target} визитов, заявок {leads}. Копим клики, ничего не менять."}
+                "detail": f"Пока {n_views} из {target}, заявок {leads}. "
+                          f"Меньше {target} визитов — это ещё не статистика: случайность легко "
+                          "принять за результат. Ничего не меняйте, пусть наберётся."}
     if rate >= signal:
         return {"verdict": "СИГНАЛ ЕСТЬ",
-                "detail": f"{leads} заявок с {views} визитов ({rate:.0%}). Идея — в очередь на MVP."}
+                "detail": f"{got}, при пороге {_pct(signal)} и выше. Люди не просто смотрят — "
+                          "оставляют контакты. Идею стоит делать."}
     if rate <= dead:
         return {"verdict": "СПРОСА НЕТ",
-                "detail": f"{rate:.0%} заявок при {views} визитах. Кампанию остановить, идею в архив — "
-                          "сэкономлены месяцы разработки."}
+                "detail": f"{got}, при пороге {_pct(dead)} и ниже. Страницу видели, но не "
+                          "откликнулись. Рекламу можно останавливать — это сэкономленные деньги "
+                          "и месяцы работы над тем, что не купят."}
     return {"verdict": "СЕРАЯ ЗОНА",
-            "detail": f"{rate:.0%} заявок. Попробовать второй оффер (другой заголовок) на том же трафике."}
+            "detail": f"{got} — между {_pct(dead)} (интереса нет) и {_pct(signal)} (интерес есть). "
+                      "Однозначного ответа цифры не дают: попробуйте другой заголовок на "
+                      "той же странице."}
 
 
 def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
@@ -1569,7 +1611,7 @@ def legal_page():
 def guide_direct():
     """Этап 3 из 7 — пошаговый запуск Директа, часть «Тест на реальных людях»
     (режим эксперта, только Поиск)."""
-    return HTMLResponse(_static("guide-direct.html"))
+    return HTMLResponse(_with_thresholds("guide-direct.html"))
 
 
 @app.get("/social-contract", response_class=HTMLResponse)
@@ -1698,6 +1740,17 @@ def project_page(idea_id: str):
                            .replace("{{PRODUCT_NAME}}", proj.product_name))
 
 
+def _with_thresholds(name: str) -> str:
+    """Витрины называют пороги вердикта — подставляем их из кода, а не
+    переписываем руками. Вторая копия числа в статике уже разъезжалась с
+    движком (главная обещала 2,5% при реальных 8%), и заметить это можно
+    было только сравнив две страницы глазами."""
+    return (_static(name)
+            .replace("__CLICK_TARGET__", str(CLICK_TARGET))
+            .replace("__SIGNAL_PCT__", _pct(SIGNAL_RATE))
+            .replace("__DEAD_PCT__", _pct(DEAD_RATE)))
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return HTMLResponse(_static("index.html"))
+    return HTMLResponse(_with_thresholds("index.html"))

@@ -89,6 +89,10 @@
   .overall-val{font:600 40px/1 "IBM Plex Mono",monospace;
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 4px}
   .overall-note{color:var(--muted);font-size:15px}
+  /* Откуда взялось число. Голое «6/10» не объясняет ничего, а правило
+     «спрос это ворота» без слов читается как ошибка счёта. */
+  .overall-how{color:var(--muted);font-size:13.5px;max-width:44em;margin:-8px 0 14px}
+  .overall-how:empty{display:none}
   .score-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
     background:var(--line);border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .score-cell{background:var(--box);padding:14px 12px}
@@ -254,6 +258,7 @@
         <span class="overall-val" id="overall-val"></span>
         <span class="overall-note" id="overall-note"></span>
       </div>
+      <p class="overall-how" id="overall-how"></p>
       <button class="detail-toggle" id="score-detail-toggle" type="button">Почему такая оценка? →</button>
       <div class="score-grid" id="scores" hidden></div>
       <div class="step-next"><button class="btn" type="button" onclick="advance(3)" id="step3-next"></button></div>
@@ -344,6 +349,7 @@ if (hasScores) {
     document.getElementById('overall-val').textContent = ov.value + '/10';
     document.getElementById('overall-note').textContent =
       ov.weakest ? 'Слабое место — ' + ov.weakest.toLowerCase() : '';
+    document.getElementById('overall-how').textContent = ov.basis || '';
   }
   document.getElementById('scores').innerHTML = sc.map(s => `
     <div class="score-cell">

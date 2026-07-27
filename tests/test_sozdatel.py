@@ -3326,3 +3326,143 @@ class TestAccountFirstEntry:
         text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
         assert "на которую оформляли заказ" not in text
         assert "Пароль не нужен" in text
+
+
+class TestNumbersExplainThemselves:
+    """B3: числа показывались без объяснения, а на витринах стояли ДРУГИЕ
+    числа, чем считал движок. Человек с 3% читал на главной «идея живая», а
+    в кабинете видел «СПРОСА НЕТ»."""
+
+    def test_showcases_quote_the_real_thresholds(self):
+        """Главное: витрина и движок не могут больше разъехаться."""
+        import app.main as m
+        for url in ("/", "/guide/direct"):
+            text = client.get(url).text
+            assert m._pct(m.SIGNAL_RATE) in text, url
+            assert m._pct(m.DEAD_RATE) in text, url
+            assert str(m.CLICK_TARGET) in text, url
+            assert "__SIGNAL_PCT__" not in text and "__CLICK_TARGET__" not in text, url
+
+    def test_old_wrong_numbers_are_gone(self):
+        """2,5% и ~100 визитов движок не использовал никогда."""
+        for url in ("/", "/guide/direct"):
+            text = client.get(url).text
+            assert "2,5%" not in text, url
+            # «~100 визитов» осталось в оценке рекламного бюджета -- это про
+            # другое; уходит именно ложное правило вердикта.
+            assert "дождитесь ~100 визитов" not in text, url
+
+    def test_pct_formats_like_russian(self):
+        from app.main import _pct
+        assert _pct(0.08) == "8%"
+        assert _pct(0.04) == "4%"
+        assert _pct(0.025) == "2,5%"
+        assert _pct(0.125) == "12,5%"
+
+    def test_verdict_names_the_threshold_it_compared_against(self):
+        """Голое «12% — сигнал есть» не объясняет, с чем сравнили."""
+        from app.main import compute_verdict, _pct, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE
+        early = compute_verdict(10, 1, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
+        assert str(CLICK_TARGET) in early["detail"]
+        signal = compute_verdict(50, 6, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
+        assert _pct(SIGNAL_RATE) in signal["detail"]
+        dead = compute_verdict(50, 1, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
+        assert _pct(DEAD_RATE) in dead["detail"]
+        gray = compute_verdict(50, 3, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
+        assert _pct(DEAD_RATE) in gray["detail"] and _pct(SIGNAL_RATE) in gray["detail"]
+
+    def test_verdict_has_no_forbidden_words_or_owner_language(self):
+        """Этот вердикт видит покупатель в /account и на /p/, а тест на
+        запрещённые слова покрывал только demand._verdict -- вторую, очень
+        похожую функцию никто не проверял, и в ней жил «оффер»."""
+        from app.main import compute_verdict, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE
+        cases = [(10, 1), (50, 6), (50, 1), (50, 3), (0, 0)]
+        for views, leads in cases:
+            low = compute_verdict(views, leads, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)["detail"].lower()
+            for bad in ("оффер", "лендинг", "трафик", "mvp", "конверси", "гипотез"):
+                assert bad not in low, f"жаргон в вердикте {views}/{leads}: {bad!r}"
+
+    def test_verdict_speaks_to_the_customer_not_the_owner(self):
+        """«Копим клики», «идею в архив» — язык владельца пульта, а вердикт
+        читает покупатель (A3 закрыла то же самое на /p/)."""
+        from app.main import compute_verdict, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE
+        for views, leads in [(10, 1), (50, 6), (50, 1), (50, 3)]:
+            d = compute_verdict(views, leads, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)["detail"]
+            assert "Копим клики" not in d and "в архив" not in d
+            assert "менять" not in d or "не меняйте" in d.lower()
+
+    def test_zero_views_does_not_divide_by_zero(self):
+        from app.main import compute_verdict
+        assert compute_verdict(0, 0, 40, .08, .04)["verdict"] == "РАНО СУДИТЬ"
+
+    def test_model_defaults_come_from_the_constants(self):
+        """Иначе появится третья копия чисел -- в схеме БД."""
+        import app.main as m
+        p = m.SmokeProject(idea_id="x", product_name="p", idea_text="t",
+                           offer_json="{}", landing_html="")
+        assert p.click_target == m.CLICK_TARGET
+        assert p.lead_rate_signal == m.SIGNAL_RATE
+        assert p.lead_rate_dead == m.DEAD_RATE
+
+
+class TestOverallScoreExplained:
+    """B3: «6/10» без объяснения. Владелец на живом прогоне сам спросил, как
+    при почти нулевом спросе идея получает 6/10 -- правило «спрос это ворота»
+    без слов читается как ошибка счёта."""
+
+    def _overall(self, demand_value, others):
+        """Собирает overall тем же кодом, что и check_demand."""
+        import asyncio, app.demand as dm
+        async def fake_score(idea, rows, comp, *, _post=None):
+            return [{"key": k, "label": l, "value": v, "note": ""}
+                    for (k, l), v in zip([("competition", "Конкуренция"),
+                                          ("timing", "Своевременность"),
+                                          ("execution", "Реализуемость")], others)]
+        async def fake_formulations(idea, *, _post=None):
+            return ["фраза"]
+        async def fake_best(phrase, *, _post=None):
+            return {"phrase": phrase, "count": demand_value}
+        async def fake_comp(phrase, *, _post=None):
+            return {"found": 10, "top": []}
+        orig = (dm.score_idea, dm.generate_formulations, dm.wordstat_best, dm.competitors)
+        dm.score_idea, dm.generate_formulations = fake_score, fake_formulations
+        dm.wordstat_best, dm.competitors = fake_best, fake_comp
+        try:
+            return asyncio.run(dm.check_demand("идея"))["overall"]
+        finally:
+            dm.score_idea, dm.generate_formulations, dm.wordstat_best, dm.competitors = orig
+
+    def test_capped_by_demand_says_so(self):
+        """Спрос 1 запрос/мес при трёх хороших шкалах."""
+        ov = self._overall(1, [9, 9, 9])
+        assert "опущен до балла спроса" in ov["basis"]
+        assert ov["value"] <= 2
+
+    def test_not_capped_says_it_is_an_average(self):
+        ov = self._overall(9000, [3, 3, 3])
+        assert "Среднее по четырём шкалам" in ov["basis"]
+        assert "опущен" not in ov["basis"]
+
+    def test_basis_avoids_internal_jargon(self):
+        for ov in (self._overall(1, [9, 9, 9]), self._overall(9000, [3, 3, 3])):
+            low = ov["basis"].lower()
+            for bad in ("оффер", "лендинг", "трафик", "частотность", "конверси"):
+                assert bad not in low, f"{bad!r} в объяснении балла"
+
+    def test_result_page_renders_the_explanation(self):
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert "ov.basis" in text and 'id="overall-how"' in text
+
+
+    def test_numbers_agree_with_their_nouns(self):
+        """«1 заявок» — мелочь, по которой сразу видно машинный текст."""
+        from app.main import _plural, compute_verdict, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE
+        assert _plural(1, "заявка", "заявки", "заявок") == "заявка"
+        assert _plural(3, "заявка", "заявки", "заявок") == "заявки"
+        assert _plural(5, "заявка", "заявки", "заявок") == "заявок"
+        assert _plural(11, "заявка", "заявки", "заявок") == "заявок"   # 11, а не 1
+        assert _plural(21, "заявка", "заявки", "заявок") == "заявка"
+        assert _plural(112, "заявка", "заявки", "заявок") == "заявок"  # 112, а не 2
+        assert "1 заявка" in compute_verdict(50, 1, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)["detail"]
+        assert "1 визит " in compute_verdict(1, 0, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)["detail"]
+        assert "52 визита" in compute_verdict(52, 2, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)["detail"]
