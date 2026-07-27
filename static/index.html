@@ -131,6 +131,10 @@
     .hero{padding-top:30px;padding-bottom:24px}
     .sub{font-size:16px}
     .checker{padding:15px}
+    /* На узком экране пример идеи занимает три строки и не помещался в поле:
+       последняя строка обрезалась ровно на первом экране воронки. Заодно
+       высокое поле само говорит, что можно писать не одну фразу. */
+    .checker textarea{min-height:112px}
     .checker-foot .btn,.checker-foot .btn-ghost{width:100%;text-align:center}
     .freq-row{flex-direction:column;align-items:flex-start;gap:3px}
     .score-grid{grid-template-columns:1fr 1fr}
