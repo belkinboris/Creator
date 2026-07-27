@@ -530,16 +530,39 @@ class TestCabinet:
 
         assert client.delete(f"/api/tracked/{tp_id}", headers=OWNER).status_code == 200
 
-    def test_smoke_stage_from_data(self):
+    def test_smoke_stage_starts_at_the_live_test_not_at_the_idea(self):
+        """Проект существует только потому, что человек прошёл проверку
+        спроса И оплатил тест на людях. Значит «Идея» и «Спрос» позади.
+        Раньше здесь было `1 if views else 0`, и покупатель сразу после
+        оплаты видел «Этап 1 из 7 — Идея»."""
         client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
             "offer": dict(VALID_OFFER, idea_id="cab_v1")})
         cab = client.get("/api/cabinet", headers=OWNER).json()
         sm = [s for s in cab["smoke"] if s["idea_id"] == "cab_v1"][0]
-        assert sm["stage"] == 0  # кликов нет — этап Оффер
+        assert sm["stage"] == 2 and sm["stage_name"] == "Тест на реальных людях"
         client.post("/api/smoke-event", json={"event": "page_view", "idea": "cab_v1"})
         cab = client.get("/api/cabinet", headers=OWNER).json()
         sm = [s for s in cab["smoke"] if s["idea_id"] == "cab_v1"][0]
-        assert sm["stage"] == 1 and sm["stage_name"] == "Спрос"
+        assert sm["stage"] == 2, "пока визитов мало — всё ещё идёт тест"
+
+    def test_smoke_stage_moves_to_leads_once_there_is_enough_data(self):
+        import app.main as m
+        from app.main import SmokeProject, Session, engine, select
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="cab_v2")})
+        # События пишем в базу напрямую: публичная ручка ограничена 30
+        # событиями в минуту на IP, и сорок подряд она не пропустит.
+        from app.main import SmokeEvent
+        with Session(engine) as s:
+            proj = s.exec(select(SmokeProject).where(
+                SmokeProject.idea_id == "cab_v2")).first()
+            target = proj.click_target
+            for _ in range(target):
+                s.add(SmokeEvent(idea="cab_v2", event="page_view"))
+            s.commit()
+        cab = client.get("/api/cabinet", headers=OWNER).json()
+        sm = [s for s in cab["smoke"] if s["idea_id"] == "cab_v2"][0]
+        assert sm["stage"] == 3 and sm["stage_name"] == "Заявки"
 
     def test_cabinet_requires_key(self):
         assert client.get("/api/cabinet").status_code == 401
@@ -3192,8 +3215,11 @@ class TestStageMerge:
     def test_project_page_uses_merged_7_stage_scale(self):
         text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
         assert "Тест на реальных людях" in text
-        assert "из 7" in text
-        assert "length:7" in text.replace(" ", "")
+        # длина шкалы и сам этап приходят с сервера, а не зашиты на странице:
+        # копия правила уже разъезжалась и показывала оплатившему «Идея»
+        assert "names.length" in text
+        assert "d.stage_names" in text
+        assert "d.views > 0 ? 1 : 0" not in text
         assert "Реклама" not in text   # старое отдельное название шага ушло
 
     def test_desk_stage_badge_parameterized_by_scale_length(self):

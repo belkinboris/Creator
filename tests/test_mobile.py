@@ -573,3 +573,24 @@ def test_unmeasured_demand_stops_selling_in_a_real_browser(site, browser):
             "() => document.getElementById('order').className") == "next"
     finally:
         ctx.close()
+
+
+def test_paid_project_is_not_labelled_as_just_an_idea(site, browser):
+    """A13. Этап рисует скрипт по ответу сервера — подстроками не проверить.
+    Человек, оплативший тест на людях, не должен видеть свой проект на
+    этапе «Идея»: он уже прошёл и идею, и спрос, и заплатил."""
+    ctx, page = _open(browser, f"{site['base']}/p/sweep1?key={OWNER_KEY}")
+    try:
+        page.wait_for_selector("#path-name", timeout=10000)
+        page.wait_for_timeout(600)
+        stage = page.inner_text("#path-stage")
+        name = page.inner_text("#path-name")
+        assert "Идея" not in name, f"{stage} | {name}"
+        assert "Спрос" not in name, f"{stage} | {name}"
+        assert "Тест на реальных людях" in name or "Заявки" in name, name
+        # шкала берётся с сервера: делений столько же, сколько названий
+        segs = page.eval_on_selector_all("#path-bar i", "e => e.length")
+        assert segs == 7, segs
+        _assert_clean(page, "страница проекта, метка этапа")
+    finally:
+        ctx.close()

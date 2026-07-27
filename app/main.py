@@ -1768,12 +1768,28 @@ def compute_verdict(views: int, leads: int, target: int, signal: float, dead: fl
                       "той же странице."}
 
 
+def _smoke_stage(views: int, click_target: int) -> int:
+    """Этап проекта по шкале STAGE_NAMES. Единственное место, где это
+    правило живёт: копия в `static/project.html` уже разъезжалась.
+
+    Проект существует только потому, что человек прошёл бесплатную проверку
+    спроса И оплатил тест на людях -- мы собрали ему страницу. Значит этапы
+    «Идея» и «Спрос» у него ПОЗАДИ. Раньше здесь стояло `1 if views else 0`,
+    и покупатель сразу после оплаты видел «Этап 1 из 7 — Идея»: продукт
+    сообщал, что человек в самом начале, ровно в тот момент, когда он
+    только что заплатил.
+
+    Пока визитов меньше цели -- идёт «Тест на реальных людях»; как только их
+    хватило на вердикт, разговор идёт уже про «Заявки».
+    """
+    return 3 if click_target and views >= click_target else 2
+
+
 def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
     """Карточка проекта -- общая для владельца (/api/cabinet) и покупателя
-    (/api/account/me), чтобы оба видели один и тот же язык: этап 0..7,
-    прогресс, вердикт. Smoke-этап определяется данными: есть клики -> ①
-    Спрос, иначе ⓪ Идея."""
-    stage = 1 if views > 0 else 0
+    (/api/account/me), чтобы оба видели один и тот же язык: этап, прогресс,
+    вердикт."""
+    stage = _smoke_stage(views, p.click_target)
     v = compute_verdict(views, leads, p.click_target, p.lead_rate_signal, p.lead_rate_dead)
     rate = (leads / views) if views else 0.0
     if views == 0:
@@ -1814,6 +1830,10 @@ def verdict(idea_id: str, request: Request):
     return {"ok": True, "idea_id": idea_id, "product_name": proj.product_name,
             "h1": offer.get("h1", ""),
             "views": views, "leads": len(leads_rows), **v,
+            # Этап считает сервер: копия правила на странице уже разъехалась
+            # с ним и показывала оплатившему человеку «Идея».
+            "stage": _smoke_stage(views, proj.click_target),
+            "stage_names": STAGE_NAMES,
             "target": proj.click_target,
             "queries": offer.get("direct_queries", []),
             "landing_url": f"/l/{idea_id}",
