@@ -2837,8 +2837,10 @@ class TestSaveCheckToAccount:
         assert 'id="save-btn"' in text and "/save" in text and "trySave" in text
 
     def test_account_page_renders_checks_section(self):
+        """Раздел собирается в JS (пустые не выводятся) -- проверяем, что
+        сохранённые проверки в этой сборке участвуют."""
         text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
-        assert 'id="checks-block"' in text and "d.checks" in text
+        assert "['Проверки спроса', d.checks, checkRow]" in text
 
 
 class TestProjectPageCustomerAccess:
@@ -2918,7 +2920,7 @@ class TestAutoLaunchUiWiring:
 
     def test_account_page_renders_pending_orders_block(self):
         text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
-        assert 'id="orders-block"' in text
+        assert "d.orders, orderRow]" in text
         assert "continue_url" in text
 
 
@@ -3215,3 +3217,112 @@ class TestChosenOfferReachesReport:
     def test_result_page_sends_the_choice(self):
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
         assert "'/api/demand/' + CHECK_ID + '/chosen'" in text
+
+
+class TestAccountFirstEntry:
+    """B1+B2: пустой кабинет был тупиком. Человек подтверждал почту, попадал
+    на экран из двух пустых заголовков подряд («Пока нет запущенных
+    проектов.», «Пока нет отчётов по идее.») и не понимал, что делать."""
+
+    def _login(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_fe_" + contact, contact=contact)); s.commit()
+        r = client.get(f"/account/verify?token=tok_fe_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 307)
+
+    def _check(self, contact, purpose="business"):
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Пошив штор на заказ", contact=contact, purpose=purpose,
+                              result_json='{"verdict": {"level": "niche", "text": "т"}}')
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id
+
+    def test_empty_cabinet_has_no_dead_end_texts(self):
+        """Формулировки-тупики не должны вернуться ни в каком виде."""
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert "Пока нет запущенных проектов" not in text
+        assert "Пока нет отчётов по идее" not in text
+
+    def test_empty_cabinet_offers_one_action(self):
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert 'id="first-cta"' in text
+        assert "Проверить идею — бесплатно" in text
+        # пустые разделы не рендерятся вовсе
+        assert ".filter(([, items]) => items.length)" in text
+
+    def test_empty_cabinet_reports_nothing(self):
+        client.cookies.clear()
+        self._login("empty_fe@example.com")
+        d = client.get("/api/account/me").json()
+        assert d["contact"] == "empty_fe@example.com"
+        assert not any([d["projects"], d["reports"], d["orders"], d["checks"]])
+        client.cookies.clear()
+
+    def test_purpose_follows_the_last_check(self):
+        """Получателя соцконтракта нельзя вести за следующей идеей на витрину
+        для фаундеров -- у него другая задача (принцип 4)."""
+        client.cookies.clear()
+        self._login("soc_fe@example.com")
+        self._check("soc_fe@example.com", "social_contract")
+        assert client.get("/api/account/me").json()["purpose"] == "social_contract"
+        client.cookies.clear()
+
+    def test_purpose_defaults_to_business(self):
+        client.cookies.clear()
+        self._login("biz_fe@example.com")
+        self._check("biz_fe@example.com")
+        assert client.get("/api/account/me").json()["purpose"] == "business"
+        client.cookies.clear()
+
+    def test_purpose_of_empty_cabinet_is_business(self):
+        client.cookies.clear()
+        self._login("noidea_fe@example.com")
+        assert client.get("/api/account/me").json()["purpose"] == "business"
+        client.cookies.clear()
+
+    def test_cabinet_routes_social_contract_back_to_its_own_landing(self):
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert "d.purpose === 'social_contract' ? '/social-contract' : '/'" in text
+
+    def test_tier_label_comes_from_server(self):
+        """Тариф уже переименовывали («Полный отчёт» -> «Бизнес-план»), и
+        вторая копия названия в статике разъехалась с витриной незаметно."""
+        import app.main as m
+        client.cookies.clear()
+        self._login("tier_fe@example.com")
+        rid = self._check("tier_fe@example.com")
+        client.post("/api/report", json={"check_id": rid, "tier": "full",
+                                          "contact": "tier_fe@example.com"})
+        reports = client.get("/api/account/me").json()["reports"]
+        assert reports[0]["tier_label"] == m.REPORT_PRICES["full"]["label"]
+        client.cookies.clear()
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert "Полный отчёт" not in text      # копии названия в статике больше нет
+        assert "rp.tier_label" in text
+
+
+    def test_buttons_are_not_underlined(self):
+        """Ссылки-кнопки в кабинете были подчёркнуты, хотя на всех остальных
+        страницах text-decoration снят. На экране первого входа это единственная
+        кнопка, и подчёркивание сразу читается как небрежность."""
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        btn = text.split(".btn{")[1].split("}")[0]
+        ghost = text.split(".btn-ghost{")[1].split("}")[0]
+        assert "text-decoration:none" in btn
+        assert "text-decoration:none" in ghost
+
+    def test_rows_stack_on_narrow_screen(self):
+        """На 390px название идеи занимает три строки и выдавливает кнопку
+        «Открыть →» в столбик из двух слов."""
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        narrow = text.split("@media (max-width:560px){")[1].split("\n  }")[0]
+        assert ".item{flex-direction:column" in narrow
+
+    def test_login_screen_does_not_require_a_paid_order(self):
+        """Вход в кабинет открыт и после бесплатной проверки -- обещать его
+        только оформившим заказ значит отсечь половину вошедших."""
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert "на которую оформляли заказ" not in text
+        assert "Пароль не нужен" in text

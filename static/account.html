@@ -28,12 +28,13 @@
   .box input{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:6px;
     background:#fff;color:var(--ink);font:inherit;margin-bottom:12px}
   .btn{appearance:none;border:0;cursor:pointer;border-radius:6px;display:inline-block;
-    background:var(--btn);color:#fff;font:600 15px "IBM Plex Sans";padding:11px 18px}
+    background:var(--btn);color:#fff;font:600 15px "IBM Plex Sans";padding:11px 18px;
+    text-decoration:none}
   .btn:hover{background:#000}
   .btn[disabled]{opacity:.55;cursor:wait}
   .btn-ghost{appearance:none;cursor:pointer;border-radius:6px;display:inline-block;
     background:transparent;border:1px solid var(--line);color:var(--ink);
-    font:500 14px "IBM Plex Sans";padding:9px 14px}
+    font:500 14px "IBM Plex Sans";padding:9px 14px;text-decoration:none}
   .btn-ghost:hover{border-color:var(--ink)}
   .err{display:none;margin-top:10px;color:#B23A3A;font-size:15px}
   .err.show{display:block}
@@ -68,9 +69,21 @@
   .item .sub2{color:var(--muted);font-size:13px;margin-top:2px}
   .empty{color:var(--muted);font-size:15px;padding:8px 0}
 
+  /* Экран первого входа: одна мысль, одно действие. */
+  #first h2{font-size:19px;font-weight:600;letter-spacing:-.01em;margin-bottom:8px}
+  .first-p{color:var(--muted);font-size:15px;margin-bottom:16px;max-width:34em}
+  .fine{color:var(--muted);font-size:13px;margin-top:10px}
+  #more{border-top:1px solid var(--line);margin-top:28px;padding-top:20px}
+
   footer{border-top:1px solid var(--line);margin-top:36px;padding:22px 0;color:var(--muted);font-size:13px}
   footer a{color:var(--muted)}
-  @media (max-width:560px){:root{--pad:20px} .nums{gap:16px}}
+  /* На узком экране название идеи переносится на три строки и выдавливает
+     кнопку в колонку из двух слов -- ставим действие под текстом. */
+  @media (max-width:560px){
+    :root{--pad:20px}
+    .nums{gap:16px}
+    .item{flex-direction:column;align-items:flex-start;gap:10px}
+  }
 </style>
 </head>
 <body>
@@ -85,7 +98,10 @@
   <div id="anon" style="display:none">
     <div class="head">
       <h1>Личный <span class="hl">кабинет</span></h1>
-      <p class="sub">Найдите свои проекты и отчёты по почте, на которую оформляли заказ. Без пароля — пришлём ссылку для входа.</p>
+      <!-- Текст обещал вход только оформившим заказ. С тех пор в кабинет
+           входят и с бесплатной проверкой (POST /api/demand/{id}/save) --
+           половине вошедших он говорил, что кабинет не для них. -->
+      <p class="sub">Введите почту, которую оставляли на сайте — пришлём ссылку для входа. Пароль не нужен.</p>
     </div>
     <div class="box">
       <input id="contact" type="email" placeholder="Ваша почта">
@@ -97,24 +113,28 @@
 
   <div id="known" style="display:none">
     <div class="head">
-      <h1>Ваши <span class="hl">проекты и отчёты</span></h1>
+      <h1 id="known-title">Ваши <span class="hl">идеи</span></h1>
       <p class="who" id="who"></p>
     </div>
 
-    <div class="list-title">Запущенные проекты</div>
-    <div id="projects"></div>
-
-    <div id="orders-block" style="display:none">
-      <div class="list-title">Заявки на живой тест</div>
-      <div id="orders"></div>
+    <!-- Первый вход: человек только что подтвердил почту и не проверял ещё
+         ничего. Раньше он видел два пустых раздела подряд и уходил, так и не
+         поняв, что делать. Теперь -- один экран с одним действием. -->
+    <div id="first" style="display:none">
+      <div class="box">
+        <h2 id="first-h">Здесь будут ваши проверки идей</h2>
+        <p class="first-p" id="first-p">Пока пусто. Начните с бесплатной проверки: посмотрим по Яндексу, сколько людей ищут вашу идею и кто уже отвечает на этот запрос.</p>
+        <a class="btn" id="first-cta" href="/">Проверить идею — бесплатно</a>
+        <p class="fine">Платить ничего не нужно.</p>
+      </div>
     </div>
 
-    <div class="list-title">Отчёты по идее</div>
-    <div id="reports"></div>
+    <!-- Разделы собираются в JS: пустые не выводятся вовсе. Заголовок над
+         пустотой -- это тупик, а не структура. -->
+    <div id="sections"></div>
 
-    <div id="checks-block" style="display:none">
-      <div class="list-title">Проверки спроса</div>
-      <div id="checks"></div>
+    <div id="more" style="display:none">
+      <a class="btn-ghost" id="more-cta" href="/">Проверить ещё одну идею →</a>
     </div>
 
     <button class="btn-ghost" id="logout-btn" type="button" style="margin-top:10px">Выйти</button>
@@ -148,8 +168,18 @@ function stageBadge(stageIdx, name){
   document.getElementById('known').style.display = 'block';
   document.getElementById('who').textContent = d.contact;
 
-  const projectsEl = document.getElementById('projects');
-  projectsEl.innerHTML = d.projects.length ? d.projects.map(p => `
+  // Человек с /social-contract пришёл за обоснованием для комиссии -- вести
+  // его за следующей идеей на витрину для фаундеров было бы промахом.
+  const START_URL = d.purpose === 'social_contract' ? '/social-contract' : '/';
+  document.getElementById('first-cta').href = START_URL;
+  document.getElementById('more-cta').href = START_URL;
+
+  const STATUS_LABEL = {
+    paid: '', new: 'Заявка принята — свяжемся',
+    pending_payment: 'Ожидает оплаты', expired: 'Истекло — оформите заново',
+  };
+
+  const projectCard = p => `
     <div class="p">
       <h2>${escapeHtml(p.name)}</h2>
       ${stageBadge(p.stage, p.stage_name)}
@@ -161,39 +191,50 @@ function stageBadge(stageIdx, name){
       <div class="verdict">${escapeHtml(p.verdict)}</div>
       <div class="next">${escapeHtml(p.next_step)}</div>
       <div class="acts"><a class="btn-ghost" href="${p.project_url}">Открыть проект →</a></div>
-    </div>`).join('') : '<p class="empty">Пока нет запущенных проектов.</p>';
+    </div>`;
 
-  const STATUS_LABEL = {
-    paid: '', new: 'Заявка принята — свяжемся',
-    pending_payment: 'Ожидает оплаты', expired: 'Истекло — оформите заново',
-  };
+  const orderRow = o => `
+    <div class="item">
+      <div><div class="name">${escapeHtml(o.idea || 'Без названия')}</div>
+        <div class="sub2">${escapeHtml(STATUS_LABEL[o.status] || o.status)}</div></div>
+      ${o.continue_url ? `<a class="btn-ghost" href="${o.continue_url}">Открыть →</a>` : ''}
+    </div>`;
 
-  if (d.orders.length) {
-    document.getElementById('orders-block').style.display = 'block';
-    document.getElementById('orders').innerHTML = d.orders.map(o => `
-      <div class="item">
-        <div><div class="name">${escapeHtml(o.idea || 'Без названия')}</div>
-          <div class="sub2">${escapeHtml(STATUS_LABEL[o.status] || o.status)}</div></div>
-        ${o.continue_url ? `<a class="btn-ghost" href="${o.continue_url}">Открыть →</a>` : ''}
-      </div>`).join('');
-  }
-
-  const reportsEl = document.getElementById('reports');
-  reportsEl.innerHTML = d.reports.length ? d.reports.map(rp => `
+  const reportRow = rp => `
     <div class="item">
       <div><div class="name">${escapeHtml(rp.idea)}</div>
-        <div class="sub2">${rp.tier === 'full' ? 'Полный отчёт' : 'Быстрый разбор'}${STATUS_LABEL[rp.status] ? ' · ' + escapeHtml(STATUS_LABEL[rp.status]) : ''}</div></div>
+        <div class="sub2">${escapeHtml(rp.tier_label || '')}${STATUS_LABEL[rp.status] ? ' · ' + escapeHtml(STATUS_LABEL[rp.status]) : ''}</div></div>
       <a class="btn-ghost" href="${rp.report_url}">Открыть →</a>
-    </div>`).join('') : '<p class="empty">Пока нет отчётов по идее.</p>';
+    </div>`;
 
-  if (d.checks.length) {
-    document.getElementById('checks-block').style.display = 'block';
-    document.getElementById('checks').innerHTML = d.checks.map(c => `
-      <div class="item">
-        <div><div class="name">${escapeHtml(c.idea || 'Без названия')}</div>
-          <div class="sub2">Бесплатная проверка спроса</div></div>
-        <a class="btn-ghost" href="${c.result_url}">Открыть →</a>
-      </div>`).join('');
+  const checkRow = c => `
+    <div class="item">
+      <div><div class="name">${escapeHtml(c.idea || 'Без названия')}</div>
+        <div class="sub2">Бесплатная проверка спроса</div></div>
+      <a class="btn-ghost" href="${c.result_url}">Открыть →</a>
+    </div>`;
+
+  // Порядок -- от самого продвинутого к самому раннему: сверху то, во что
+  // человек уже вложился. Пустые разделы не выводятся: заголовок над
+  // пустотой ничего не сообщает, а место занимает.
+  const SECTIONS = [
+    ['Запущенные проекты', d.projects, projectCard],
+    ['Заявки на тест с реальными людьми', d.orders, orderRow],
+    ['Отчёты и бизнес-планы', d.reports, reportRow],
+    ['Проверки спроса', d.checks, checkRow],
+  ];
+  const html = SECTIONS
+    .filter(([, items]) => items.length)
+    .map(([title, items, row]) =>
+      `<div class="list-title">${title}</div>` + items.map(row).join(''))
+    .join('');
+
+  if (html) {
+    document.getElementById('sections').innerHTML = html;
+    document.getElementById('more').style.display = 'block';
+  } else {
+    document.getElementById('known-title').innerHTML = 'Вы <span class="hl">вошли</span>';
+    document.getElementById('first').style.display = 'block';
   }
 
   document.getElementById('logout-btn').addEventListener('click', async () => {

@@ -1524,6 +1524,11 @@ def account_me(request: Request):
         checks = s.exec(select(DemandCheck).where(
             DemandCheck.contact == contact
         ).order_by(DemandCheck.created_at.desc())).all()
+        # С какой стороны человек пришёл -- по самой свежей его проверке (до
+        # отсева тех, что уже выросли в отчёт). Кабинет по ней решает, куда
+        # вести за следующей идеей: получателя соцконтракта незачем
+        # возвращать на витрину для фаундеров (принцип 4).
+        purpose = checks[0].purpose if checks else "business"
         checks = [c for c in checks if c.id not in promoted_ids]
         from collections import defaultdict
         idea_ids = [p.idea_id for p in projects]
@@ -1533,10 +1538,14 @@ def account_me(request: Request):
                                       .where(SmokeEvent.idea.in_(idea_ids))).all():
                 counts[(idea, event)] += 1
     return {
-        "ok": True, "contact": contact,
+        "ok": True, "contact": contact, "purpose": purpose,
         "projects": [_smoke_card(p, counts[(p.idea_id, "page_view")],
                                  counts[(p.idea_id, "lead_submitted")]) for p in projects],
+        # tier_label приходит с сервера, а не зашит в кабинете: тариф уже
+        # переименовывали ("Полный отчёт" -> "Бизнес-план"), и вторая копия
+        # названия в статике разъезжается с витриной незаметно.
         "reports": [{"check_id": r.check_id, "idea": r.idea, "tier": r.tier,
+                     "tier_label": REPORT_PRICES.get(r.tier, {}).get("label", r.tier),
                      "status": _effective_status(r.status, r.created_at),
                      "report_url": f"/report/{r.check_id}"} for r in reports],
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
