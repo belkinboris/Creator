@@ -121,21 +121,35 @@ DEMAND_DATA_FIXTURE = {
 }
 
 
-def _report_body(keys, risk_count=2) -> dict:
+def _core_body(risk_count=2) -> dict:
     return {
         "viability_score": 62,
         "viability_summary": "Спрос подтверждён, но ниша уже занята двумя игроками.",
-        "top_risks": [{"title": f"Риск {i}", "body": f"Объяснение риска {i}."} for i in range(risk_count)],
-        "sections": {k: "Абзац один.\n\nАбзац два." for k in keys},
+        "top_risks": [{"title": f"Риск {i}", "body": f"Объяснение риска {i}."}
+                      for i in range(risk_count)],
     }
 
 
+def _fake_llm(risk_count=2, body="Абзац один.\n\nАбзац два.", captured=None):
+    """Один фейк на оба вида вызова: движок ходит в модель отдельно за ядром
+    (балл + риски) и отдельно за каждым разделом."""
+    async def fake_post(provider, payload):
+        if captured is not None:
+            captured.setdefault("calls", []).append(dict(payload))
+            captured.update(payload)
+        if "Ты пишешь ОДИН раздел" in payload.get("instructions", ""):
+            return _yandex_response(json.dumps({"body": body}, ensure_ascii=False))
+        return _yandex_response(json.dumps(_core_body(risk_count), ensure_ascii=False))
+    return fake_post
+
+
 class TestReportEngine:
-    """Движок платного отчёта -- та же дисциплина, что offer_engine.py:
-    честный LLM-вызов, строго провалидированный выход. Использует более
-    сильную модель Yandex AI Studio (см. _call_llm), а не Anthropic/Claude --
-    трансграничная передача данных запрещена для проекта (152-ФЗ), и Claude
-    в любом случае заблокирован Роскомнадзором."""
+    """Движок платного отчёта. Генерация ПОСЕКЦИОННАЯ: раньше весь отчёт был
+    одним вызовом с бюджетом 12 000 токенов на всё сразу, и модель под таким
+    прессом недодавала последним разделам. Владелец сравнил результат с
+    dimeadozen.ai: «не стоит и 10 рублей»."""
+
+    IDEA = "Сервис отвечает на отзывы за селлеров маркетплейсов"
 
     def test_short_idea_rejected(self):
         from app.report_engine import generate_report, ReportEngineError
@@ -145,151 +159,171 @@ class TestReportEngine:
     def test_uses_dedicated_stronger_yandex_model(self):
         """Не Anthropic -- отдельная, более сильная модель внутри того же
         Yandex-провайдера, что и остальной проект."""
-        from app.report_engine import generate_report, QUICK_KEYS, SOZDATEL_REPORT_MODEL
-        captured = {}
-        async def fake_post(provider, payload):
-            assert provider == "yandex"
-            captured.update(payload)
-            return _yandex_response(json.dumps(_report_body(QUICK_KEYS, 2), ensure_ascii=False))
-        asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
-                                    DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
-        assert captured["model"] == f"gpt://test-folder/{SOZDATEL_REPORT_MODEL}"
+        from app.report_engine import generate_core, SOZDATEL_REPORT_MODEL
+        cap = {}
+        asyncio.run(generate_core(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                  _post=_fake_llm(captured=cap)))
+        assert cap["model"] == f"gpt://test-folder/{SOZDATEL_REPORT_MODEL}"
 
-    def test_quick_tier_returns_four_sections_and_two_risks(self):
+    def test_each_section_is_its_own_call(self):
+        """Суть переделки: раздел = отдельный вызов со своим бюджетом токенов.
+        Одним запросом объём конкурента физически не выдаётся."""
         from app.report_engine import generate_report, QUICK_KEYS
-        async def fake_post(provider, payload):
-            return _yandex_response(json.dumps(_report_body(QUICK_KEYS, 2), ensure_ascii=False))
-        out = asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
-                                          DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
+        cap = {}
+        asyncio.run(generate_report(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                    _post=_fake_llm(captured=cap)))
+        section_calls = [c for c in cap["calls"]
+                         if "Ты пишешь ОДИН раздел" in c["instructions"]]
+        assert len(section_calls) == len(QUICK_KEYS)
+        assert len(cap["calls"]) == len(QUICK_KEYS) + 1        # + ядро
+
+    def test_section_budget_is_per_section_not_per_report(self):
+        from app.report_engine import MAX_TOKENS_SECTION, section_keys
+        # суммарно на порядок больше, чем прежние 12 000 на весь отчёт
+        assert MAX_TOKENS_SECTION * len(section_keys("full")) > 12000 * 4
+
+    def test_quick_tier_is_a_short_read(self):
+        from app.report_engine import generate_report, QUICK_KEYS
+        out = asyncio.run(generate_report(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                          _post=_fake_llm(2)))
         assert [s["key"] for s in out["sections"]] == QUICK_KEYS
         assert len(out["top_risks"]) == 2
         assert out["viability_score"] == 62
 
-    def test_full_tier_returns_all_eight_sections_and_three_risks(self):
+    def test_full_tier_is_much_wider_than_before(self):
+        """Было 8 разделов на весь платный тариф — мало для 2990 ₽."""
         from app.report_engine import generate_report, ALL_SECTIONS
-        keys = [k for k, _ in ALL_SECTIONS]
-        async def fake_post(provider, payload):
-            return _yandex_response(json.dumps(_report_body(keys, 3), ensure_ascii=False))
-        out = asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
-                                          DEMAND_DATA_FIXTURE, "full", _post=fake_post))
-        assert len(out["sections"]) == 8
-        assert len(out["top_risks"]) == 3
+        out = asyncio.run(generate_report(self.IDEA, DEMAND_DATA_FIXTURE, "full",
+                                          _post=_fake_llm(4)))
+        assert len(ALL_SECTIONS) >= 20
+        assert len(out["sections"]) == len(ALL_SECTIONS)
+        assert len(out["top_risks"]) == 4
+
+    def test_sections_are_grouped(self):
+        """Плоский список из 20 разделов невозможно читать — нужны группы."""
+        from app.report_engine import SECTION_GROUPS, ALL_SECTIONS
+        assert len(SECTION_GROUPS) >= 4
+        assert sum(len(keys) for _, keys in SECTION_GROUPS) == len(ALL_SECTIONS)
+
+    def test_every_section_has_its_own_question(self):
+        """Общий промпт «напиши про рынок» даёт пересказ идеи. Вопрос, на
+        который раздел обязан ответить, — это и есть разница."""
+        from app.report_engine import SECTION_SPECS
+        for s in SECTION_SPECS:
+            assert s["ask"].endswith("?"), s["key"]
+            assert len(s["must"]) > 80, s["key"]
+
+    def test_section_prompt_forbids_retelling_the_idea(self):
+        from app.report_engine import _section_prompt
+        prompt = _section_prompt("summary", "full")
+        assert "Не пересказывай идею" in prompt
+        assert "маркетингового жаргона" in prompt
 
     def test_finance_section_must_demand_concrete_numbers(self):
         """Лендинги продают «обоснование сметы» и «финансовую модель» -- промпт
-        не имеет права разрешать модели отказаться считать. Раньше он прямо
-        давал лазейку («мало данных для расчёта -- так и пиши»), и человек,
-        заплативший за расчёт, получал отказ его сделать."""
-        from app.report_engine import _system_prompt, PURPOSES
+        не имеет права разрешать модели отказаться считать."""
+        from app.report_engine import _section_prompt, PURPOSES
         for purpose in PURPOSES:
-            prompt = _system_prompt("full", purpose)
+            prompt = _section_prompt("finance", "full", purpose)
             assert "Отказ считать" in prompt and "недопустим" in prompt
-            assert "мало данных для" not in prompt   # старая лазейка убрана
-            assert "допущения" in prompt             # честность: числа с допущениями
+            assert "допущения" in prompt
 
     def test_social_contract_prompt_drops_venture_optics(self):
         """Самозанятая, которой нужна выплата на пошив штор, не должна
-        оцениваться критериями венчурного фонда: там «не масштабируется»
-        означает низкий балл и вердикт «не запускать» -- бесполезно и
-        деморализующе для человека, которому надо защитить смету."""
-        from app.report_engine import _system_prompt, PURPOSE_SOCIAL_CONTRACT, PURPOSE_BUSINESS
-        soc = _system_prompt("full", PURPOSE_SOCIAL_CONTRACT)
-        biz = _system_prompt("full", PURPOSE_BUSINESS)
-        assert "венчурного фонда" in biz          # для фаундера оптика остаётся
+        оцениваться критериями венчурного фонда."""
+        from app.report_engine import (_section_prompt, PURPOSE_SOCIAL_CONTRACT,
+                                       PURPOSE_BUSINESS)
+        soc = _section_prompt("finance", "full", PURPOSE_SOCIAL_CONTRACT)
+        biz = _section_prompt("finance", "full", PURPOSE_BUSINESS)
+        assert "венчурного фонда" in biz
         assert "венчурного фонда" not in soc
         assert "комиссии" in soc and "350 000" in soc
-        assert "смета расходов" in soc            # то, что комиссия и проверяет
-        assert "отчитаться перед соцзащитой" in soc
-        # честность не приносится в жертву удобству
+        assert "смета расходов" in soc
         assert "скажи прямо" in soc
 
     def test_social_contract_launch_plan_is_not_creator_funnel(self):
-        """План запуска для соцконтракта -- регистрация, закупка по смете,
-        первые клиенты и отчётность, а не воронка Создателя: человек уже
-        получил деньги на конкретное дело, гипотезы ему проверять незачем."""
-        from app.report_engine import _system_prompt, PURPOSE_SOCIAL_CONTRACT, STAGE_NAMES
-        soc = _system_prompt("full", PURPOSE_SOCIAL_CONTRACT)
-        assert STAGE_NAMES[2] not in soc          # «Тест на реальных людях» не навязываем
+        from app.report_engine import _section_prompt, PURPOSE_SOCIAL_CONTRACT, STAGE_NAMES
+        soc = _section_prompt("launch", "full", PURPOSE_SOCIAL_CONTRACT)
+        assert STAGE_NAMES[2] not in soc
         assert "самозанятого или ИП" in soc
+        assert "отчитаться перед соцзащитой" in soc
 
     def test_business_launch_plan_references_existing_stage(self):
         """Регрессия слияния этапов: промпт велел начинать план с
-        «Проверочной страницы», которой в STAGE_NAMES больше нет -- модель
-        получала указание на несуществующий шаг."""
-        from app.report_engine import _system_prompt, PURPOSE_BUSINESS, STAGE_NAMES
-        biz = _system_prompt("full", PURPOSE_BUSINESS)
+        «Проверочной страницы», которой в STAGE_NAMES больше нет."""
+        from app.report_engine import _section_prompt, PURPOSE_BUSINESS, STAGE_NAMES
+        biz = _section_prompt("launch", "full", PURPOSE_BUSINESS)
         assert "Проверочная страница" not in biz
         assert STAGE_NAMES[2] in biz
 
+    def test_social_contract_renames_venture_flavoured_sections(self):
+        """«Что мешает скопировать» для швеи на дому — вопрос не про патенты."""
+        from app.report_engine import section_title, PURPOSE_SOCIAL_CONTRACT, PURPOSE_BUSINESS
+        assert section_title("moat", PURPOSE_BUSINESS) != section_title("moat", PURPOSE_SOCIAL_CONTRACT)
+        assert "вернутся" in section_title("moat", PURPOSE_SOCIAL_CONTRACT)
+
     def test_unknown_purpose_falls_back_to_business(self):
-        from app.report_engine import _system_prompt, PURPOSE_BUSINESS
-        assert _system_prompt("full", "чепуха") == _system_prompt("full", PURPOSE_BUSINESS)
+        from app.report_engine import _section_prompt, PURPOSE_BUSINESS
+        assert _section_prompt("summary", "full", "чепуха") == \
+               _section_prompt("summary", "full", PURPOSE_BUSINESS)
 
     def test_purpose_reaches_the_model_prompt(self):
-        """Сквозная проверка: purpose доходит до реального вызова LLM,
-        а не теряется по дороге."""
-        from app.report_engine import generate_report, ALL_SECTIONS, PURPOSE_SOCIAL_CONTRACT
-        keys = [k for k, _ in ALL_SECTIONS]
-        captured = {}
-        async def fake_post(provider, payload):
-            captured.update(payload)
-            return _yandex_response(json.dumps(_report_body(keys, 3), ensure_ascii=False))
-        asyncio.run(generate_report("Пошив штор и постельного белья на заказ на дому",
-                                    DEMAND_DATA_FIXTURE, "full",
-                                    purpose=PURPOSE_SOCIAL_CONTRACT, _post=fake_post))
-        # промпт многострочный -- сравниваем без переносов
-        flat = " ".join(captured["instructions"].split())
+        from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
+        cap = {}
+        asyncio.run(generate_section("finance", "Пошив штор на заказ на дому",
+                                     DEMAND_DATA_FIXTURE, "full",
+                                     purpose=PURPOSE_SOCIAL_CONTRACT,
+                                     _post=_fake_llm(captured=cap)))
+        flat = " ".join(cap["instructions"].split())
         assert "комиссии по социальному контракту" in flat
 
-    def test_missing_section_rejected(self):
-        from app.report_engine import generate_report, ReportEngineError, QUICK_KEYS
-        async def fake_post(provider, payload):
-            body = _report_body(QUICK_KEYS[:-1], 2)   # не хватает одной секции
-            return _yandex_response(json.dumps(body, ensure_ascii=False))
+    def test_section_outside_the_tier_rejected(self):
+        """Дешёвый тариф не должен отдавать разделы полного."""
+        from app.report_engine import generate_section, ReportEngineError
         with pytest.raises(ReportEngineError):
-            asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
-                                        DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
+            asyncio.run(generate_section("finance", self.IDEA, DEMAND_DATA_FIXTURE,
+                                         "quick", _post=_fake_llm()))
+
+    def test_empty_section_body_rejected(self):
+        from app.report_engine import generate_section, ReportEngineError
+        with pytest.raises(ReportEngineError):
+            asyncio.run(generate_section("summary", self.IDEA, DEMAND_DATA_FIXTURE,
+                                         "quick", _post=_fake_llm(body="   ")))
 
     def test_missing_viability_score_rejected(self):
-        from app.report_engine import generate_report, ReportEngineError, QUICK_KEYS
+        from app.report_engine import generate_core, ReportEngineError
         async def fake_post(provider, payload):
-            body = _report_body(QUICK_KEYS, 2)
+            body = _core_body(2)
             del body["viability_score"]
             return _yandex_response(json.dumps(body, ensure_ascii=False))
         with pytest.raises(ReportEngineError):
-            asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
-                                        DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
+            asyncio.run(generate_core(self.IDEA, DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
 
     def test_too_few_risks_rejected(self):
-        from app.report_engine import generate_report, ReportEngineError, QUICK_KEYS
-        async def fake_post(provider, payload):
-            return _yandex_response(json.dumps(_report_body(QUICK_KEYS, 1), ensure_ascii=False))   # нужно 2 для quick
+        from app.report_engine import generate_core, ReportEngineError
         with pytest.raises(ReportEngineError):
-            asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
-                                        DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
+            asyncio.run(generate_core(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                      _post=_fake_llm(1)))
 
     def test_truncated_json_retried_once_then_ok(self):
-        from app.report_engine import generate_report, QUICK_KEYS
+        from app.report_engine import generate_core
         calls = {"n": 0}
         async def fake_post(provider, payload):
             calls["n"] += 1
             if calls["n"] == 1:
-                return _yandex_response('{"sections": {"summary": "обрыв')   # битый JSON
-            return _yandex_response(json.dumps(_report_body(QUICK_KEYS, 2), ensure_ascii=False))
-        out = asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
-                                          DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
-        assert calls["n"] == 2 and len(out["sections"]) == 4
+                return _yandex_response('{"viability_score": 62, "viabil')   # битый JSON
+            return _yandex_response(json.dumps(_core_body(2), ensure_ascii=False))
+        out = asyncio.run(generate_core(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                        _post=fake_post))
+        assert out["viability_score"] == 62 and calls["n"] == 2
 
     def test_uses_real_demand_numbers_in_context(self):
         """Отличие от дженерик-генераторов -- реальные цифры уходят в промпт."""
-        from app.report_engine import generate_report, QUICK_KEYS
-        captured = {}
-        async def fake_post(provider, payload):
-            captured.update(payload)
-            return _yandex_response(json.dumps(_report_body(QUICK_KEYS, 2), ensure_ascii=False))
-        asyncio.run(generate_report("Сервис отвечает на отзывы за селлеров маркетплейсов",
-                                    DEMAND_DATA_FIXTURE, "quick", _post=fake_post))
-        user_content = captured["input"]
+        from app.report_engine import generate_section
+        cap = {}
+        asyncio.run(generate_section("market", self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                     _post=_fake_llm(captured=cap)))
+        user_content = cap["input"]
         assert "5200" in user_content or "5 200" in user_content
         assert "t.ru" in user_content
 
@@ -1702,7 +1736,8 @@ class TestReportFlow:
         rid = self._make_check()
         text = client.get(f"/report/{rid}").text
         assert "4 200" in text or "4200" in text   # частотность в тизере, без LLM
-        assert "Резюме проекта" in text and "Вердикт" in text
+        from app.report_engine import section_title
+        assert section_title("summary") in text and section_title("verdict") in text
         assert "оффер" not in text.lower() and "лендинг" not in text.lower()
 
     def test_free_preview_includes_verdict_and_competitor_names(self):
@@ -1767,19 +1802,35 @@ class TestReportFlow:
             order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == "@unlock_test")).first()
             order.status = "paid"; s.add(order); s.commit(); oid = order.id
 
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose='business'):
-            return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "Тестовый текст отчёта."}]}
-        monkeypatch.setattr(m, "generate_report", fake_generate)
+        calls = {"core": 0, "sections": 0}
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            calls["core"] += 1
+            return {"viability_score": 62, "viability_summary": "Ниша занята.",
+                    "top_risks": [{"title": "Риск", "body": "Объяснение."}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            calls["sections"] += 1
+            return {"key": key, "title": "Резюме", "body": "Тестовый текст отчёта."}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
 
+        # страница отдаётся сразу: ядро есть, разделы придут отдельными запросами
         text = client.get(f"/report/{rid}").text
-        assert "Тестовый текст отчёта." in text
+        assert "Ниша занята." in text
+        assert calls["core"] == 1 and calls["sections"] == 0
         with Session(engine) as s:
-            assert s.get(ReportPurchase, oid).report_json   # сохранён после генерации
+            assert s.get(ReportPurchase, oid).report_json   # ядро сохранено
 
-        # повторный визит не должен звать LLM снова -- report_json уже есть
-        monkeypatch.setattr(m, "generate_report", None)
-        text2 = client.get(f"/report/{rid}").text
-        assert "Тестовый текст отчёта." in text2
+        r = client.post(f"/api/report/{rid}/section?key=summary")
+        assert r.status_code == 200
+        assert r.json()["section"]["body"] == "Тестовый текст отчёта."
+
+        # повторный визит не должен звать модель снова -- всё уже сохранено
+        monkeypatch.setattr(m, "generate_core", None)
+        monkeypatch.setattr(m, "generate_section", None)
+        assert "Тестовый текст отчёта." in client.get(f"/report/{rid}").text
+        assert client.post(f"/api/report/{rid}/section?key=summary").json()["cached"] is True
 
     def test_report_generation_failure_shows_friendly_error(self, monkeypatch):
         import app.main as m
@@ -1793,7 +1844,7 @@ class TestReportFlow:
 
         async def failing(idea, demand_data, tier, chosen_offer=None, purpose='business'):
             raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
-        monkeypatch.setattr(m, "generate_report", failing)
+        monkeypatch.setattr(m, "generate_core", failing)
         text = client.get(f"/report/{rid}").text
         assert "Не получилось собрать отчёт" in text
 
@@ -1959,10 +2010,10 @@ class TestSocialContractPurpose:
             order = s.exec(select(ReportPurchase).where(ReportPurchase.contact == "@soc_purpose")).first()
             order.status = "paid"; s.add(order); s.commit()
         seen = {}
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             seen["purpose"] = purpose
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
-        monkeypatch.setattr(m, "generate_report", fake_generate)
+        monkeypatch.setattr(m, "generate_core", fake_generate)
         client.get(f"/report/{rid}")
         assert seen["purpose"] == "social_contract"
 
@@ -2280,9 +2331,9 @@ class TestOwnerLearnsAboutOrders:
         client.post("/api/yookassa/webhook", json={"object": {"id": "pay_a2b"}})
         assert len(sent) == 1 and "оплачено" in sent[0][0]
 
-        async def failing(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def failing(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
-        monkeypatch.setattr(m, "generate_report", failing)
+        monkeypatch.setattr(m, "generate_core", failing)
         client.get(f"/report/{rid}")
         assert len(sent) == 2                      # письмо о сбое всё-таки ушло
         assert "не собрался" in sent[1][0]
@@ -2339,9 +2390,9 @@ class TestPaidReportFailureIsNoticed:
     def _break_generation(self, monkeypatch):
         import app.main as m
         from app.report_engine import ReportEngineError
-        async def failing(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def failing(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
-        monkeypatch.setattr(m, "generate_report", failing)
+        monkeypatch.setattr(m, "generate_core", failing)
 
     def test_failure_is_recorded_and_owner_notified_once(self, monkeypatch):
         import app.main as m
@@ -3157,10 +3208,10 @@ class TestChosenOfferReachesReport:
         client.post(f"/api/demand/{rid}/chosen", json={"offer": self.OFFER})
         self._pay_report(rid, f"chosen{rid}@example.com")
         seen = {}
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             seen["offer"] = chosen_offer
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
-        monkeypatch.setattr(m, "generate_report", fake_generate)
+        monkeypatch.setattr(m, "generate_core", fake_generate)
         client.get(f"/report/{rid}")
         assert seen["offer"] is not None
         assert seen["offer"]["h1"] == self.OFFER["h1"]
@@ -3172,10 +3223,10 @@ class TestChosenOfferReachesReport:
         rid = self._make_check()
         self._pay_report(rid, f"nochoice{rid}@example.com")
         seen = {}
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             seen["offer"] = chosen_offer
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
-        monkeypatch.setattr(m, "generate_report", fake_generate)
+        monkeypatch.setattr(m, "generate_core", fake_generate)
         assert client.get(f"/report/{rid}").status_code == 200
         assert seen["offer"] is None
 
@@ -3187,10 +3238,10 @@ class TestChosenOfferReachesReport:
         with Session(engine) as s:
             rec = s.get(DemandCheck, rid); rec.chosen_offer = "{не json"; s.add(rec); s.commit()
         self._pay_report(rid, f"broken{rid}@example.com")
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             assert chosen_offer is None
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
-        monkeypatch.setattr(m, "generate_report", fake_generate)
+        monkeypatch.setattr(m, "generate_core", fake_generate)
         assert client.get(f"/report/{rid}").status_code == 200
 
     def test_saved_check_of_another_cabinet_is_protected(self):
@@ -3631,7 +3682,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__RESULT_JSON__", "__SAVED__", "__PURPOSE_JSON__", "__CHOSEN_BLOCK__",
             "__PREVIEW_JSON__", "__REPORT_JSON__", "__UNLOCKED_TIER__", "__ORDER_STATUS__",
             "__GEN_ERROR__", "__PRICES_JSON__", "__SECTIONS_JSON__", "__QUICK_KEYS_JSON__",
-            "__OWNER_BAR__",
+            "__OWNER_BAR__", "__TIER_KEYS_JSON__",
             "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
         }
@@ -3685,12 +3736,20 @@ class TestOwnerReportPreview:
 
     def _stub_generate(self, monkeypatch, seen=None):
         import app.main as m
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
             if seen is not None:
                 seen.update({"tier": tier, "purpose": purpose, "idea": idea})
-            return {"sections": [{"key": "summary", "title": "Резюме проекта",
-                                  "body": "Разбор идеи по данным проверки."}]}
-        monkeypatch.setattr(m, "generate_report", fake_generate)
+            return {"viability_score": 62,
+                    "viability_summary": "Разбор идеи по данным проверки.",
+                    "top_risks": [{"title": "Риск", "body": "Объяснение."}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            if seen is not None:
+                seen.update({"tier": tier, "purpose": purpose, "idea": idea})
+            return {"key": key, "title": "Раздел", "body": "Разбор идеи по данным проверки."}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
 
     def test_owner_gets_the_full_plan_without_paying(self, monkeypatch):
         seen = {}
@@ -3743,10 +3802,10 @@ class TestOwnerReportPreview:
         уже собранное."""
         import app.main as m
         calls = []
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def fake_generate(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             calls.append(tier)
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "т"}]}
-        monkeypatch.setattr(m, "generate_report", fake_generate)
+        monkeypatch.setattr(m, "generate_core", fake_generate)
         rid = self._check()
         client.get(f"/report/{rid}?preview=full", headers=OWNER)
         client.get(f"/report/{rid}?preview=full", headers=OWNER)
@@ -3772,9 +3831,9 @@ class TestOwnerReportPreview:
         прогон владельцу писать не надо."""
         import app.main as m
         sent = []
-        async def boom(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+        async def boom(idea, demand_data, tier="full", chosen_offer=None, purpose="business", **kw):
             raise m.ReportEngineError("модель недоступна")
-        monkeypatch.setattr(m, "generate_report", boom)
+        monkeypatch.setattr(m, "generate_core", boom)
         monkeypatch.setattr(m.mailer, "notify_owner", lambda *a, **k: sent.append(a) or True)
         rid = self._check()
         assert client.get(f"/report/{rid}?preview=full", headers=OWNER).status_code == 200
@@ -3860,11 +3919,18 @@ class TestPublicReportExample:
 
     def _built_report(self, monkeypatch, body="Смета расходов построчно."):
         import app.main as m
-        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
-            return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": body}]}
-        monkeypatch.setattr(m, "generate_report", fake_generate)
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            return {"viability_score": 62, "viability_summary": "Ядро отчёта.",
+                    "top_risks": [{"title": "Риск", "body": "Объяснение."}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            return {"key": key, "title": "Резюме", "body": body}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
         rid = self._check()
-        client.get(f"/report/{rid}?preview=full", headers=OWNER)   # собрали владельческим прогоном
+        client.get(f"/report/{rid}?preview=full", headers=OWNER)   # ядро
+        client.post(f"/api/report/{rid}/section?key=summary", headers=OWNER)   # раздел
         return rid
 
     def _clear_examples(self):
@@ -4096,3 +4162,147 @@ class TestOfferCoversWhatWeSell:
             text = client.get(url).text
             assert "вернём деньги полностью" in text, url
             assert 'href="/oferta"' in text, url
+
+
+class TestReportBuildsProgressively:
+    """Разделов больше двух десятков, и каждый — свой вызов модели. Собирать
+    их все внутри HTTP-запроса значит держать человека на белом экране
+    минутами: страница отдаётся с ядром, разделы подтягиваются по одному."""
+
+    def _paid_check(self, monkeypatch, tier="full"):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "п", "count": 10}], "best_phrase": "п",
+                    "verdict": {"level": "niche", "text": "т"},
+                    "competitors": {"found": 1, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        contact = f"prog{rid}@example.com"
+        client.post("/api/report", json={"check_id": rid, "tier": tier, "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = "paid"; s.add(o); s.commit()
+        return rid
+
+    def _stub(self, monkeypatch, calls=None):
+        import app.main as m
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            if calls is not None:
+                calls.append("core")
+            return {"viability_score": 55, "viability_summary": "Ядро.",
+                    "top_risks": [{"title": "Риск", "body": "Объяснение."}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            if calls is not None:
+                calls.append(key)
+            return {"key": key, "title": f"Раздел {key}", "body": f"Текст {key}."}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
+
+    def test_page_does_not_wait_for_all_sections(self, monkeypatch):
+        """Главное: открытие страницы стоит ОДНОГО вызова модели, не двадцати."""
+        calls = []
+        self._stub(monkeypatch, calls)
+        rid = self._paid_check(monkeypatch)
+        assert client.get(f"/report/{rid}").status_code == 200
+        assert calls == ["core"]
+
+    def test_sections_arrive_one_by_one(self, monkeypatch):
+        from app.report_engine import section_keys
+        calls = []
+        self._stub(monkeypatch, calls)
+        rid = self._paid_check(monkeypatch)
+        client.get(f"/report/{rid}")
+        for key in section_keys("full")[:3]:
+            r = client.post(f"/api/report/{rid}/section?key={key}")
+            assert r.status_code == 200, key
+            assert r.json()["section"]["body"] == f"Текст {key}."
+        assert calls == ["core"] + section_keys("full")[:3]
+
+    def test_finished_section_is_not_regenerated(self, monkeypatch):
+        """Каждый повтор — деньги за вызов модели."""
+        calls = []
+        self._stub(monkeypatch, calls)
+        rid = self._paid_check(monkeypatch)
+        client.get(f"/report/{rid}")
+        client.post(f"/api/report/{rid}/section?key=summary")
+        again = client.post(f"/api/report/{rid}/section?key=summary")
+        assert again.json()["cached"] is True
+        assert calls.count("summary") == 1
+
+    def test_sections_are_stored_in_reading_order(self, monkeypatch):
+        """Дозаказ идёт как попало (перезагрузили вкладку в середине) — в
+        сохранённом отчёте порядок обязан остаться читаемым."""
+        import json as _json
+        from app.main import ReportPurchase, Session, engine, select
+        from app.report_engine import section_keys
+        self._stub(monkeypatch)
+        rid = self._paid_check(monkeypatch)
+        client.get(f"/report/{rid}")
+        order = section_keys("full")
+        for key in (order[3], order[0], order[1]):
+            client.post(f"/api/report/{rid}/section?key={key}")
+        with Session(engine) as s:
+            row = s.exec(select(ReportPurchase).where(
+                ReportPurchase.check_id == rid)).first()
+            stored = [x["key"] for x in _json.loads(row.report_json)["sections"]]
+        assert stored == [order[0], order[1], order[3]]
+
+    def test_section_needs_a_paid_report(self, monkeypatch):
+        """Иначе платные разделы забираются по одному без оплаты."""
+        import app.main as m
+        self._stub(monkeypatch)
+        async def fake_check(idea):
+            return {"formulations": [], "best_phrase": "п",
+                    "verdict": {"level": "niche", "text": "т"},
+                    "competitors": {"found": 1, "top": []},
+                    "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея без оплаты отчёта"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        assert client.post(f"/api/report/{rid}/section?key=summary").status_code == 403
+
+    def test_cheap_tier_cannot_pull_full_tier_sections(self, monkeypatch):
+        self._stub(monkeypatch)
+        rid = self._paid_check(monkeypatch, tier="quick")
+        client.get(f"/report/{rid}")
+        assert client.post(f"/api/report/{rid}/section?key=finance").status_code == 404
+        assert client.post(f"/api/report/{rid}/section?key=summary").status_code == 200
+
+    def test_one_broken_section_does_not_break_the_report(self, monkeypatch):
+        """Сбой одного раздела не должен выглядеть как сбой всего отчёта."""
+        import app.main as m
+        self._stub(monkeypatch)
+        rid = self._paid_check(monkeypatch)
+        client.get(f"/report/{rid}")
+        client.post(f"/api/report/{rid}/section?key=summary")
+        async def boom(key, *a, **kw):
+            raise m.ReportEngineError("модель недоступна")
+        monkeypatch.setattr(m, "generate_section", boom)
+        r = client.post(f"/api/report/{rid}/section?key=market")
+        assert r.status_code == 502 and "недоступна" in r.json()["error"]
+        # уже собранный раздел на месте
+        assert "Текст summary." in client.get(f"/report/{rid}").text
+
+    def test_locked_section_shows_its_question(self):
+        """Запертый раздел продаёт вопросом, на который отвечает, а не
+        общей фразой «полный разбор в отчёте»."""
+        text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
+        assert "s.ask" in text
+        assert "const TEASER" not in text          # общих описаний больше нет
+
+    def test_page_shows_build_progress(self):
+        text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
+        assert 'id="build-progress"' in text
+        assert "Можно читать уже готовые разделы" in text

@@ -58,7 +58,8 @@ engine = create_engine(DATABASE_URL, **_engine_kwargs)
 from app.offer_engine import OfferEngineError, sharpen_idea  # noqa: E402
 from app.demand import DemandError, check_demand, generate_idea, diagnose  # noqa: E402
 from app.report_engine import (  # noqa: E402
-    ReportEngineError, generate_report, ALL_SECTIONS, QUICK_KEYS,
+    ReportEngineError, generate_core, generate_section, generate_report,
+    ALL_SECTIONS, QUICK_KEYS, SECTION_GROUPS, section_keys, section_title,
     PURPOSES as report_purposes,
 )
 from app import payments  # noqa: E402
@@ -76,6 +77,7 @@ def utcnow() -> datetime:
 # лету при чтении (created_at + порог < сейчас), не мутирует БД: ни воркеров,
 # ни крона нет, статус просто перестаёт звать на оплату уже неживую ссылку.
 PENDING_PAYMENT_TIMEOUT_MINUTES = 20
+PURPOSE_DEFAULT = "business"
 
 # Пороги вердикта теста на реальных людях -- ЕДИНСТВЕННЫЙ источник правды.
 # Раньше числа были зашиты в модель, а витрины называли совсем другие: главная
@@ -849,6 +851,22 @@ def _owner_preview(check_id: int, tier: str) -> None:
         s.commit()
 
 
+def _sections_meta(purpose: str) -> list[dict]:
+    """Состав отчёта для страницы: заголовок, группа и ВОПРОС раздела.
+
+    Вопрос показывается на запертом разделе вместо общей фразы «полный разбор
+    в отчёте»: «Сколько остаётся с одной продажи после всех расходов на неё?»
+    продаёт лучше любого описания, потому что человек хочет знать ответ.
+    """
+    from app.report_engine import SECTION_SPECS, _spec
+    out = []
+    for s in SECTION_SPECS:
+        merged = _spec(s["key"], purpose)
+        out.append({"key": s["key"], "title": merged["title"],
+                    "group": s["group"], "ask": merged["ask"]})
+    return out
+
+
 def _chosen_offer(rec: "DemandCheck") -> dict | None:
     """Заострение, выбранное на /r/. Битый JSON не имеет права уронить
     платный отчёт -- лучше собрать разбор по исходной идее, чем не собрать."""
@@ -859,6 +877,59 @@ def _chosen_offer(rec: "DemandCheck") -> dict | None:
     except ValueError:
         return None
     return offer if isinstance(offer, dict) else None
+
+
+@app.post("/api/report/{rid}/section")
+async def report_section(rid: int, request: Request, key: str):
+    """Собрать ОДИН раздел отчёта и дописать его в уже сохранённый разбор.
+
+    Разделов больше двух десятков, и каждый — свой вызов модели со своим
+    бюджетом токенов (иначе объёма не будет, см. докстринг report_engine).
+    Страница просит их по одному и показывает по мере готовности, вместо
+    того чтобы держать человека на пустом экране, пока соберётся всё.
+    """
+    owner = _is_owner(request)
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec or not rec.result_json:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+        purchase = _best_report_purchase(s, rid, include_preview=owner)
+        if not purchase:
+            return JSONResponse({"ok": False, "error": "Раздел доступен после оплаты."},
+                                status_code=403)
+        if key not in section_keys(purchase.tier):
+            return JSONResponse({"ok": False, "error": "Такого раздела нет в вашем тарифе."},
+                                status_code=404)
+        stored = json.loads(purchase.report_json) if purchase.report_json else {"sections": []}
+        for sec in stored.get("sections", []):
+            if sec.get("key") == key:
+                return {"ok": True, "section": sec, "cached": True}
+        idea, tier, purpose = rec.idea, purchase.tier, rec.purpose
+        chosen, purchase_id = _chosen_offer(rec), purchase.id
+        demand_data = json.loads(rec.result_json)
+
+    try:
+        section = await generate_section(key, idea, demand_data, tier,
+                                         chosen_offer=chosen, purpose=purpose)
+    except ReportEngineError as e:
+        # Сбой одного раздела не должен выглядеть как сбой всего отчёта:
+        # остальные уже собраны и читаются.
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+
+    with Session(engine) as s:
+        fresh = s.get(ReportPurchase, purchase_id)
+        data = json.loads(fresh.report_json) if fresh.report_json else {"sections": []}
+        sections = data.get("sections") or []
+        # Перечитываем перед записью: две вкладки могли попросить разные
+        # разделы одновременно, и терять чужой результат нельзя.
+        if not any(x.get("key") == key for x in sections):
+            sections.append(section)
+            order = section_keys(fresh.tier)
+            sections.sort(key=lambda x: order.index(x["key"]) if x["key"] in order else 99)
+            data["sections"] = sections
+            fresh.report_json = json.dumps(data, ensure_ascii=False)
+            s.add(fresh); s.commit()
+    return {"ok": True, "section": section}
 
 
 @app.post("/api/example/publish")
@@ -908,6 +979,8 @@ def example_page(request: Request):
     note = (f'<div class="example-note">Это настоящий отчёт, собранный сервисом — '
             f'тариф «{html.escape(REPORT_PRICES.get(tier, {}).get("label", tier))}», '
             f'открыт целиком. Ваш будет по вашей идее и вашим цифрам спроса.</div>')
+    _purpose = rec.purpose if rec else PURPOSE_DEFAULT
+    _tier_keys = section_keys(tier)
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(ex.check_id or 0))
@@ -920,7 +993,8 @@ def example_page(request: Request):
         .replace("__ORDER_STATUS__", json.dumps("paid"))
         .replace("__GEN_ERROR__", json.dumps(""))
         .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
-        .replace("__SECTIONS_JSON__", json.dumps([{"key": k, "title": t} for k, t in ALL_SECTIONS], ensure_ascii=False))
+        .replace("__SECTIONS_JSON__", json.dumps(_sections_meta(_purpose), ensure_ascii=False))
+        .replace("__TIER_KEYS_JSON__", json.dumps(_tier_keys, ensure_ascii=False))
         .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out))
 
@@ -952,17 +1026,22 @@ async def report_page(rid: int, request: Request):
     if purchase:
         if not purchase.report_json:
             try:
-                # purpose определяет оптику отчёта: для соцконтракта это
-                # обоснование сметы для комиссии, а не венчурный разбор.
-                # chosen_offer -- заострение, выбранное человеком на /r/:
-                # разбирать надо ту формулировку, которую он выбрал, а не
-                # сырую первую фразу (A6 в PRODUCT_ROADMAP).
-                report = await generate_report(rec.idea, demand_data, purchase.tier,
-                                               chosen_offer=_chosen_offer(rec),
-                                               purpose=rec.purpose)
+                # Только ЯДРО отчёта — балл, объяснение и названные риски.
+                # Разделов больше двух десятков, и каждый теперь свой вызов
+                # модели: собирать их все внутри HTTP-запроса значит держать
+                # человека на белом экране минутами. Разделы дозаказывает сама
+                # страница по одному, см. /api/report/{id}/section.
+                #
+                # purpose определяет оптику: для соцконтракта это обоснование
+                # сметы для комиссии, а не венчурный разбор. chosen_offer --
+                # заострение, выбранное человеком на /r/ (A6 в PRODUCT_ROADMAP).
+                core = await generate_core(rec.idea, demand_data, purchase.tier,
+                                           chosen_offer=_chosen_offer(rec),
+                                           purpose=rec.purpose)
                 with Session(engine) as s:
                     fresh = s.get(ReportPurchase, purchase.id)
-                    fresh.report_json = json.dumps(report, ensure_ascii=False)
+                    fresh.report_json = json.dumps({**core, "sections": []},
+                                                   ensure_ascii=False)
                     s.add(fresh); s.commit(); s.refresh(fresh)
                     purchase = fresh
             except ReportEngineError as e:
@@ -1002,6 +1081,8 @@ async def report_page(rid: int, request: Request):
         owner_bar = (f'<div class="owner-bar">Владелец · {html.escape(state)}. '
                      f'Собрать без оплаты: {links}{pub}</div>')
 
+    _purpose = rec.purpose
+    _tier_keys = section_keys(purchase.tier) if purchase else []
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rid))
@@ -1014,7 +1095,8 @@ async def report_page(rid: int, request: Request):
         .replace("__ORDER_STATUS__", json.dumps(purchase.status if purchase else None))
         .replace("__GEN_ERROR__", json.dumps(gen_error, ensure_ascii=False))
         .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
-        .replace("__SECTIONS_JSON__", json.dumps([{"key": k, "title": t} for k, t in ALL_SECTIONS], ensure_ascii=False))
+        .replace("__SECTIONS_JSON__", json.dumps(_sections_meta(_purpose), ensure_ascii=False))
+        .replace("__TIER_KEYS_JSON__", json.dumps(_tier_keys, ensure_ascii=False))
         .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out))
 
