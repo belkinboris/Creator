@@ -2227,7 +2227,7 @@ class TestYandexMetrika:
         static_dir = main_module.BASE_DIR.parent / "static"
         for name in ("index.html", "social-contract.html"):
             text = (static_dir / name).read_text()
-            assert "reachGoal', 'demand_started'" in text, f"нет цели demand_started в {name}"
+            assert "sozGoal('demand_started'" in text, f"нет цели demand_started в {name}"
 
     def test_report_payment_goals_wired_and_no_reload_loop(self):
         text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
@@ -4438,3 +4438,86 @@ class TestFreeSampleSellsTheReport:
         text = client.get(f"/report/{rid}").text
         finance_ask = [s for s in SECTION_SPECS if s["key"] == "finance"][0]["ask"]
         assert finance_ask in text
+
+
+class TestFunnelMiddleIsMeasured:
+    """D1: между «начал проверку» и «оплатил» приборов не было. Для рекламы
+    это значит, что Директ оптимизируется на клики, а не на покупателей, и
+    непонятно, на каком шаге отваливается оплаченный трафик."""
+
+    STATIC = main_module.BASE_DIR.parent / "static"
+
+    def _all_static(self):
+        return {p.name: p.read_text() for p in self.STATIC.glob("*.html")}
+
+    def test_every_declared_goal_is_actually_sent(self):
+        """Цель, заведённая в Метрике, но не отправляемая кодом, — это молча
+        пустой отчёт, по которому владелец сделает неверный вывод."""
+        import app.main as m
+        blob = "\n".join(self._all_static().values())
+        missing = [name for name, _ in m.METRIKA_GOALS if f"'{name}'" not in blob]
+        assert not missing, f"цели объявлены, но не отправляются: {missing}"
+
+    def test_no_goal_is_sent_outside_the_registry(self):
+        """Обратная защита: отправляем цель, которой нет в списке — владелец
+        не заведёт её в Метрике и потеряет данные."""
+        import app.main as m, re
+        known = {name for name, _ in m.METRIKA_GOALS}
+        sent = set()
+        for text in self._all_static().values():
+            sent |= set(re.findall(r"sozGoal\(\s*'([a-z_]+)'", text))
+        assert sent <= known, f"цели вне реестра: {sorted(sent - known)}"
+
+    def test_middle_of_the_funnel_is_covered(self):
+        """Конкретные шаги, которых не хватало."""
+        pages = self._all_static()
+        assert "sozGoal('demand_done'" in pages["result.html"]
+        assert "sozGoal('sharpen_used'" in pages["result.html"]
+        assert "sozGoal('check_saved'" in pages["result.html"]
+        assert "sozGoal('live_test_ordered'" in pages["result.html"]
+        assert "sozGoal('report_order_started'" in pages["report.html"]
+        assert "'report_viewed'" in pages["report.html"]
+
+    def test_goals_carry_the_audience(self):
+        """Без purpose нельзя понять, какая кампания окупается: обе аудитории
+        идут по одним и тем же шагам (D3)."""
+        for name, text in self._all_static().items():
+            pos = 0
+            while (i := text.find("sozGoal(", pos)) != -1:
+                # берём весь оператор до «;» -- вызов бывает многострочным
+                stmt = text[i:text.find(";", i) + 1]
+                assert "purpose" in stmt, f"{name}: цель без аудитории — {stmt[:70]}"
+                pos = i + 1
+
+    def test_pages_do_not_call_metrika_directly(self):
+        """Каждая страница носила свою копию проверки на наличие счётчика, и
+        новая страница просто забывала её написать. Единственный вход —
+        sozGoal(), он же гасит ошибку, если счётчик не настроен."""
+        for name, text in self._all_static().items():
+            assert "reachGoal" not in text, f"{name} зовёт Метрику в обход sozGoal"
+
+    def test_helper_is_injected_with_the_counter(self, monkeypatch):
+        monkeypatch.setattr(main_module, "YANDEX_METRIKA_ID", "12345")
+        out = main_module._inject_metrika("<html><head></head><body></body></html>")
+        assert "window.sozGoal = function" in out
+        assert "'reachGoal', name, params" in out
+        assert "catch (e) {}" in out          # счётчик не ломает страницу
+
+    def test_no_helper_no_crash_when_counter_is_off(self, monkeypatch):
+        """Без SOZDATEL_YM_ID вставки нет вовсе — значит вызовы обязаны быть
+        защищены проверкой на самой странице."""
+        import re
+        monkeypatch.setattr(main_module, "YANDEX_METRIKA_ID", "")
+        assert "sozGoal" not in main_module._inject_metrika("<html><head></head></html>")
+        for name, text in self._all_static().items():
+            for call in re.finditer(r"window\.sozGoal\(", text):
+                head = text[max(0, call.start() - 120):call.start()]
+                assert "if (window.sozGoal)" in head, f"{name}: незащищённый вызов"
+
+    def test_goal_names_are_stable_identifiers(self):
+        """Имена заводит владелец руками в интерфейсе Метрики — пробел или
+        кириллица там обернутся молчащей целью."""
+        import app.main as m, re
+        for name, title in m.METRIKA_GOALS:
+            assert re.fullmatch(r"[a-z][a-z0-9_]*", name), name
+            assert title and title[0].isupper(), name

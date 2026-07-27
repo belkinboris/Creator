@@ -205,6 +205,12 @@ async function publishExample(checkId, tier){
 const CHECK_ID = __CHECK_ID__;
 const PREVIEW = __PREVIEW_JSON__;
 const SAMPLE = __SAMPLE_JSON__;
+const PURPOSE = __PURPOSE_JSON__;
+// Дошёл до витрины отчёта — ключевой шаг между бесплатной проверкой и
+// оплатой. Без него не видно, где именно отваливается рекламный трафик.
+if (window.sozGoal) window.sozGoal(
+  document.querySelector('.example-note') ? 'example_viewed' : 'report_viewed',
+  {purpose: PURPOSE});
 const REPORT = __REPORT_JSON__;
 const UNLOCKED_TIER = __UNLOCKED_TIER__;
 const ORDER_STATUS = __ORDER_STATUS__;
@@ -456,6 +462,7 @@ async function order(tier){
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || 'Не получилось. Попробуйте ещё раз.');
+    if (window.sozGoal) window.sozGoal('report_order_started', {purpose: PURPOSE, tier: tier});
     if (data.paid && data.confirmation_url) { location.href = data.confirmation_url; return; }
     statusEl.textContent = data.message; statusEl.classList.add('ok'); statusEl.style.display = 'block';
     statusEl.scrollIntoView({behavior:'smooth', block:'center'});
@@ -472,9 +479,9 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
     // иначе каждый повторный визит/reload задвоил бы конверсию в Метрике.
     const goalKey = `sozdatel_ym_report_${CHECK_ID}_${UNLOCKED_TIER}`;
     if (!localStorage.getItem(goalKey)) {
-      if (window.SOZDATEL_YM_ID && typeof ym === 'function') {
-        ym(window.SOZDATEL_YM_ID, 'reachGoal', UNLOCKED_TIER === 'full' ? 'report_paid_full' : 'report_paid_quick');
-      }
+      if (window.sozGoal) window.sozGoal(
+        UNLOCKED_TIER === 'full' ? 'report_paid_full' : 'report_paid_quick',
+        {purpose: PURPOSE});
       localStorage.setItem(goalKey, '1');
     }
   } else {

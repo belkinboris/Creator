@@ -1050,6 +1050,7 @@ def example_page(request: Request):
         .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
         .replace("__SECTIONS_JSON__", json.dumps(_sections_meta(_purpose), ensure_ascii=False))
         .replace("__TIER_KEYS_JSON__", json.dumps(_tier_keys, ensure_ascii=False))
+        .replace("__PURPOSE_JSON__", json.dumps(_purpose, ensure_ascii=False))
         .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out))
 
@@ -1156,6 +1157,7 @@ async def report_page(rid: int, request: Request):
         .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
         .replace("__SECTIONS_JSON__", json.dumps(_sections_meta(_purpose), ensure_ascii=False))
         .replace("__TIER_KEYS_JSON__", json.dumps(_tier_keys, ensure_ascii=False))
+        .replace("__PURPOSE_JSON__", json.dumps(_purpose, ensure_ascii=False))
         .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out))
 
@@ -2026,13 +2028,44 @@ def health_db():
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
 
 
+# Цели Метрики. Названия здесь — единственный источник правды: их же владелец
+# заводит в интерфейсе Метрики, и разъехавшееся имя означает молча пустой
+# отчёт по цели. Порядок соответствует пути человека.
+METRIKA_GOALS = [
+    ("demand_started", "Начал бесплатную проверку спроса"),
+    ("demand_done", "Увидел результат проверки"),
+    ("sharpen_used", "Заострил идею"),
+    ("check_saved", "Сохранил проверку в кабинете"),
+    ("report_viewed", "Открыл страницу отчёта"),
+    ("example_viewed", "Посмотрел пример отчёта"),
+    ("report_order_started", "Нажал «Получить отчёт»"),
+    ("live_test_ordered", "Заказал тест на реальных людях"),
+    ("report_paid_quick", "Оплатил быстрый разбор"),
+    ("report_paid_full", "Оплатил бизнес-план"),
+]
+
+
 def _inject_metrika(html: str) -> str:
     """Код счётчика — в одном месте, а не скопирован в каждый HTML-файл.
     /l/{id} (проверочные страницы конкретных проектов) сюда не попадают --
-    это чужой трафик по чужой рекламе, не воронка самого Создателя."""
+    это чужой трафик по чужой рекламе, не воронка самого Создателя.
+
+    Вместе со счётчиком отдаём sozGoal() -- единственный способ отправить
+    цель. Раньше каждая страница носила свою копию проверки
+    `if (window.SOZDATEL_YM_ID && typeof ym === 'function')`, и новая
+    страница просто забывала её написать. Здесь же цель получает параметр
+    purpose: без него нельзя понять, какая рекламная кампания окупается
+    (D3), потому что обе аудитории идут по одним и тем же шагам.
+    """
     if not YANDEX_METRIKA_ID or "</head>" not in html:
         return html
-    snippet = f"""<script>window.SOZDATEL_YM_ID = {YANDEX_METRIKA_ID};</script>
+    snippet = f"""<script>window.SOZDATEL_YM_ID = {YANDEX_METRIKA_ID};
+window.sozGoal = function(name, params){{
+  try {{
+    if (!window.SOZDATEL_YM_ID || typeof ym !== 'function') return;
+    ym(window.SOZDATEL_YM_ID, 'reachGoal', name, params || {{}});
+  }} catch (e) {{}}   // счётчик не имеет права ломать страницу
+}};</script>
 <script type="text/javascript">
     (function(m,e,t,r,i,k,a){{
         m[i]=m[i]||function(){{(m[i].a=m[i].a||[]).push(arguments)}};

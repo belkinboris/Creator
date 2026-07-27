@@ -339,6 +339,9 @@ const PAY_ENABLED = __PAY_ENABLED__;
 const IDEA = __IDEA_JSON__;
 const SAVED = __SAVED__;
 const PURPOSE = __PURPOSE_JSON__;
+// Середина воронки: без этих целей между «начал проверку» и «оплатил»
+// приборов нет, и Директ оптимизируется на клики, а не на покупателей.
+if (window.sozGoal) window.sozGoal('demand_done', {purpose: PURPOSE});
 
 function fmt(n){ return n.toLocaleString('ru-RU'); }
 function escapeHtml(s){
@@ -580,6 +583,7 @@ sharpenBtn.addEventListener('click', async () => {
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || 'Не получилось заострить идею. Попробуйте ещё раз.');
     renderSharpen(data.offers || []);
+    if (window.sozGoal) window.sozGoal('sharpen_used', {purpose: PURPOSE});
     sharpenBtn.style.display = 'none';
   } catch (e) {
     sharpenErr.textContent = e.message; sharpenErr.classList.add('show');
@@ -615,6 +619,7 @@ orderBtn.addEventListener('click', async () => {
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || data.detail || 'Не получилось. Попробуйте ещё раз.');
+    if (window.sozGoal) window.sozGoal('live_test_ordered', {purpose: PURPOSE});
     if (data.paid && data.confirmation_url) { location.href = data.confirmation_url; return; }
     const ok = document.getElementById('order-ok');
     ok.textContent = data.message; ok.classList.add('show');
@@ -668,6 +673,7 @@ async function trySave(contact){
       throw new Error(data.error || 'Не получилось сохранить. Попробуйте ещё раз.');
     }
     markSaved(data.message);
+    if (window.sozGoal) window.sozGoal('check_saved', {purpose: PURPOSE});
   } catch (e) {
     saveErr.textContent = e.message; saveErr.classList.add('show');
     saveBtn.textContent = label; saveBtn.disabled = false;
