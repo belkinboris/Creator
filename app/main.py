@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -1843,6 +1843,30 @@ def _fill_server_values(html: str) -> str:
 
 def _with_server_values(name: str) -> str:
     return _fill_server_values(_static(name))
+
+
+_FONTS_DIR = BASE_DIR.parent / "static" / "fonts"
+# Белый список читается один раз при старте: перебирать каталог на каждый
+# запрос незачем, а имя из URL к путям на диске не приклеивается.
+_FONT_FILES = {p.name for p in _FONTS_DIR.glob("*") if p.suffix in (".woff2", ".css")}
+
+
+@app.get("/fonts/{name}")
+def font_file(name: str):
+    """Шрифты лежат рядом со статикой, а не на fonts.googleapis.com: из
+    России тот домен часто недоступен, а тег был рендер-блокирующим -- при
+    недоступности человек видел белый экран до таймаута (принцип 8).
+
+    Отдаём строго из static/fonts и только известные расширения: обычного
+    StaticFiles-монтирования здесь нет намеренно, оно открыло бы наружу и
+    HTML-шаблоны с неподставленными слотами.
+    """
+    if name not in _FONT_FILES:
+        raise HTTPException(404, "не найдено")
+    media = "text/css; charset=utf-8" if name.endswith(".css") else "font/woff2"
+    # Файлы неизменяемые: имя меняется вместе с содержимым при обновлении.
+    return FileResponse(_FONTS_DIR / name, media_type=media,
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.get("/", response_class=HTMLResponse)
