@@ -785,6 +785,39 @@ def _example_purchase(s: Session):
         ReportPurchase.is_example == True)).first()          # noqa: E712
 
 
+def _tier_summary_html() -> str:
+    """Что входит в каждый тариф — там, где человек решает платить.
+
+    Раньше на `/r/` стояло только «от 990 ₽», а состав тарифов открывался
+    лишь на следующем экране. Для пришедшего с /social-contract это прямая
+    ловушка: он идёт за обоснованием сметы, а секции «Финансовая модель» в
+    дешёвом тарифе нет вовсе (C2 в PRODUCT_ROADMAP).
+
+    Состав собирается из ALL_SECTIONS/QUICK_KEYS, а не пишется руками:
+    вторая копия списка разъехалась бы с движком, как уже разъезжались цены.
+    """
+    # Заголовок «План запуска — по этапам» внутри перечисления через запятую
+    # читается двусмысленно из-за тире: берём часть до него.
+    def short(title: str) -> str:
+        return title.split(" — ")[0].strip()
+
+    quick = [short(t) for k, t in ALL_SECTIONS if k in QUICK_KEYS]
+    extra = [short(t) for k, t in ALL_SECTIONS if k not in QUICK_KEYS]
+    rows = [
+        (REPORT_PRICES["quick"]["label"], REPORT_PRICES["quick"]["price"],
+         ", ".join(quick) + "."),
+        (REPORT_PRICES["full"]["label"], REPORT_PRICES["full"]["price"],
+         "всё это и ещё " + ", ".join(t.lower() for t in extra) + "."),
+    ]
+    items = "".join(
+        f'<div class="tier-row">'
+        f'<span class="tier-name">{html.escape(label)} — <b>{price} ₽</b></span>'
+        f'<span class="tier-what">{html.escape(what)}</span>'
+        f'</div>'
+        for label, price, what in rows)
+    return f'<div class="tier-what-block">{items}</div>'
+
+
 def _example_link(text: str) -> str:
     """Ссылка на пример — только когда пример реально существует.
 
@@ -1937,6 +1970,8 @@ def _fill_server_values(html: str) -> str:
     # пример опубликован -- считаем её лишь если слот на странице есть.
     if "__EXAMPLE_LINK__" in html:
         html = html.replace("__EXAMPLE_LINK__", _example_link("Посмотреть пример отчёта"))
+    if "__TIER_SUMMARY__" in html:
+        html = html.replace("__TIER_SUMMARY__", _tier_summary_html())
     return html
 
 

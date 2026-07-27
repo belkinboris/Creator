@@ -3938,3 +3938,75 @@ class TestPublicReportExample:
         text = client.get("/example").text
         assert 'class="owner-bar"' not in text
         assert "preview=full" not in text
+
+
+class TestTierDifferenceAtTheDecisionPoint:
+    """C2: на `/r/` стояло только «от 990 ₽», а состав тарифов открывался лишь
+    на следующем экране. Для пришедшего с /social-contract это ловушка: он
+    идёт за обоснованием сметы, а секции «Финансовая модель» в дешёвом тарифе
+    нет вовсе."""
+
+    def _check(self, purpose="business"):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand", json={"idea": "Пошив штор на заказ",
+                                                    "purpose": purpose}).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def test_both_tiers_named_with_prices_on_the_result_page(self):
+        import app.main as m
+        text = client.get(f"/r/{self._check()}").text
+        for tier in m.REPORT_PRICES.values():
+            assert tier["label"] in text
+            assert f"{tier['price']} ₽" in text
+        assert "__TIER_SUMMARY__" not in text
+
+    def test_cheap_tier_lists_exactly_what_it_contains(self):
+        """Состав берётся из движка, а не пишется руками."""
+        from app.report_engine import ALL_SECTIONS, QUICK_KEYS
+        text = client.get(f"/r/{self._check()}").text
+        for key, title in ALL_SECTIONS:
+            if key in QUICK_KEYS:
+                assert title in text, f"секция дешёвого тарифа не названа: {title}"
+
+    def test_finance_is_visibly_absent_from_the_cheap_tier(self):
+        """Главная ловушка соцконтракта: смета есть только в полном тарифе."""
+        from app.report_engine import ALL_SECTIONS, QUICK_KEYS
+        finance_title = dict(ALL_SECTIONS)["finance"]
+        assert "finance" not in QUICK_KEYS          # предпосылка теста
+        summary = main_module._tier_summary_html()
+        quick_part, full_part = summary.split("</div><div class=\"tier-row\">")
+        assert finance_title.lower() not in quick_part.lower()
+        assert finance_title.lower() in full_part.lower()
+
+    def test_summary_follows_the_engine_not_a_copy(self, monkeypatch):
+        """Если в движке появится новая секция, витрина обязана её назвать."""
+        import app.main as m
+        monkeypatch.setattr(m, "ALL_SECTIONS",
+                            list(m.ALL_SECTIONS) + [("newthing", "Новая секция")])
+        # в полном тарифе секции перечисляются со строчной буквы
+        assert "новая секция" in m._tier_summary_html().lower()
+
+    def test_social_contract_sees_the_same_breakdown(self):
+        """Блок меняет роль на главный — состав тарифов должен уехать с ним."""
+        import app.main as m
+        text = client.get(f"/r/{self._check('social_contract')}").text
+        assert m.REPORT_PRICES["full"]["label"] in text
+        assert f"{m.REPORT_PRICES['full']['price']} ₽" in text
+        assert 'id="alt-report"' in text and "__TIER_SUMMARY__" not in text
+
+    def test_prices_are_still_not_hardcoded_in_static(self):
+        """C2 не должна протащить обратно то, что закрыла B5."""
+        src = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert "990 ₽" not in src and "2990 ₽" not in src
+        assert "__TIER_SUMMARY__" in src

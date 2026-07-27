@@ -55,6 +55,12 @@
     margin-top:14px;font-size:15px}
   .paid-note.show{display:block}
   .budget-note{color:var(--muted);font-size:13px;margin-top:10px;max-width:40em}
+  /* Состав тарифов у кнопки: цена крупно, что входит — строкой под ней. */
+  .tier-what-block{margin:0 0 14px}
+  .tier-row{padding:9px 0}
+  .tier-row + .tier-row{border-top:1px solid var(--line)}
+  .tier-name{display:block;font-size:14px;font-weight:600}
+  .tier-what{display:block;font-size:13px;color:var(--muted);margin-top:2px;max-width:40em}
   .example-link{margin-top:10px;font-size:13px;color:var(--muted)}
   .example-link:empty{display:none}
 
@@ -302,7 +308,11 @@
     </div>
     <div class="alt-path" id="alt-report">
       <h4 id="alt-h4">Или получите <span class="hl">отчёт по идее</span> — без ожидания рекламы</h4>
-      <p id="alt-p">Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни. От __MIN_REPORT_PRICE__ ₽.</p>
+      <p id="alt-p">Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни.</p>
+      <!-- Состав тарифов — здесь, а не на следующем экране: человек решает
+           платить именно тут, и разница между 990 и 2990 для него неочевидна.
+           Особенно для соцконтракта: сметы в дешёвом тарифе нет вовсе. -->
+      __TIER_SUMMARY__
       <a class="btn" href="/report/__CHECK_ID__">Посмотреть отчёт</a>
       <!-- Ссылка появляется, только если пример реально опубликован: привести
            на пустую страницу хуже, чем не звать вовсе. -->
