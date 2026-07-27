@@ -446,3 +446,28 @@ def test_good_demand_keeps_the_live_test_as_the_main_action(site, browser):
             "() => document.getElementById('order').className") == "next"
     finally:
         ctx.close()
+
+
+def test_owner_sees_mail_state_in_the_desk(site, browser):
+    """Блок «Почта» рисует скрипт по ответу /api/diag/mail — подстроками в
+    HTML такое не проверить (урок A11). Смотрим глазами браузера."""
+    ctx = _context(browser)
+    ctx.add_init_script(f"sessionStorage.setItem('sozdatel_key','{OWNER_KEY}')")
+    page = ctx.new_page()
+    try:
+        _goto(page, f"{site['base']}/desk")
+        page.wait_for_selector("#mailbox", state="visible", timeout=10000)
+        # в прогоне SMTP не настроен — блок обязан сказать это прямо
+        state = page.inner_text("#mail-state")
+        assert "не настроена" in state, state
+        problems = page.eval_on_selector_all(".mail-problems li", "e => e.map(x => x.innerText)")
+        assert any("SOZDATEL_SMTP_HOST" in p for p in problems), problems
+
+        # кнопка проверки работает и объясняет отказ, а не молчит
+        page.fill("#mail-to", "boris@example.com")
+        page.click("#mail-send")
+        page.wait_for_timeout(1200)
+        assert "не настроена" in page.inner_text("#mail-result").lower()
+        _assert_clean(page, "кабинет владельца, блок почты")
+    finally:
+        ctx.close()

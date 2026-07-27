@@ -166,10 +166,17 @@
   заявку без оплаты (без настроенной кассы).
 - Личный кабинет покупателя (`/account`) — вход по magic-link на почту, без
   пароля (`app/mailer.py`, SMTP reg.ru Mail-1). Нужны env:
-  `SOZDATEL_SMTP_HOST`, `SOZDATEL_SMTP_PORT` (465), `SOZDATEL_SMTP_USER`,
-  `SOZDATEL_SMTP_PASSWORD`. Отдельно `SOZDATEL_OWNER_EMAIL` — куда писать
+  `SOZDATEL_SMTP_HOST`, `SOZDATEL_SMTP_PORT`, `SOZDATEL_SMTP_USER`,
+  `SOZDATEL_SMTP_PASSWORD`. Порт решает способ шифрования: 465 — SSL с
+  первого байта, любой другой (обычно 587) — STARTTLS, см. `_transmit`.
+  Отдельно `SOZDATEL_OWNER_EMAIL` — куда писать
   владельцу об оплате, доставка которой сорвалась (`mailer.notify_owner`,
   никогда не бросает исключение). Не задана — уведомления молча не уходят.
+  **Почта — единственная подсистема, которая ломается молча**, поэтому у
+  неё есть свой прибор: блок «Почта» в `/desk` и ручка
+  `GET /api/diag/mail?key=...&to=...` (owner-only, `mailer.diagnose`) —
+  показывает, чего не хватает, и по кнопке шлёт проверочное письмо, называя
+  причину отказа человеческими словами. Пароль не возвращается никогда.
   `SmokeProject.contact` не проставляется
   автоматически — владелец привязывает вручную через
   `PATCH /api/projects/{idea_id}/contact` при запуске проекта под оплаченную

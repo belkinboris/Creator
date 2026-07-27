@@ -5395,3 +5395,241 @@ class TestTierListIsReadableAtTheDecisionPoint:
         assert "__TIER_SUMMARY__" not in text
         assert 'class="tier-groups"' in text
         assert "<b>Деньги:</b>" in text
+
+
+class TestMailerSpeaksBothPorts:
+    """Провайдер даёт два адреса на выбор: 465 шифрует с первого байта, 587
+    начинает открыто и поднимает шифрование командой STARTTLS. Код умел только
+    первый — владелец, вписавший 587 (reg.ru показывает оба), получал бы
+    невнятную ошибку SSL при полностью верных логине и пароле."""
+
+    class _FakeSMTP:
+        calls = []
+
+        def __init__(self, host, port, timeout=None):
+            type(self).calls.append(("connect", host, port))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ehlo(self):
+            type(self).calls.append(("ehlo",))
+
+        def starttls(self):
+            type(self).calls.append(("starttls",))
+
+        def login(self, user, password):
+            type(self).calls.append(("login", user))
+
+        def send_message(self, msg):
+            type(self).calls.append(("send", msg["To"]))
+
+    def _env(self, monkeypatch, port):
+        from app import mailer
+        monkeypatch.setenv("SOZDATEL_SMTP_HOST", "smtp.example.ru")
+        monkeypatch.setenv("SOZDATEL_SMTP_PORT", str(port))
+        monkeypatch.setenv("SOZDATEL_SMTP_USER", "info@example.ru")
+        monkeypatch.setenv("SOZDATEL_SMTP_PASSWORD", "secret")
+        ssl_cls = type("SSLFake", (self._FakeSMTP,), {"calls": []})
+        plain_cls = type("PlainFake", (self._FakeSMTP,), {"calls": []})
+        monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", ssl_cls)
+        monkeypatch.setattr(mailer.smtplib, "SMTP", plain_cls)
+        return mailer, ssl_cls, plain_cls
+
+    def test_port_465_talks_ssl_from_the_first_byte(self, monkeypatch):
+        mailer, ssl_cls, plain_cls = self._env(monkeypatch, 465)
+        mailer.send("to@example.ru", "тема", "тело")
+        assert ("connect", "smtp.example.ru", 465) in ssl_cls.calls
+        assert ("send", "to@example.ru") in ssl_cls.calls
+        assert plain_cls.calls == []
+        assert not any(c[0] == "starttls" for c in ssl_cls.calls)
+
+    def test_port_587_raises_encryption_with_starttls(self, monkeypatch):
+        mailer, ssl_cls, plain_cls = self._env(monkeypatch, 587)
+        mailer.send("to@example.ru", "тема", "тело")
+        assert ("connect", "smtp.example.ru", 587) in plain_cls.calls
+        assert ("starttls",) in plain_cls.calls
+        assert ("send", "to@example.ru") in plain_cls.calls
+        assert ssl_cls.calls == []
+
+    def test_starttls_happens_before_login(self, monkeypatch):
+        """Логин в открытом канале отдал бы пароль в сеть как есть."""
+        mailer, _, plain_cls = self._env(monkeypatch, 587)
+        mailer.send("to@example.ru", "тема", "тело")
+        names = [c[0] for c in plain_cls.calls]
+        assert names.index("starttls") < names.index("login")
+
+
+class TestOwnerCanDiagnoseMail:
+    """Настройка почты — четыре переменные в чужой панели, и до этой ручки
+    владелец узнавал результат только по тому, пожаловался ли покупатель.
+    Тот же приём, что уже выручил с Вордстатом: показать причину, а не гадать."""
+
+    def _clean(self, monkeypatch):
+        for name in ("SOZDATEL_SMTP_HOST", "SOZDATEL_SMTP_PORT", "SOZDATEL_SMTP_USER",
+                     "SOZDATEL_SMTP_PASSWORD", "SOZDATEL_OWNER_EMAIL"):
+            monkeypatch.delenv(name, raising=False)
+
+    def _configured(self, monkeypatch, port="465", user="info@example.ru"):
+        monkeypatch.setenv("SOZDATEL_SMTP_HOST", "smtp.example.ru")
+        monkeypatch.setenv("SOZDATEL_SMTP_PORT", port)
+        monkeypatch.setenv("SOZDATEL_SMTP_USER", user)
+        monkeypatch.setenv("SOZDATEL_SMTP_PASSWORD", "secret")
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+
+    def test_owner_key_is_required(self):
+        """Ручка показывает настройки сервера — посторонним её знать незачем."""
+        assert client.get("/api/diag/mail").status_code == 401
+
+    def test_names_every_missing_variable(self, monkeypatch):
+        self._clean(monkeypatch)
+        d = client.get("/api/diag/mail", headers=OWNER).json()
+        joined = " ".join(d["problems"])
+        for name in ("SOZDATEL_SMTP_HOST", "SOZDATEL_SMTP_USER",
+                     "SOZDATEL_SMTP_PASSWORD", "SOZDATEL_OWNER_EMAIL"):
+            assert name in joined, name
+        assert d["configured"] is False
+
+    def test_password_is_never_returned(self, monkeypatch):
+        """Диагностика не имеет права стать способом прочитать пароль."""
+        self._configured(monkeypatch)
+        raw = client.get("/api/diag/mail", headers=OWNER).text
+        assert "secret" not in raw
+        assert client.get("/api/diag/mail", headers=OWNER).json()["settings"]["password_set"] is True
+
+    def test_non_numeric_port_is_called_out(self, monkeypatch):
+        self._configured(monkeypatch, port="четыреста")
+        d = client.get("/api/diag/mail", headers=OWNER).json()
+        assert any("SOZDATEL_SMTP_PORT" in p for p in d["problems"])
+
+    def test_login_that_is_not_an_address_is_called_out(self, monkeypatch):
+        """Частая ошибка: в логин пишут имя пользователя вместо адреса ящика,
+        и тогда не работают ни SPF, ни DKIM."""
+        self._configured(monkeypatch, user="info")
+        d = client.get("/api/diag/mail", headers=OWNER).json()
+        assert any("целиком" in p for p in d["problems"])
+
+    def test_mode_follows_the_port(self, monkeypatch):
+        self._configured(monkeypatch, port="465")
+        assert client.get("/api/diag/mail", headers=OWNER).json()["settings"]["mode"] == "SSL"
+        self._configured(monkeypatch, port="587")
+        assert client.get("/api/diag/mail", headers=OWNER).json()["settings"]["mode"] == "STARTTLS"
+
+    def test_without_an_address_nothing_is_sent(self, monkeypatch):
+        """Открыть ручку, чтобы просто посмотреть настройки, должно быть
+        безопасно — письмо уходит только когда его попросили."""
+        self._configured(monkeypatch)
+        import app.main as m
+        sent = []
+        monkeypatch.setattr(m.mailer, "send", lambda *a, **kw: sent.append(a))
+        d = client.get("/api/diag/mail", headers=OWNER).json()
+        assert d["test_send"] is None and sent == []
+
+    def test_successful_send_is_reported_with_a_next_step(self, monkeypatch):
+        from app import mailer
+        self._configured(monkeypatch)
+        got = []
+        d = mailer.diagnose("boris@example.com", _send=lambda msg: got.append(msg["To"]))
+        assert d["test_send"]["ok"] is True
+        assert got == ["boris@example.com"]
+        assert "Спам" in d["test_send"]["next"]
+
+    def test_wrong_password_is_explained_in_plain_words(self, monkeypatch):
+        """Получить в ответ SMTPAuthenticationError значит остаться там же,
+        где был."""
+        import smtplib
+        from app import mailer
+        self._configured(monkeypatch)
+        def boom(msg):
+            raise smtplib.SMTPAuthenticationError(535, b"5.7.8 auth failed")
+        d = mailer.diagnose("boris@example.com", _send=boom)
+        assert d["test_send"]["ok"] is False
+        assert "логин или пароль" in d["test_send"]["error"]
+        assert "SMTPAuthenticationError" in d["test_send"]["technical"]
+
+    def test_ssl_mismatch_suggests_the_other_port(self, monkeypatch):
+        import ssl as _ssl
+        from app import mailer
+        self._configured(monkeypatch, port="465")
+        def boom(msg):
+            raise _ssl.SSLError("wrong version number")
+        d = mailer.diagnose("boris@example.com", _send=boom)
+        assert "587" in d["test_send"]["error"]
+
+    def test_unknown_host_is_explained(self, monkeypatch):
+        import socket as _socket
+        from app import mailer
+        self._configured(monkeypatch)
+        def boom(msg):
+            raise _socket.gaierror("Name or service not known")
+        d = mailer.diagnose("boris@example.com", _send=boom)
+        assert "SOZDATEL_SMTP_HOST" in d["test_send"]["error"]
+
+    def test_bad_recipient_address_does_not_reach_the_server(self, monkeypatch):
+        from app import mailer
+        self._configured(monkeypatch)
+        got = []
+        d = mailer.diagnose("не почта", _send=lambda msg: got.append(msg))
+        assert d["test_send"]["ok"] is False and got == []
+
+    def test_handle_never_returns_500(self, monkeypatch):
+        """Диагностика, падающая пятисотой, бесполезна ровно тогда, когда
+        нужна (принцип 7)."""
+        import app.main as m
+        self._configured(monkeypatch)
+        monkeypatch.setattr(m.mailer, "send",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("что угодно")))
+        r = client.get("/api/diag/mail?to=boris@example.com", headers=OWNER)
+        assert r.status_code == 200
+        assert r.json()["test_send"]["ok"] is False
+
+    def test_unconfigured_mail_says_so_instead_of_trying(self, monkeypatch):
+        from app import mailer
+        self._clean(monkeypatch)
+        d = mailer.diagnose("boris@example.com")
+        assert d["test_send"]["ok"] is False
+        assert "не настроена" in d["test_send"]["error"]
+
+
+class TestDeskShowsMailState:
+    """Почта — единственная подсистема, которая ломается молча: не ушло письмо
+    со ссылкой входа или об оплате, и об этом никто не узнаёт. JSON-ручки для
+    этого мало: владелец настраивает четыре переменные в чужой панели, где
+    «разбегаются глаза», и читать сырой ответ ему негде."""
+
+    def _desk(self):
+        return (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
+
+    def test_desk_has_a_mail_block(self):
+        text = self._desk()
+        assert 'id="mailbox"' in text
+        assert "/api/diag/mail" in text
+
+    def test_block_offers_a_test_send(self):
+        """Без кнопки владельцу пришлось бы дожидаться живого покупателя,
+        чтобы узнать, работает ли почта."""
+        text = self._desk()
+        assert 'id="mail-to"' in text and 'id="mail-send"' in text
+        assert "sendTestMail" in text
+
+    def test_green_means_a_letter_actually_went(self):
+        """«Переменные заданы» — не то же самое, что «письма уходят». Зелёная
+        надпись рядом с красной ошибкой противоречила бы сама себе."""
+        text = self._desk()
+        assert "переменные заданы" in text
+        assert "письмо уходит" in text
+        # зелёный статус ставится только в ветке удачной отправки
+        after = text.split("sendTestMail")[1]
+        assert 'mailbox-state ok' in after
+
+    def test_block_loads_with_the_desk(self):
+        assert "loadMail()" in self._desk()
+
+    def test_technical_line_comes_after_the_human_one(self):
+        """Одна строка SMTPAuthenticationError владельцу ничего не говорит,
+        но и без неё непонятно, что чинить."""
+        text = self._desk()
+        assert "t.error + (t.technical" in text.replace("\n", " ")
