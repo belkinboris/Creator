@@ -54,6 +54,7 @@
   .paid-note{display:none;border-left:3px solid var(--ok);padding:2px 0 2px 12px;
     margin-top:14px;font-size:15px}
   .paid-note.show{display:block}
+  .budget-note{color:var(--muted);font-size:13px;margin-top:10px;max-width:40em}
 
   /* Лента: один активный фокус, пройденные шаги сжимаются в одну строку итога.
      Шаг без .active и без .done не отрисован вовсе -- нет данных, нет блока. */
@@ -202,7 +203,7 @@
     <div class="path-bar">
       <i class="done"></i><i class="done"></i><i></i><i></i><i></i><i></i><i></i>
     </div>
-    <div class="path-next"><span class="path-next-tag">Дальше</span><span id="path-next-text">Этап 3 — соберём проверочную страницу под вашу идею и запустим первую рекламу</span></div>
+    <div class="path-next"><span class="path-next-tag">Дальше</span><span id="path-next-text">Этап 3 — соберём проверочную страницу под вашу идею, рекламу вы запустите сами по инструкции</span></div>
   </div>
 
   <div class="head">
@@ -218,7 +219,10 @@
     </div>
     <p class="err" id="save-err" role="alert"></p>
     <p class="okmsg" id="save-ok"></p>
-    <p class="paid-note" id="paid-note">Оплата принята. Мы запускаем живой тест вашей идеи — вернёмся с первыми цифрами.</p>
+    <!-- Прежний текст обещал, что рекламу запустим мы и сами принесём цифры.
+         Неправда дважды: страницу собираем мы, рекламу запускает человек,
+         а цифры он смотрит в кабинете, когда ему удобно. -->
+    <p class="paid-note" id="paid-note">Оплата принята. Собираем вашу проверочную страницу — ссылка и пошаговая инструкция по запуску рекламы появятся в <a href="/account">личном кабинете</a>.</p>
   </div>
 
   <section class="step" data-step="1" id="step-1">
@@ -287,6 +291,10 @@
       <p class="chosen-note" id="chosen-note"></p>
       <input id="contact" placeholder="Почта или телефон">
       <button class="btn" id="order-btn" type="button"></button>
+      <!-- Про рекламный бюджет до оплаты не говорилось нигде, хотя в оферте
+           это записано, а на деле он больше самой услуги. Узнать об этом
+           после оплаты -- законный повод требовать возврат. -->
+      <p class="budget-note" id="budget-note">Рекламный бюджет в цену не входит: его вы платите Яндексу напрямую, на тест обычно хватает __AD_BUDGET__. <a href="/guide/direct">Как это устроено</a></p>
       <p class="err" id="order-err" role="alert"></p>
       <p class="okmsg" id="order-ok"></p>
     </div>

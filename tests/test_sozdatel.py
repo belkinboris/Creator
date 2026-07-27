@@ -3466,3 +3466,78 @@ class TestOverallScoreExplained:
         assert "1 заявка" in compute_verdict(50, 1, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)["detail"]
         assert "1 визит " in compute_verdict(1, 0, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)["detail"]
         assert "52 визита" in compute_verdict(52, 2, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)["detail"]
+
+
+class TestWeOnlyPromiseWhatWeDo:
+    """A7: воронка обещала, что рекламу запустим мы, хотя оферта прямо
+    говорит обратное — «запуск рекламы осуществляется Пользователем
+    самостоятельно». Расхождение витрины с договором на пути к оплате — это
+    возвраты и споры на холодном рекламном трафике."""
+
+    def _check(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def test_oferta_still_says_the_user_launches_ads(self):
+        """Предпосылка всего теста: договор говорит именно так."""
+        text = client.get("/oferta").text
+        assert "Запуск рекламы осуществляется Пользователем самостоятельно" in text
+        assert "Рекламный бюджет не входит в стоимость услуги" in text
+
+    def test_funnel_does_not_promise_we_launch_the_ads(self):
+        rid = self._check()
+        text = client.get(f"/r/{rid}").text
+        assert "запустим первую рекламу" not in text
+        assert "Мы запускаем живой тест" not in text
+        # и говорит, кто именно запускает
+        assert "рекламу вы запустите сами" in text
+
+    def test_order_confirmation_does_not_promise_ads(self, monkeypatch):
+        """Сообщение после заявки без оплаты обещало «запустим рекламу»."""
+        import app.main as m
+        monkeypatch.setattr(m.payments, "configured", lambda: False)
+        rid = self._check()
+        r = client.post("/api/live-test", json={"check_id": rid, "contact": "a7@example.com"})
+        msg = r.json()["message"]
+        assert "запустим страницу и рекламу" not in msg
+        assert "рекламу вы запустите сами" in msg
+
+    def test_ad_budget_is_disclosed_before_payment(self):
+        """Главное: человек узнаёт про отдельный рекламный бюджет ДО оплаты,
+        а не после. Он больше самой услуги."""
+        import app.main as m
+        rid = self._check()
+        text = client.get(f"/r/{rid}").text
+        assert "Рекламный бюджет в цену не входит" in text
+        assert m.AD_BUDGET_HINT in text
+        assert "__AD_BUDGET__" not in text
+
+    def test_ad_budget_figure_has_one_source(self):
+        """Иначе цифра в плейбуке и цифра у кнопки разъедутся -- ровно то,
+        что уже случилось с порогами вердикта (B3)."""
+        import app.main as m
+        guide = client.get("/guide/direct").text
+        assert m.AD_BUDGET_HINT in guide
+        assert "__AD_BUDGET__" not in guide
+        static_src = (main_module.BASE_DIR.parent / "static" / "guide-direct.html").read_text()
+        assert "3–5 тысяч" not in static_src   # зашитой копии в статике нет
+
+    def test_paid_note_points_where_the_page_actually_appears(self):
+        """«Вернёмся с первыми цифрами» -- мы никуда не возвращаемся, человек
+        смотрит их сам в кабинете."""
+        rid = self._check()
+        text = client.get(f"/r/{rid}").text
+        assert "вернёмся с первыми цифрами" not in text.lower()
+        assert 'href="/account"' in text

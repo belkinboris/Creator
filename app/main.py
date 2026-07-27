@@ -82,6 +82,11 @@ PENDING_PAYMENT_TIMEOUT_MINUTES = 20
 # обещала «выше 2,5% — идея живая», плейбук — «дождитесь ~100 визитов», тогда
 # как движок считал по 8% и 40 визитам. Человек с 3% читал на главной «идея
 # живая», а в кабинете видел «СПРОСА НЕТ» -- прямое нарушение принципа 3.
+# Рекламный бюджет в цену живого теста НЕ входит (так и записано в оферте) --
+# человек платит его Яндексу напрямую. До оплаты об этом не говорилось нигде,
+# хотя это удваивает-утраивает реальную стоимость шага (A7 в PRODUCT_ROADMAP).
+AD_BUDGET_HINT = "3–5 тысяч ₽"
+
 CLICK_TARGET = 40       # раньше этого числа визитов цифры -- шум, не результат
 SIGNAL_RATE = 0.08      # заявок/визитов, с которых интерес считается настоящим
 DEAD_RATE = 0.04        # и ниже -- интереса нет
@@ -425,6 +430,7 @@ def result_page(rid: int):
     html_out = (tpl
         .replace("__CHECK_ID__", str(rec.id))
         .replace("__PRICE__", str(LIVE_TEST_PRICE))
+        .replace("__AD_BUDGET__", AD_BUDGET_HINT)
         .replace("__PAY_ENABLED__", "true" if payments.configured() else "false")
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__IDEA_JSON__", idea_json)
@@ -475,7 +481,8 @@ async def live_test_order(data: LiveTestIn, request: Request):
                                contact=contact, amount=LIVE_TEST_PRICE, paid=False):
             _mark_notified(LiveTestOrder, order_id)
         return {"ok": True, "paid": False,
-                "message": "Заявка принята. Мы свяжемся в течение дня, запустим страницу и рекламу вашей идеи."}
+                "message": "Заявка принята. Свяжемся в течение дня и соберём проверочную "
+                           "страницу под вашу идею — рекламу вы запустите сами по нашей инструкции."}
     try:
         base = str(request.base_url).rstrip("/")
         # Без check_id ссылка /r/ ведёт в никуда (404) -- возвращаем на главную,
@@ -1748,7 +1755,8 @@ def _with_thresholds(name: str) -> str:
     return (_static(name)
             .replace("__CLICK_TARGET__", str(CLICK_TARGET))
             .replace("__SIGNAL_PCT__", _pct(SIGNAL_RATE))
-            .replace("__DEAD_PCT__", _pct(DEAD_RATE)))
+            .replace("__DEAD_PCT__", _pct(DEAD_RATE))
+            .replace("__AD_BUDGET__", AD_BUDGET_HINT))
 
 
 @app.get("/", response_class=HTMLResponse)
