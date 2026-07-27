@@ -557,7 +557,7 @@ def result_page(rid: str, request: Request):
     with Session(engine) as s:
         rec, redirect = _find_check(s, rid, request)
     if not rec or not rec.result_json:
-        return HTMLResponse(_static("index.html"), status_code=404)
+        return _lost_page()
     if redirect:
         return RedirectResponse(f"/r/{rec.public_id}", status_code=307)
     tpl = _static("result.html")
@@ -1313,7 +1313,7 @@ async def report_page(rid: str, request: Request):
         # перебором ровно так же (E6).
         rec, redirect = _find_check(s, rid, request)
         if not rec or not rec.result_json:
-            return HTMLResponse(_static("index.html"), status_code=404)
+            return _lost_page()
         if redirect:
             keep = str(request.url.query)
             return RedirectResponse(f"/report/{rec.public_id}" + (f"?{keep}" if keep else ""),
@@ -2564,6 +2564,8 @@ def _fill_server_values(html: str) -> str:
     сравнив две страницы с кодом глазами (B5 в PRODUCT_ROADMAP).
     """
     for slot, value in (
+        # По умолчанию записки нет: её подставляет только _lost_page().
+        ("__LOST_NOTE__", ""),
         ("__CLICK_TARGET__", str(CLICK_TARGET)),
         ("__SIGNAL_PCT__", _pct(SIGNAL_RATE)),
         ("__DEAD_PCT__", _pct(DEAD_RATE)),
@@ -2589,6 +2591,24 @@ def _fill_server_values(html: str) -> str:
 
 def _with_server_values(name: str) -> str:
     return _fill_server_values(_static(name))
+
+
+def _lost_page() -> HTMLResponse:
+    """404 по ссылке на проверку: главная + записка о том, что произошло.
+
+    Ссылкой на результат делятся намеренно, поэтому обрезанная мессенджером
+    или устаревшая ссылка -- обычное дело. Раньше здесь отдавался
+    `_static("index.html")` в обход подстановки, и человек читал буквально
+    «Больше __SIGNAL_PCT__ — идея живая»: первое, что он узнавал о сервисе,
+    -- что сервис сломан. Молчаливая подмена страницы главной тоже плоха --
+    он шёл смотреть конкретную проверку и не понимал, куда попал.
+    """
+    note = ('<div class="lost-note" id="lost-note" role="status">'
+            '<b>Мы не нашли эту проверку.</b> Ссылка могла быть неполной — '
+            'мессенджеры часто обрезают длинные адреса. Опишите идею ниже: '
+            'проверим спрос заново, это бесплатно.</div>')
+    html_out = _fill_server_values(_static("index.html").replace("__LOST_NOTE__", note))
+    return HTMLResponse(html_out, status_code=404)
 
 
 _FONTS_DIR = BASE_DIR.parent / "static" / "fonts"

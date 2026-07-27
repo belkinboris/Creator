@@ -41,6 +41,12 @@
   .nav a.link:hover{color:var(--ink);text-decoration:underline}
 
   .hero{padding-top:46px;padding-bottom:34px}
+  /* Записка на 404: человек шёл по ссылке на чужую проверку и попал сюда.
+     Подставляется сервером только на этом пути, на обычной главной её нет. */
+  .lost-note{border:1px solid var(--line);border-left:3px solid var(--marker);
+    background:var(--box);border-radius:6px;padding:14px 16px;margin-bottom:22px;
+    max-width:36em;font-size:15px;color:var(--muted)}
+  .lost-note b{color:var(--ink);font-weight:600}
   h1{font-size:clamp(26px,4.6vw,36px);line-height:1.25;font-weight:600;letter-spacing:-.015em;max-width:20em}
   .sub{color:var(--muted);font-size:17px;max-width:36em;margin:14px 0 24px}
 
@@ -155,6 +161,7 @@
 
 <main>
   <section class="hero wrap">
+    __LOST_NOTE__
     <h1>От идеи — до денег. Начнём с <span class="hl">проверки спроса</span>.</h1>
     <p class="sub">Опишите идею своими словами — за пару минут покажем, сколько людей уже ищут её в Яндексе и кто сейчас забирает этот спрос. Бесплатно, без регистрации.</p>
 

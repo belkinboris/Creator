@@ -127,6 +127,14 @@ class TestOfferEngine:
         assert out["offers"][0]["idea_id"] == "a0"
 
 
+def _slots(html: str) -> str:
+    """Незаполненные слоты шаблона (`__ИМЯ__`) — то, что человек читает
+    буквально, если страницу отдали в обход подстановки серверных значений."""
+    import re as _re
+    body = _re.sub(r"<script.*?</script>", "", html, flags=_re.S)
+    return " ".join(sorted(set(_re.findall(r"__[A-Z_]+__", body))))
+
+
 DEMAND_DATA_FIXTURE = {
     "formulations": [{"phrase": "ответы на отзывы вайлдберриз", "count": 5200}],
     "verdict": {"level": "strong", "text": "Спрос есть"},
@@ -6139,3 +6147,57 @@ class TestLandingPromisesNothingOnTheOwnersBehalf:
         assert VALID_OFFER["h1"] in html
         assert VALID_OFFER["sub"] in html
         assert VALID_OFFER["pains"][0]["h2"] in html
+
+
+class TestBrokenLinkLandsOnAWorkingPage:
+    """E7: битая ссылка на результат отдавала главную с СЫРЫМИ слотами.
+
+    Найдено кастдев-проходом «что видит человек, когда всё сломалось».
+    Оба 404-пути (`/r/` и `/report/`) возвращали `_static("index.html")`
+    в обход `_fill_server_values` — и человек читал на главной буквально
+    «Больше __SIGNAL_PCT__ — идея живая, меньше __DEAD_PCT__». Первое, что
+    он видит о сервисе, — что сервис сломан.
+
+    Ссылками на результат делятся намеренно (см. CLAUDE.md про public_id),
+    поэтому обрезанная в мессенджере или устаревшая ссылка — обычное дело,
+    а не экзотика. Второе следствие того же места: человек приходил по
+    ссылке «посмотри мою проверку», молча попадал на главную и не понимал,
+    что произошло. Поэтому 404 не просто чинится, а объясняется — и
+    оставляет форму проверки под рукой (принцип 7: деградация вместо
+    ошибки, но не молчаливая).
+    """
+
+    def test_result_404_has_no_raw_slots(self):
+        r = client.get("/r/nosuchcheck")
+        assert r.status_code == 404
+        assert "__" not in _slots(r.text), _slots(r.text)
+
+    def test_report_404_has_no_raw_slots(self):
+        r = client.get("/report/nosuchcheck")
+        assert r.status_code == 404
+        assert "__" not in _slots(r.text), _slots(r.text)
+
+    def test_404_explains_what_happened(self):
+        """Молча подменить запрошенную страницу главной — значит соврать,
+        что человек попал куда хотел."""
+        t = client.get("/r/nosuchcheck").text
+        assert "не нашли" in t.lower()
+        assert "ссылк" in t.lower()
+
+    def test_404_keeps_the_free_check_at_hand(self):
+        """Тупик из битой ссылки делать незачем: форма проверки уже здесь."""
+        t = client.get("/r/nosuchcheck").text
+        assert 'id="idea"' in t
+        assert 'id="check-btn"' in t
+
+    def test_normal_home_page_says_nothing_about_a_broken_link(self):
+        """Записка появляется только по 404, иначе она пугает всех подряд."""
+        r = client.get("/")
+        assert r.status_code == 200
+        assert "не нашли" not in r.text.lower()
+
+    def test_normal_home_page_has_no_raw_slots_either(self):
+        """Сторож на будущее: новый слот в index.html без подстановки
+        сломает главную ровно так же."""
+        r = client.get("/")
+        assert "__" not in _slots(r.text), _slots(r.text)
