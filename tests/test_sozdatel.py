@@ -2245,11 +2245,17 @@ class TestOwnerLearnsAboutOrders:
     значит узнавать об оплате через сутки."""
 
     def _mail(self, monkeypatch):
+        """Копит ТОЛЬКО письма владельцу: покупателю на тот же заказ уходит
+        своё письмо (A10), и здесь оно только мешало бы считать. Его проверяет
+        TestBuyerHearsFromUs."""
         import app.main as m
         monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
         monkeypatch.setattr(m.mailer, "configured", lambda: True)
         sent = []
-        monkeypatch.setattr(m.mailer, "send", lambda to, subject, body, **kw: sent.append((subject, body)))
+        def rec(to, subject, body, **kw):
+            if to == "owner@example.com":
+                sent.append((subject, body))
+        monkeypatch.setattr(m.mailer, "send", rec)
         return sent
 
     def _check(self):
@@ -2359,7 +2365,10 @@ class TestOwnerLearnsAboutOrders:
         monkeypatch.delenv("SOZDATEL_OWNER_EMAIL", raising=False)
         monkeypatch.setattr(m.mailer, "configured", lambda: True)
         sent = []
-        monkeypatch.setattr(m.mailer, "send", lambda *a, **kw: sent.append(a))
+        # Письмо покупателю адресовано ему, а не владельцу, и от этой
+        # переменной не зависит -- считаем только владельческие.
+        monkeypatch.setattr(m.mailer, "send",
+                            lambda to, *a, **kw: sent.append(to) if to == "owner@example.com" else None)
         rid = self._check()
         client.post("/api/live-test", json={"check_id": rid, "contact": "quiet@example.com"})
         assert sent == []
@@ -4914,3 +4923,266 @@ class TestPaidReportIsNotPublic:
         text = client.get("/example").text
         keys = json.loads(re.search(r"const TIER_KEYS = (\[.*?\]);", text).group(1))
         assert keys == ["summary"]        # ровно то, что опубликовано
+
+
+class TestBuyerHearsFromUs:
+    """A10: при оплате письмо уходило ВЛАДЕЛЬЦУ, а человеку, отдавшему
+    990-2990 ₽, -- ничего. Только фискальный чек от ЮКассы, то есть чек, а не
+    ссылка на продукт. Между тем разбор собирается по разделам минутами, и
+    единственным следом покупки была вкладка в браузере: закрыл -- и ищи."""
+
+    def _mail(self, monkeypatch):
+        """Копит письма ПОКУПАТЕЛЮ: владельческие проверяет
+        TestOwnerLearnsAboutOrders."""
+        import app.main as m
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        sent = []
+        def rec(to, subject, body, **kw):
+            if to != "owner@example.com":
+                sent.append((to, subject, body))
+        monkeypatch.setattr(m.mailer, "send", rec)
+        return sent
+
+    def _check(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand",
+                               json={"idea": "Идея достаточно длинная для письма покупателю"}).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def _pay(self, monkeypatch, kind, contact, tier="full"):
+        """Проводит настоящую оплату через вебхук ЮКассы и возвращает заказ."""
+        import app.main as m
+        from app.main import LiveTestOrder, ReportPurchase, Session, engine, select
+        monkeypatch.setattr(m.payments, "configured", lambda: True)
+        async def fake_create(order_id, amount, desc, url, kind="livetest", contact="", _post=None):
+            return ("pay_buyer", "https://pay.example/z")
+        monkeypatch.setattr(m.payments, "create_payment", fake_create)
+        rid = self._check()
+        if kind == "report":
+            client.post("/api/report", json={"check_id": rid, "tier": tier, "contact": contact})
+            model = ReportPurchase
+        else:
+            client.post("/api/live-test", json={"check_id": rid, "contact": contact})
+            model = LiveTestOrder
+        with Session(engine) as s:
+            oid = s.exec(select(model).where(model.contact == contact)).first().id
+        async def fake_fetch(pid, _post=None):
+            return {"status": "succeeded", "metadata": {"order_id": str(oid), "kind": kind}}
+        monkeypatch.setattr(m.payments, "fetch_payment", fake_fetch)
+        client.post("/api/yookassa/webhook", json={"object": {"id": "pay_buyer"}})
+        return rid, oid, model
+
+    # --- сама дыра ---
+
+    def test_report_buyer_gets_a_letter_with_a_link_to_his_report(self, monkeypatch):
+        from app.main import ReportPurchase, Session, engine
+        sent = self._mail(monkeypatch)
+        rid, oid, _ = self._pay(monkeypatch, "report", "reportbuyer@example.com")
+        assert len(sent) == 1
+        to, subject, body = sent[0]
+        assert to == "reportbuyer@example.com"
+        assert "оплата принята" in subject.lower()
+        with Session(engine) as s:
+            tok = s.get(ReportPurchase, oid).access_token
+        assert f"/report/{rid}?t={tok}" in body        # ссылка ведёт прямо в отчёт
+        assert "2990 ₽" in body and "Бизнес-план" in body
+
+    def test_letter_says_the_tab_can_be_closed(self, monkeypatch):
+        """Разбор собирается минутами. Без этой фразы человек либо сидит и
+        ждёт, либо закрывает вкладку и считает, что потерял покупку."""
+        sent = self._mail(monkeypatch)
+        self._pay(monkeypatch, "report", "closetab@example.com")
+        body = sent[0][2]
+        assert "можно закрыть" in body
+        assert "продолжится" in body
+
+    def test_letter_shows_the_way_back_without_the_link(self, monkeypatch):
+        sent = self._mail(monkeypatch)
+        self._pay(monkeypatch, "report", "waybackpath@example.com")
+        body = sent[0][2]
+        assert "/account" in body
+        assert "без пароля" in body.lower()
+
+    def test_live_test_buyer_gets_a_letter_too(self, monkeypatch):
+        sent = self._mail(monkeypatch)
+        self._pay(monkeypatch, "livetest", "livebuyer@example.com")
+        assert len(sent) == 1
+        to, subject, body = sent[0]
+        assert to == "livebuyer@example.com"
+        assert "тест на реальных людях" in subject
+        assert "1490 ₽" in body
+
+    def test_letter_does_not_point_at_a_link_it_does_not_contain(self, monkeypatch):
+        """В письме про живой тест прямой ссылки нет — страницу мы ещё
+        собираем. Фраза «даже если ссылка выше потеряется» там врала бы."""
+        sent = self._mail(monkeypatch)
+        self._pay(monkeypatch, "livetest", "nolink@example.com")
+        body = sent[0][2]
+        assert "ссылка выше" not in body
+        sent.clear()
+        self._pay(monkeypatch, "report", "haslink@example.com")
+        assert "ссылка выше" in sent[0][2]      # а здесь ссылка есть
+
+    def test_live_test_letter_repeats_the_ad_budget_warning(self, monkeypatch):
+        """A7: про отдельный рекламный бюджет человек узнавал уже после
+        оплаты. Письмо — последнее место, где об этом можно промолчать."""
+        import app.main as m
+        sent = self._mail(monkeypatch)
+        self._pay(monkeypatch, "livetest", "adbudget@example.com")
+        body = sent[0][2]
+        assert m.AD_BUDGET_HINT in body
+        assert "напрямую Яндексу" in body
+
+    # --- заявки без оплаты ---
+
+    def test_unpaid_request_is_confirmed_to_the_buyer(self, monkeypatch):
+        """Касса не настроена — заявку доводит владелец руками. Человек,
+        оставивший контакт, всё равно должен получить подтверждение."""
+        import app.main as m
+        monkeypatch.setattr(m.payments, "configured", lambda: False)
+        sent = self._mail(monkeypatch)
+        rid = self._check()
+        client.post("/api/report", json={"check_id": rid, "tier": "quick",
+                                         "contact": "unpaidbuyer@example.com"})
+        assert len(sent) == 1
+        assert "заявка принята" in sent[0][1].lower()
+        assert "оплата принята" not in sent[0][2].lower()
+
+    # --- честность и надёжность ---
+
+    def test_letter_is_sent_once_per_order(self, monkeypatch):
+        """Вебхук ЮКассы приходит повторно — второе письмо о той же оплате
+        выглядит как второе списание."""
+        sent = self._mail(monkeypatch)
+        self._pay(monkeypatch, "report", "onceonly@example.com")
+        client.post("/api/yookassa/webhook", json={"object": {"id": "pay_buyer"}})
+        client.post("/api/yookassa/webhook", json={"object": {"id": "pay_buyer"}})
+        assert len(sent) == 1
+
+    def test_buyer_flag_is_separate_from_the_owner_flag(self, monkeypatch):
+        """Урок A2: один флаг на двоих означал бы, что письмо владельцу
+        гасит письмо покупателю."""
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        to_buyer = []
+        def only_owner_works(to, subject, body, **kw):
+            if to != "owner@example.com":
+                raise RuntimeError("ящик покупателя недоступен")
+            to_buyer.append(to)
+        monkeypatch.setattr(m.mailer, "send", only_owner_works)
+        _, oid, _ = self._pay(monkeypatch, "report", "brokenbox@example.com")
+        with Session(engine) as s:
+            row = s.get(ReportPurchase, oid)
+            assert row.paid_notified is True      # владельцу ушло
+            assert row.buyer_notified is False    # покупателю — нет, и мы это помним
+
+    def test_phone_contact_does_not_break_the_payment(self, monkeypatch):
+        """Контакт для чека 54-ФЗ может быть телефоном — письма тогда просто
+        нет, но оплата обязана пройти."""
+        from app.main import ReportPurchase, Session, engine
+        sent = self._mail(monkeypatch)
+        _, oid, _ = self._pay(monkeypatch, "report", "+79990001122")
+        assert sent == []
+        with Session(engine) as s:
+            row = s.get(ReportPurchase, oid)
+            assert row.status == "paid"
+            assert row.buyer_notified is False
+
+    def test_broken_smtp_does_not_break_the_payment(self, monkeypatch):
+        """Человек уже заплатил: сбой почты не имеет права стать ошибкой
+        на его экране (принцип 7)."""
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine
+        monkeypatch.setattr(m.mailer, "configured", lambda: True)
+        def boom(*a, **kw):
+            raise RuntimeError("SMTP лёг")
+        monkeypatch.setattr(m.mailer, "send", boom)
+        _, oid, _ = self._pay(monkeypatch, "report", "smtpdown@example.com")
+        with Session(engine) as s:
+            assert s.get(ReportPurchase, oid).status == "paid"
+
+    def test_no_smtp_configured_is_silent(self, monkeypatch):
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "configured", lambda: False)
+        sent = []
+        monkeypatch.setattr(m.mailer, "send", lambda *a, **kw: sent.append(a))
+        self._pay(monkeypatch, "report", "nosmtp@example.com")
+        assert sent == []
+
+    # --- страница говорит то же самое ---
+
+    def test_page_tells_the_buyer_the_tab_can_be_closed(self):
+        text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
+        assert "Страницу можно закрыть" in text
+
+    def test_return_from_payment_explains_where_the_report_lives(self, monkeypatch):
+        from app.main import ReportPurchase, Session, engine
+        self._mail(monkeypatch)
+        rid, oid, _ = self._pay(monkeypatch, "report", "afterpay@example.com")
+        with Session(engine) as s:
+            tok = s.get(ReportPurchase, oid).access_token
+        text = client.get(f"/report/{rid}?t={tok}&paid=1").text
+        note = re.search(r'id="paid-note">(.*?)</div>', text, re.S).group(1)
+        assert "Оплата принята" in note
+        assert "личном кабинете" in note and "/account" in note
+        # «вкладку можно закрыть» говорит строка сборки под плашкой -- одна
+        # мысль в одном месте, а не дважды подряд
+        assert "можно закрыть" not in note
+
+    def test_page_does_not_claim_a_letter_that_never_went(self, monkeypatch):
+        """Принцип честности: обещать письмо, которого не было, хуже, чем
+        не обещать ничего. Контакт-телефон писем не получает."""
+        from app.main import ReportPurchase, Session, engine
+        self._mail(monkeypatch)
+        rid, oid, _ = self._pay(monkeypatch, "report", "+79995554433")
+        with Session(engine) as s:
+            row = s.get(ReportPurchase, oid)
+            tok, notified = row.access_token, row.buyer_notified
+        assert notified is False
+        text = client.get(f"/report/{rid}?t={tok}&paid=1").text
+        note = re.search(r'id="paid-note">(.*?)</div>', text, re.S).group(1)
+        assert "Оплата принята" in note
+        assert "письмом" not in note
+        assert "личном кабинете" in note      # путь назад всё равно назван
+
+    def test_note_is_not_shown_on_every_later_visit(self, monkeypatch):
+        """Плашка про оплату нужна в момент возврата, а не вечно."""
+        from app.main import ReportPurchase, Session, engine
+        self._mail(monkeypatch)
+        rid, oid, _ = self._pay(monkeypatch, "report", "latervisit@example.com")
+        with Session(engine) as s:
+            tok = s.get(ReportPurchase, oid).access_token
+        assert "Оплата принята" not in client.get(f"/report/{rid}?t={tok}").text
+
+
+class TestMailerKnowsWhatItCanSend:
+    """Контакт для чека 54-ФЗ разрешает и телефон -- почтальон обязан
+    спросить, а не пытаться и падать."""
+
+    def test_phone_is_not_an_email(self):
+        from app import mailer
+        for bad in ("+79990001122", "@telegram_handle", "", "не почта",
+                    "a@b", "a@.ru", "a@b.", "a b@c.ru"):
+            assert mailer.looks_like_email(bad) is False, bad
+
+    def test_normal_addresses_pass(self):
+        from app import mailer
+        for good in ("a@b.ru", "boris.belkin+tag@mail.example.com"):
+            assert mailer.looks_like_email(good) is True, good
+
+    def test_notify_buyer_never_raises(self):
+        from app import mailer
+        def boom(msg):
+            raise RuntimeError("SMTP лёг")
+        assert mailer.notify_buyer("a@b.ru", "тема", "тело", _send=boom) is False

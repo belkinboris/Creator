@@ -208,6 +208,7 @@ class LiveTestOrder(SQLModel, table=True):
     amount: int = 0
     chosen_offer: str = ""    # JSON: полный оффер, выбранный на /r/{id} -- см. LAUNCH_REQUIRED_FIELDS
     paid_notified: bool = False   # владельцу сообщили об оплате/заявке
+    buyer_notified: bool = False    # покупателю сообщили о его заказе -- см. ReportPurchase
     idea_id: Optional[str] = None   # проставляется автозапуском/владельцем -- ссылка на запущенный SmokeProject
 
 
@@ -232,6 +233,10 @@ class ReportPurchase(SQLModel, table=True):
     gen_error: str = ""
     fail_notified: bool = False   # владельцу сообщили о сорванной доставке
     paid_notified: bool = False   # владельцу сообщили о самой оплате/заявке
+    # Письмо ПОКУПАТЕЛЮ -- отдельный флаг, не общий с владельческим: письмо
+    # владельцу и письмо покупателю решают разные задачи, и успех одного не
+    # имеет права погасить второе (тот же урок, что fail_notified в A2).
+    buyer_notified: bool = False
     # Публичный пример на /example. Настоящий сгенерированный отчёт, а не
     # написанный руками: показывать более гладкий текст, чем отдаёт движок,
     # значит продавать не то, что отдаём (принцип 3). Помечает владелец.
@@ -294,6 +299,8 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS is_example BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS sample_json VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS access_token VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -555,6 +562,9 @@ async def live_test_order(data: LiveTestIn, request: Request):
         if _notify_owner_order(request, what="живой тест", order_id=order_id, idea=idea,
                                contact=contact, amount=LIVE_TEST_PRICE, paid=False):
             _mark_notified(LiveTestOrder, order_id)
+        if _notify_buyer_order(request, kind="livetest", order_id=order_id, idea=idea,
+                               contact=contact, amount=LIVE_TEST_PRICE, paid=False):
+            _mark_notified(LiveTestOrder, order_id, field="buyer_notified")
         return {"ok": True, "paid": False,
                 "message": "Заявка принята. Свяжемся в течение дня и соберём проверочную "
                            "страницу под вашу идею — рекламу вы запустите сами по нашей инструкции."}
@@ -593,11 +603,19 @@ async def yookassa_webhook(request: Request):
     kind = meta.get("kind", "livetest")   # старые платежи до kind -- считаем livetest
     model = {"livetest": LiveTestOrder, "report": ReportPurchase}.get(kind, LiveTestOrder)
     notify = None
+    buyer = None
     try:
         with Session(engine) as s:
             order = s.get(model, int(order_id)) if order_id else None
             if order and order.status != "paid":
                 order.status = "paid"; s.add(order); s.commit()
+            if order is not None and not order.buyer_notified:
+                # Письмо покупателю собирается отдельно от владельческого и по
+                # своему флагу: у них разные адресаты и разные задачи.
+                buyer = {"kind": kind, "order_id": order.id, "idea": order.idea,
+                         "contact": order.contact, "amount": order.amount,
+                         "tier": getattr(order, "tier", ""),
+                         "link": _report_link(order) if kind == "report" else ""}
             if order is not None and not order.paid_notified:
                 # Собираем данные письма ВНУТРИ сессии, а шлём после неё:
                 # SMTP может отвечать секундами, держать на нём транзакцию
@@ -631,6 +649,8 @@ async def yookassa_webhook(request: Request):
         logging.getLogger(__name__).warning("webhook order update failed", exc_info=True)
     if notify and _notify_owner_order(request, paid=True, **notify):
         _mark_notified(model, notify["order_id"])
+    if buyer and _notify_buyer_order(request, paid=True, **buyer):
+        _mark_notified(model, buyer["order_id"], field="buyer_notified")
     return {"ok": True}
 
 
@@ -778,6 +798,10 @@ async def report_order(data: ReportIn, request: Request):
                                order_id=order_id, idea=idea, contact=contact,
                                amount=price, paid=False, link=order_link):
             _mark_notified(ReportPurchase, order_id)
+        if _notify_buyer_order(request, kind="report", order_id=order_id, idea=idea,
+                               contact=contact, amount=price, paid=False, tier=tier,
+                               link=order_link):
+            _mark_notified(ReportPurchase, order_id, field="buyer_notified")
         return {"ok": True, "paid": False,
                 "message": "Заявка принята. Мы соберём отчёт вручную и пришлём в течение дня."}
     try:
@@ -831,14 +855,76 @@ def _notify_owner_order(request: Request, *, what: str, order_id: int, idea: str
     return mailer.notify_owner(f"Создатель: {head} — {what}", body)
 
 
-def _mark_notified(model, order_id: int) -> None:
-    """Флаг «владельцу уже написали» отдельной короткой транзакцией: вебхук
-    ЮКассы может прийти повторно, а страницу заказа можно перезагрузить."""
+def _notify_buyer_order(request: Request, *, kind: str, order_id: int, idea: str,
+                        contact: str, amount: int, paid: bool, tier: str = "",
+                        link: str = "") -> bool:
+    """Письмо ПОКУПАТЕЛЮ о его собственном заказе.
+
+    До этого при оплате письмо уходило владельцу, а человеку, отдавшему
+    990-2990 ₽, -- ничего: только фискальный чек от ЮКассы, то есть чек, а не
+    ссылка на продукт (A10 в PRODUCT_ROADMAP). Между тем отчёт собирается по
+    разделам минутами, и единственным следом покупки была вкладка в браузере.
+
+    Письмо отвечает ровно на три вопроса, которые возникают сразу после
+    оплаты: что именно куплено, где это лежит и что делать, если ссылка
+    потерялась. Никогда не бросает -- см. mailer.notify_buyer.
+    """
+    base = str(request.base_url).rstrip("/")
+    idea_line = f"Идея: {(idea or '—')[:200]}\n"
+    if kind == "report":
+        label = REPORT_PRICES.get(tier, {}).get("label", "отчёт")
+        subject = (f"Создатель: {label.lower()} по вашей идее — "
+                   + ("оплата принята" if paid else "заявка принята"))
+        if paid:
+            body = (f"Оплата принята, спасибо.\n\n"
+                    f"Что оплачено: {label}, {amount} ₽ (заказ №{order_id})\n"
+                    f"{idea_line}\n"
+                    f"Ваш разбор здесь:\n{base}{link}\n\n"
+                    "Он собирается по разделам и занимает несколько минут. "
+                    "Страницу можно закрыть: собранное сохраняется, при следующем "
+                    "открытии сборка продолжится сама.\n\n")
+        else:
+            body = (f"Заявка принята.\n\n"
+                    f"Что заказано: {label} (заказ №{order_id})\n"
+                    f"{idea_line}\n"
+                    "Мы соберём разбор и пришлём его в течение дня.\n\n")
+    else:
+        subject = ("Создатель: тест на реальных людях — "
+                   + ("оплата принята" if paid else "заявка принята"))
+        head = (f"Оплата принята, спасибо.\n\nЧто оплачено: тест на реальных людях, "
+                f"{amount} ₽ (заказ №{order_id})\n" if paid
+                else f"Заявка принята.\n\nЧто заказано: тест на реальных людях "
+                     f"(заказ №{order_id})\n")
+        body = (head + f"{idea_line}\n"
+                "Мы собираем проверочную страницу под вашу идею. Готовая страница и "
+                "пошаговая инструкция по запуску рекламы появятся в личном кабинете.\n\n"
+                # Про отдельный бюджет человек узнавал уже после оплаты -- ровно то,
+                # что чинила A7. Письмо -- последнее место, где об этом можно
+                # промолчать, поэтому не молчим.
+                f"Напоминаем: рекламный бюджет ({AD_BUDGET_HINT}) вы платите напрямую "
+                "Яндексу, в стоимость теста он не входит.\n\n")
+    # «даже если ссылка выше потеряется» имеет смысл только там, где ссылка
+    # выше есть: в письме про живой тест её нет, страницу мы ещё собираем.
+    tail = ("Все ваши заказы будут там, даже если ссылка выше потеряется.\n\n"
+            if link else "Все ваши заказы и проекты будут там.\n\n")
+    body += (f"Личный кабинет: {base}/account\n"
+             "Вход без пароля — укажите эту же почту, и мы пришлём ссылку. "
+             + tail +
+             "Если что-то пошло не так — просто ответьте на это письмо.\n")
+    return mailer.notify_buyer(contact, subject, body)
+
+
+def _mark_notified(model, order_id: int, *, field: str = "paid_notified") -> None:
+    """Флаг «письмо уже ушло» отдельной короткой транзакцией: вебхук
+    ЮКассы может прийти повторно, а страницу заказа можно перезагрузить.
+
+    field разделяет владельческое и покупательское письмо: успех одного не
+    имеет права погасить второе (тот же урок, что fail_notified в A2)."""
     try:
         with Session(engine) as s:
             row = s.get(model, order_id)
             if row is not None:
-                row.paid_notified = True
+                setattr(row, field, True)
                 s.add(row); s.commit()
     except Exception:
         logging.getLogger(__name__).warning("mark notified failed", exc_info=True)
@@ -1157,6 +1243,25 @@ async def report_page(rid: int, request: Request):
             '<a href="/account">личный кабинет</a> с той же почтой, что указывали '
             'при заказе, и отчёт будет там.</div>')
         purchase = None
+    elif (purchase and purchase.status == "paid"
+            and request.query_params.get("paid") == "1"):
+        # Момент возврата с оплаты -- единственный, когда человек ещё не знает,
+        # что разбор собирается минутами и что вкладку можно закрыть.
+        # Про письмо говорим ТОЛЬКО если оно действительно ушло: контакт мог
+        # оказаться телефоном, а SMTP -- лечь (см. mailer.notify_buyer).
+        # Про «можно закрыть вкладку» говорит строка сборки прямо под этой
+        # плашкой -- повторять здесь незачем. Эта отвечает на другой вопрос:
+        # где разбор будет лежать, когда вкладки не станет.
+        mailed = ("Ссылку на разбор мы отправили вам письмом. "
+                  if purchase.buyer_notified else "")
+        access_note = (
+            f'<div class="status-note ok no-print" id="paid-note">Оплата принята. {mailed}'
+            'Он всегда доступен в <a href="/account">личном кабинете</a> — вход по той '
+            'же почте, что вы указали при заказе.</div>'
+            if purchase.buyer_notified else
+            '<div class="status-note ok no-print" id="paid-note">Оплата принята. '
+            'Разбор всегда доступен в <a href="/account">личном кабинете</a> — вход по '
+            'той же почте, что вы указали при заказе.</div>')
 
     demand_data = json.loads(rec.result_json)
     preview = _report_preview(demand_data)
