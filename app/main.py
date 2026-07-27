@@ -440,7 +440,7 @@ def result_page(rid: int):
         # не за рекламным тестом -- страница результата разворачивает финальный
         # шаг под него, см. PURPOSE в result.html.
         .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False)))
-    return HTMLResponse(html_out)
+    return HTMLResponse(_fill_server_values(html_out))
 
 
 class LiveTestIn(SQLModel):
@@ -827,7 +827,7 @@ async def report_page(rid: int, request: Request):
         .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
         .replace("__SECTIONS_JSON__", json.dumps([{"key": k, "title": t} for k, t in ALL_SECTIONS], ensure_ascii=False))
         .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
-    return HTMLResponse(html_out)
+    return HTMLResponse(_fill_server_values(html_out))
 
 
 @app.get("/api/orders")
@@ -1618,7 +1618,7 @@ def legal_page():
 def guide_direct():
     """Этап 3 из 7 — пошаговый запуск Директа, часть «Тест на реальных людях»
     (режим эксперта, только Поиск)."""
-    return HTMLResponse(_with_thresholds("guide-direct.html"))
+    return HTMLResponse(_with_server_values("guide-direct.html"))
 
 
 @app.get("/social-contract", response_class=HTMLResponse)
@@ -1628,12 +1628,14 @@ def social_contract_page():
     CLAUDE.md), чтобы не отпугивать массового пользователя упоминанием
     грантов/соцконтракта. Ведёт в тот же бесплатный /api/demand -> /r/{id},
     что и главная страница."""
-    return HTMLResponse(_static("social-contract.html"))
+    return HTMLResponse(_with_server_values("social-contract.html"))
 
 
 @app.get("/oferta", response_class=HTMLResponse)
 def oferta_page():
-    return HTMLResponse(_static("oferta.html"))
+    # Оферта называет порог сбора данных числом -- это условие договора, оно
+    # обязано совпадать с тем, по которому реально считает движок.
+    return HTMLResponse(_with_server_values("oferta.html"))
 
 
 @app.get("/agreement", response_class=HTMLResponse)
@@ -1747,18 +1749,38 @@ def project_page(idea_id: str):
                            .replace("{{PRODUCT_NAME}}", proj.product_name))
 
 
-def _with_thresholds(name: str) -> str:
-    """Витрины называют пороги вердикта — подставляем их из кода, а не
-    переписываем руками. Вторая копия числа в статике уже разъезжалась с
-    движком (главная обещала 2,5% при реальных 8%), и заметить это можно
-    было только сравнив две страницы глазами."""
-    return (_static(name)
-            .replace("__CLICK_TARGET__", str(CLICK_TARGET))
-            .replace("__SIGNAL_PCT__", _pct(SIGNAL_RATE))
-            .replace("__DEAD_PCT__", _pct(DEAD_RATE))
-            .replace("__AD_BUDGET__", AD_BUDGET_HINT))
+def _fill_server_values(html: str) -> str:
+    """Подставляет в статику всё, чему в коде есть единственный источник:
+    цены, названия тарифов, пороги вердикта, рекламный бюджет.
+
+    Зашитая в HTML копия такого значения — уже трижды пойманный источник
+    вранья: кабинет звал тариф «Полный отчёт», когда витрина звала его
+    «Бизнес-план»; главная обещала порог 2,5% при реальных 8%; про рекламный
+    бюджет цифра жила только в плейбуке. Заметить это можно было, лишь
+    сравнив две страницы с кодом глазами (B5 в PRODUCT_ROADMAP).
+    """
+    for slot, value in (
+        ("__CLICK_TARGET__", str(CLICK_TARGET)),
+        ("__SIGNAL_PCT__", _pct(SIGNAL_RATE)),
+        ("__DEAD_PCT__", _pct(DEAD_RATE)),
+        ("__AD_BUDGET__", AD_BUDGET_HINT),
+        ("__LIVE_TEST_PRICE__", str(LIVE_TEST_PRICE)),
+        ("__MIN_REPORT_PRICE__", str(min(t["price"] for t in REPORT_PRICES.values()))),
+        ("__QUICK_LABEL__", REPORT_PRICES["quick"]["label"]),
+        ("__QUICK_PRICE__", str(REPORT_PRICES["quick"]["price"])),
+        ("__QUICK_WAS__", str(REPORT_PRICES["quick"]["was"])),
+        ("__FULL_LABEL__", REPORT_PRICES["full"]["label"]),
+        ("__FULL_PRICE__", str(REPORT_PRICES["full"]["price"])),
+        ("__FULL_WAS__", str(REPORT_PRICES["full"]["was"])),
+    ):
+        html = html.replace(slot, value)
+    return html
+
+
+def _with_server_values(name: str) -> str:
+    return _fill_server_values(_static(name))
 
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return HTMLResponse(_with_thresholds("index.html"))
+    return HTMLResponse(_with_server_values("index.html"))

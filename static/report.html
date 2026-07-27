@@ -303,7 +303,7 @@ if (UNLOCKED_TIER === 'full') {
   pricing.style.display = 'none';
 } else if (UNLOCKED_TIER === 'quick') {
   pricing.innerHTML = `<h3>Докупить <span class="hl">бизнес-план</span></h3>
-    <p>У вас есть быстрый разбор. Бизнес-план добавляет аудиторию, финансовую модель, риски и план запуска.</p>
+    <p>У вас тариф «__QUICK_LABEL__». «__FULL_LABEL__» добавляет аудиторию, финансовую модель, риски и план запуска.</p>
     <div class="tiers">${tierCard('full')}</div>
     <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
     <p class="err" id="order-err" role="alert"></p>`;

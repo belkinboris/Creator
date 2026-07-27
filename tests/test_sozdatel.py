@@ -1,5 +1,5 @@
 """Тесты Создателя v0.1: движок офферов, генерация лендинга, события, вердикт."""
-import asyncio, json, os, sys
+import asyncio, inspect, json, os, re, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DATABASE_URL"] = "sqlite://"
 # llm_adapter читает YANDEX_* на уровне модуля — задаём тестовые значения
@@ -1880,16 +1880,19 @@ class TestSocialContractPurpose:
         нет в QUICK_KEYS: за 990 ₽ сметы не будет. Об этом надо сказать на
         витрине, иначе человек покупает дешёвый тариф ровно за тем, чего в
         нём нет, и справедливо считает, что его обманули."""
+        import app.main as m
         from app.report_engine import QUICK_KEYS
         assert "finance" not in QUICK_KEYS      # предпосылка теста
-        text = (main_module.BASE_DIR.parent / "static" / "social-contract.html").read_text()
+        # читаем отданную страницу, а не исходник: название тарифа теперь
+        # подставляется из REPORT_PRICES и в статике его нет (B5)
+        text = client.get("/social-contract").text
         assert "Без сметы и расчётов" in text
-        assert "в тарифе «Бизнес-план»" in text
+        assert f"в тарифе «{m.REPORT_PRICES['full']['label']}»" in text
 
     def test_landing_tier_name_matches_backend_label(self):
         """Витрина и страница отчёта должны звать тариф одинаково."""
         import app.main as m
-        text = (main_module.BASE_DIR.parent / "static" / "social-contract.html").read_text()
+        text = client.get("/social-contract").text
         assert f"<h3>{m.REPORT_PRICES['full']['label']}</h3>" in text
 
     def test_purpose_persisted_from_landing(self):
@@ -3541,3 +3544,107 @@ class TestWeOnlyPromiseWhatWeDo:
         text = client.get(f"/r/{rid}").text
         assert "вернёмся с первыми цифрами" not in text.lower()
         assert 'href="/account"' in text
+
+
+class TestNoHardcodedServerValuesInStatic:
+    """B5: значение, у которого в коде есть единственный источник, не должно
+    лежать второй копией в HTML. Это уже трижды оборачивалось враньём:
+    кабинет звал тариф «Полный отчёт» против «Бизнес-плана» на витрине;
+    главная обещала порог 2,5% при реальных 8%; цифра рекламного бюджета
+    жила только в плейбуке. Каждый раз находилось глазами, а не тестом."""
+
+    STATIC = main_module.BASE_DIR.parent / "static"
+
+    def _sources(self):
+        for p in sorted(self.STATIC.glob("*.html")):
+            yield p.name, p.read_text()
+
+    def test_prices_are_not_hardcoded(self):
+        """Цена на витрине обязана совпадать с той, что спишется."""
+        import app.main as m
+        amounts = {str(m.LIVE_TEST_PRICE)}
+        for tier in m.REPORT_PRICES.values():
+            amounts |= {str(tier["price"]), str(tier["was"])}
+        bad = []
+        for name, text in self._sources():
+            for amount in amounts:
+                # «990 ₽» -- денежная запись, случайных совпадений не даёт,
+                # в отличие от голого числа.
+                if re.search(rf"(?<!\d){amount}\s*₽", text):
+                    bad.append(f"{name}: {amount} ₽")
+        assert not bad, ("суммы зашиты в статику вместо подстановки из "
+                         "REPORT_PRICES/LIVE_TEST_PRICE: " + ", ".join(bad))
+
+    def test_tier_labels_are_not_hardcoded_as_tier_references(self):
+        """Название тарифа в кавычках-ёлочках -- это ссылка на тариф, а не
+        обычное слово. Заголовок страницы «Бизнес-план для социального
+        контракта» -- название услуги, его не трогаем."""
+        import app.main as m
+        labels = [t["label"] for t in m.REPORT_PRICES.values()]
+        bad = []
+        for name, text in self._sources():
+            for label in labels:
+                if f"«{label}»" in text:
+                    bad.append(f"{name}: «{label}»")
+        assert not bad, ("названия тарифов зашиты в статику вместо подстановки "
+                         "из REPORT_PRICES: " + ", ".join(bad))
+
+    def test_verdict_thresholds_are_not_hardcoded(self):
+        """Порог сбора данных стоит в том числе в оферте -- это условие
+        договора, оно обязано совпадать с движком."""
+        import app.main as m
+        bad = []
+        for name, text in self._sources():
+            for pct in (m._pct(m.SIGNAL_RATE), m._pct(m.DEAD_RATE)):
+                # без границы слева «8%» ловится внутри «58%» из CSS-градиентов
+                if re.search(rf"(?<![\d,]){re.escape(pct)}", text):
+                    bad.append(f"{name}: {pct}")
+            if re.search(rf"(?<!\d){m.CLICK_TARGET}\s+(визит|посещен)", text):
+                bad.append(f"{name}: {m.CLICK_TARGET} визитов")
+        assert not bad, "пороги вердикта зашиты в статику: " + ", ".join(bad)
+
+    def test_ad_budget_is_not_hardcoded(self):
+        import app.main as m
+        bad = [name for name, text in self._sources() if m.AD_BUDGET_HINT in text]
+        assert not bad, "рекламный бюджет зашит в статику: " + ", ".join(bad)
+
+    def test_every_slot_used_in_static_is_filled_by_the_server(self):
+        """Обратная защита: слот, который никто не подставляет, доедет до
+        человека как «__FULL_LABEL__» прямо на экране."""
+        import app.main as m
+        used = set()
+        for _, text in self._sources():
+            used |= set(re.findall(r"__[A-Z][A-Z0-9_]*__", text))
+        # слоты страниц подставляются в своих обработчиках, а не в _fill_server_values
+        per_page = {
+            "__CHECK_ID__", "__PRICE__", "__PAY_ENABLED__", "__IDEA__", "__IDEA_JSON__",
+            "__RESULT_JSON__", "__SAVED__", "__PURPOSE_JSON__", "__CHOSEN_BLOCK__",
+            "__PREVIEW_JSON__", "__REPORT_JSON__", "__UNLOCKED_TIER__", "__ORDER_STATUS__",
+            "__GEN_ERROR__", "__PRICES_JSON__", "__SECTIONS_JSON__", "__QUICK_KEYS_JSON__",
+            "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
+            "__PAINS__", "__CTA__", "__FORM_NOTE__",
+        }
+        filled = set(re.findall(r'\("(__[A-Z0-9_]+__)"',
+                                inspect.getsource(m._fill_server_values)))
+        unknown = used - filled - per_page
+        assert not unknown, f"слоты никем не подставляются: {sorted(unknown)}"
+
+    def test_pages_render_without_leftover_slots(self):
+        """Ни один слот не должен доехать до браузера."""
+        import app.main as m
+        rid = None
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "п", "count": 10}], "best_phrase": "п",
+                    "verdict": {"level": "niche", "text": "т"}, "competitors": {"found": 1, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        for url in ("/", "/social-contract", "/guide/direct", "/oferta",
+                    f"/r/{rid}", f"/report/{rid}", "/account"):
+            text = client.get(url).text
+            assert not re.search(r"__[A-Z][A-Z0-9_]*__", text), f"незаполненный слот на {url}"
