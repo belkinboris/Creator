@@ -4521,3 +4521,122 @@ class TestFunnelMiddleIsMeasured:
         for name, title in m.METRIKA_GOALS:
             assert re.fullmatch(r"[a-z][a-z0-9_]*", name), name
             assert title and title[0].isupper(), name
+
+
+class TestOwnerFunnel:
+    """D2 + серверная половина D3: у владельца не было вида на воронку —
+    `/api/stats` отдавал два сырых счётчика. Перед тратой денег на рекламу
+    нужно видеть, на каком шаге отваливается оплаченный трафик и какая из
+    двух аудиторий вообще платит."""
+
+    def _check(self, purpose="business", **fields):
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Пошив штор на заказ", purpose=purpose,
+                              result_json='{"verdict": {"level": "niche", "text": "т"}}',
+                              **fields)
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id
+
+    def _report(self, check_id, status="new", amount=2990, tier="full"):
+        from app.main import ReportPurchase, Session, engine
+        with Session(engine) as s:
+            s.add(ReportPurchase(check_id=check_id, idea="и", tier=tier, contact="c",
+                                 status=status, amount=amount))
+            s.commit()
+
+    def _funnel(self, days=0):
+        return client.get(f"/api/funnel?days={days}", headers=OWNER).json()
+
+    def _stage(self, data, name):
+        return [s for s in data["stages"] if s["name"] == name][0]
+
+    def test_requires_owner_key(self):
+        assert client.get("/api/funnel").status_code == 401
+
+    def test_counts_every_step_of_the_path(self):
+        """Пустых мест между «проверил» и «заплатил» быть не должно."""
+        names = [s["name"] for s in self._funnel()["stages"]]
+        for expected in ("Проверок спроса", "Заострили идею", "Сохранили в кабинет",
+                         "Дошли до витрины отчёта", "Заказали отчёт", "Оплатили отчёт",
+                         "Заказали тест на людях", "Оплатили тест на людях"):
+            assert expected in names, expected
+
+    def test_every_step_says_what_it_counts(self):
+        """Число без определения — приглашение сделать неверный вывод (B3)."""
+        for st in self._funnel()["stages"]:
+            assert st["what"] and len(st["what"]) > 10, st["name"]
+
+    def test_steps_reflect_real_rows(self):
+        before = self._funnel()
+        rid = self._check(chosen_offer='{"h1": "т"}', contact="a@b.ru",
+                          sample_json='{"viability_score": 60}')
+        self._report(rid, status="paid")
+        after = self._funnel()
+        for name in ("Проверок спроса", "Заострили идею", "Сохранили в кабинет",
+                     "Дошли до витрины отчёта", "Заказали отчёт", "Оплатили отчёт"):
+            assert self._stage(after, name)["total"] == self._stage(before, name)["total"] + 1, name
+
+    def test_unpaid_order_counts_as_ordered_but_not_as_paid(self):
+        before = self._funnel()
+        rid = self._check()
+        self._report(rid, status="pending_payment")
+        after = self._funnel()
+        assert self._stage(after, "Заказали отчёт")["total"] == \
+               self._stage(before, "Заказали отчёт")["total"] + 1
+        assert self._stage(after, "Оплатили отчёт")["total"] == \
+               self._stage(before, "Оплатили отчёт")["total"]
+
+    def test_split_by_audience(self):
+        """Без разбивки не понять, какая рекламная кампания окупается (D3)."""
+        before = self._funnel()
+        self._check("social_contract")
+        after = self._funnel()
+        st_before, st_after = self._stage(before, "Проверок спроса"), self._stage(after, "Проверок спроса")
+        assert st_after["social_contract"] == st_before["social_contract"] + 1
+        assert st_after["business"] == st_before["business"]
+
+    def test_report_orders_inherit_the_audience_of_their_check(self):
+        """У покупки отчёта своего purpose нет — он берётся с проверки."""
+        before = self._stage(self._funnel(), "Оплатили отчёт")
+        rid = self._check("social_contract")
+        self._report(rid, status="paid")
+        after = self._stage(self._funnel(), "Оплатили отчёт")
+        assert after["social_contract"] == before["social_contract"] + 1
+
+    def test_owner_preview_is_not_a_sale(self):
+        """Владельческий прогон бесплатен — в воронке ему не место."""
+        import app.main as m
+        before = self._funnel()
+        rid = self._check()
+        self._report(rid, status=m.PREVIEW_STATUS, amount=0)
+        after = self._funnel()
+        assert self._stage(after, "Заказали отчёт")["total"] == \
+               self._stage(before, "Заказали отчёт")["total"]
+        assert after["revenue"] == before["revenue"]
+
+    def test_revenue_counts_only_confirmed_payments(self):
+        before = self._funnel()["revenue"]
+        rid = self._check()
+        self._report(rid, status="pending_payment", amount=2990)
+        assert self._funnel()["revenue"] == before        # ожидает оплаты — не деньги
+        self._report(self._check(), status="paid", amount=2990)
+        assert self._funnel()["revenue"] == before + 2990
+
+    def test_period_filter_narrows_the_window(self):
+        """Реклама оценивается за период, а не за всё время."""
+        from app.main import DemandCheck, Session, engine, utcnow
+        from datetime import timedelta
+        old = self._check()
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, old)
+            rec.created_at = utcnow() - timedelta(days=90)
+            s.add(rec); s.commit()
+        assert self._stage(self._funnel(0), "Проверок спроса")["total"] > \
+               self._stage(self._funnel(7), "Проверок спроса")["total"]
+
+    def test_desk_renders_the_funnel(self):
+        text = (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
+        assert 'id="funnel"' in text and "/api/funnel" in text
+        assert "дошли" in text          # доля от предыдущего шага
+        assert "Получено денег" in text

@@ -1200,6 +1200,74 @@ def public_stats():
     return {"ideas_checked": ideas, "events": events}
 
 
+@app.get("/api/funnel")
+def owner_funnel(request: Request, days: int = 0):
+    """Воронка владельца из НАШЕЙ базы, без зависимости от Метрики.
+
+    Метрика (D1) считает поведение и нужна Директу для оптимизации, но она
+    настраивается руками, теряет людей на блокировщиках и не знает про
+    деньги. Здесь — то, что произошло на самом деле, с разбивкой по
+    аудиториям: иначе не понять, какая рекламная кампания окупается (D3).
+
+    Каждый шаг называет, что именно он считает: число без определения —
+    это приглашение сделать неверный вывод (тот же принцип, что в B3).
+    """
+    _check_owner(request)
+    since = utcnow() - timedelta(days=days) if days > 0 else None
+
+    with Session(engine) as s:
+        checks = s.exec(select(DemandCheck)).all()
+        reports = s.exec(select(ReportPurchase)).all()
+        live = s.exec(select(LiveTestOrder)).all()
+
+    if since:
+        checks = [c for c in checks if c.created_at >= since]
+        reports = [r for r in reports if r.created_at >= since]
+        live = [o for o in live if o.created_at >= since]
+
+    # Владельческие прогоны — не продажи и не заказы, им в воронке не место.
+    reports = [r for r in reports if r.status != PREVIEW_STATUS]
+    purpose_of = {c.id: (c.purpose or "business") for c in checks}
+
+    def split(items, key=lambda x: x.purpose):
+        out = {"total": len(items)}
+        for p in report_purposes:
+            out[p] = sum(1 for x in items if key(x) == p)
+        return out
+
+    by_check = lambda r: purpose_of.get(r.check_id, "business")   # noqa: E731
+
+    paid_reports = [r for r in reports if r.status == "paid"]
+    paid_live = [o for o in live if o.status == "paid"]
+
+    stages = [
+        ("Проверок спроса", "человек описал идею и получил результат",
+         split(checks)),
+        ("Заострили идею", "выбрал одну из трёх формулировок",
+         split([c for c in checks if c.chosen_offer])),
+        ("Сохранили в кабинет", "оставил почту, чтобы вернуться",
+         split([c for c in checks if c.contact])),
+        ("Дошли до витрины отчёта", "открыли страницу отчёта и увидели образец",
+         split([c for c in checks if c.sample_json])),
+        ("Заказали отчёт", "нажали «Получить отчёт», включая неоплаченные",
+         split(reports, by_check)),
+        ("Оплатили отчёт", "деньги получены",
+         split(paid_reports, by_check)),
+        ("Заказали тест на людях", "заявка на живой тест, включая неоплаченные",
+         split(live, by_check)),
+        ("Оплатили тест на людях", "деньги получены",
+         split(paid_live, by_check)),
+    ]
+
+    revenue = sum(r.amount for r in paid_reports) + sum(o.amount for o in paid_live)
+    return {
+        "days": days,
+        "purposes": list(report_purposes),
+        "stages": [{"name": n, "what": w, **counts} for n, w, counts in stages],
+        "revenue": revenue,
+    }
+
+
 @app.get("/api/diag/yandex")
 async def diag_yandex(request: Request, phrase: str = "купить слона"):
     """Owner-only: сырая диагностика интеграции с Яндексом -- оба пути

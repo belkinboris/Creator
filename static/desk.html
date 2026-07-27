@@ -24,6 +24,32 @@
   .top a:hover{color:var(--ink);text-decoration:underline}
   .sub{color:var(--muted);font-size:15px;margin-bottom:24px}
 
+  .funnel{border:1px solid var(--line);background:var(--box);border-radius:8px;overflow:hidden}
+  .f-row{display:grid;grid-template-columns:1fr auto;gap:10px 16px;padding:12px 16px;align-items:baseline}
+  .f-row + .f-row{border-top:1px solid var(--line)}
+  .f-name{font-size:15px;font-weight:600}
+  .f-what{display:block;font-size:12.5px;color:var(--muted);font-weight:400;margin-top:2px}
+  .f-nums{text-align:right;white-space:nowrap}
+  .f-total{font:600 20px/1 "IBM Plex Mono",monospace}
+  .f-split{display:block;font-size:12px;color:var(--muted);margin-top:3px}
+  .f-drop{display:block;font-size:12px;color:var(--muted);margin-top:3px}
+  .f-bar{grid-column:1/-1;height:4px;border-radius:99px;background:var(--line);margin-top:2px}
+  .f-bar i{display:block;height:4px;border-radius:99px;background:var(--ink)}
+  .funnel-range{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+  .funnel-range button{appearance:none;background:transparent;border:1px solid var(--line);
+    border-radius:6px;padding:5px 11px;font:500 13px "IBM Plex Sans";color:var(--ink);cursor:pointer}
+  .funnel-range button.on{border-color:var(--ink);font-weight:600}
+  .f-revenue{padding:12px 16px;border-top:1px solid var(--line);font-size:14px;color:var(--muted)}
+  .f-revenue b{color:var(--ink);font:600 16px "IBM Plex Mono",monospace}
+  /* На телефоне nowrap-колонка с разбивкой отжимала название этапа в две
+     строки. Разворачиваем строку в один столбец: сначала что за шаг, потом
+     число и разбивка под ним. */
+  @media(max-width:560px){
+    .f-row{grid-template-columns:1fr}
+    .f-nums{text-align:left;white-space:normal}
+    .f-total{display:block}
+    .f-split,.f-drop{margin-top:2px}
+  }
   .grid{display:grid;gap:14px}
   @media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
   .p{background:var(--box);border:1px solid var(--line);border-radius:8px;
@@ -111,6 +137,15 @@
       <h1>Мои <span class="hl">проекты</span></h1>
       <a href="/">На главную →</a>
     </div>
+
+    <!-- Воронка из нашей БД: что произошло на самом деле, а не что показала
+         Метрика. Нужна раньше проектов — с неё начинается любой разговор
+         про то, окупается ли реклама. -->
+    <div class="orders-head">
+      <h1>Воронка <span class="hl">за всё время</span></h1>
+      <div class="funnel-range" id="funnel-range"></div>
+    </div>
+    <div id="funnel"></div>
     <p class="sub">Каждый проект — на каком он этапе, что показывают цифры и что делать дальше.</p>
     <div class="grid" id="grid"></div>
 
@@ -247,12 +282,59 @@ function enter(){
   KEY = document.getElementById("key").value.trim();
   if(KEY){ sessionStorage.setItem("sozdatel_key", KEY); load(); }
 }
+// --- Воронка -------------------------------------------------------------
+// Числа объясняют себя: у каждого шага подпись, что именно он считает, и
+// доля от предыдущего. Голый счётчик — приглашение сделать неверный вывод.
+const PURPOSE_LABEL = {business: "фаундеры", social_contract: "соцконтракт"};
+let funnelDays = 0;
+
+function fmtNum(n){ return Number(n).toLocaleString("ru-RU"); }
+
+async function loadFunnel(){
+  const box = document.getElementById("funnel");
+  const r = await fetch(`/api/funnel?days=${funnelDays}`, {headers:{"X-Owner-Key": KEY}});
+  if(!r.ok){ box.innerHTML = ""; return; }
+  const d = await r.json();
+  const first = (d.stages[0] || {}).total || 0;
+  let prev = null;
+
+  const rows = d.stages.map(st => {
+    const share = first ? Math.round(st.total / first * 100) : 0;
+    // Куда делись люди по сравнению с предыдущим шагом — это и есть ответ
+    // на вопрос «где отваливается рекламный трафик».
+    const drop = (prev !== null && prev > 0 && st.total < prev)
+      ? `<span class="f-drop">дошли ${Math.round(st.total / prev * 100)}% с прошлого шага</span>` : "";
+    prev = st.total;
+    const split = d.purposes
+      .filter(p => st[p])
+      .map(p => `${PURPOSE_LABEL[p] || p}: ${fmtNum(st[p])}`).join(" · ");
+    return `<div class="f-row">
+      <div><span class="f-name">${st.name}</span><span class="f-what">${st.what}</span></div>
+      <div class="f-nums"><span class="f-total">${fmtNum(st.total)}</span>
+        ${split ? `<span class="f-split">${split}</span>` : ""}${drop}</div>
+      <div class="f-bar"><i style="width:${share}%"></i></div>
+    </div>`;
+  }).join("");
+
+  box.innerHTML = `<div class="funnel">${rows}
+    <div class="f-revenue">Получено денег: <b>${fmtNum(d.revenue)} ₽</b> — только подтверждённые оплаты</div>
+  </div>`;
+
+  document.getElementById("funnel-range").innerHTML =
+    [[0, "за всё время"], [7, "7 дней"], [30, "30 дней"]].map(([v, label]) =>
+      `<button type="button" class="${v === funnelDays ? "on" : ""}" onclick="setFunnelDays(${v})">${label}</button>`
+    ).join("");
+}
+
+function setFunnelDays(v){ funnelDays = v; loadFunnel(); }
+
 async function load(){
   const r = await fetch("/api/cabinet", {headers:{"X-Owner-Key": KEY}});
   if(!r.ok){ sessionStorage.removeItem("sozdatel_key"); document.getElementById("gate").style.display="block"; return; }
   const d = await r.json();
   document.getElementById("gate").style.display = "none";
   document.getElementById("desk").style.display = "block";
+  loadFunnel();
   const g = document.getElementById("grid"); g.innerHTML = "";
 
   d.smoke.forEach(s => {
