@@ -206,7 +206,7 @@ btn.addEventListener('click', async () => {
     if (!r.ok || !data.ok) throw new Error(data.error || data.detail || 'Сервис сейчас перегружен. Попробуйте через минуту.');
     if (data.id) {
       if (window.sozGoal) window.sozGoal('demand_started', {purpose: 'social_contract'});
-      location.href = '/r/' + data.id; return;
+      location.href = '/r/' + (data.public_id || data.id); return;
     }
     throw new Error('Результат готов, но страница не открылась. Попробуйте ещё раз.');
   } catch (e) {

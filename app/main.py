@@ -172,9 +172,14 @@ class TrackedProject(SQLModel, table=True):
 
 
 class DemandCheck(SQLModel, table=True):
-    """Каждая бесплатная проверка спроса: счётчик + страница результата /r/<id>."""
+    """Каждая бесплатная проверка спроса: счётчик + страница результата /r/<...>."""
     id: Optional[int] = Field(default=None, primary_key=True)
     created_at: datetime = Field(default_factory=utcnow)
+    # Адрес страницы результата. Раньше в нём стоял порядковый номер, и
+    # чужую идею можно было прочитать, набрав соседний: 42 -> 41. Ссылкой на
+    # результат люди делятся намеренно, поэтому вход не требуем -- просто
+    # делаем адрес неугадываемым (E6, тот же приём, что у ReportPurchase).
+    public_id: str = Field(default_factory=lambda: secrets.token_urlsafe(9), index=True)
     idea: str = ""
     best_count: Optional[int] = None
     result_json: str = ""
@@ -300,10 +305,24 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS sample_json VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS access_token VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS public_id VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
+
+try:  # Проверки, сделанные до появления неугадываемого адреса, иначе
+    # остались бы доступны по порядковому номеру (E6). Досыпаем по строке.
+    with Session(engine) as _s:
+        _old = _s.exec(select(DemandCheck).where(
+            (DemandCheck.public_id == "") | (DemandCheck.public_id.is_(None)))).all()
+        for _row in _old:
+            _row.public_id = secrets.token_urlsafe(9)
+            _s.add(_row)
+        if _old:
+            _s.commit()
+except Exception:
+    logging.getLogger(__name__).warning("backfill public_id failed", exc_info=True)
 
 try:  # Покупки, оформленные до появления токена, остались бы без ключа от
     # собственного отчёта: в кабинет по своей почте владелец покупки войдёт,
@@ -381,6 +400,32 @@ def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
     return bool(contact and proj.contact and contact == proj.contact)
 
 
+def _find_check(s: Session, key: str, request: Request):
+    """Проверка спроса по адресу страницы. Возвращает (запись, надо_ли_редирект).
+
+    Адрес — неугадываемый `public_id`. Порядковый номер тоже принимаем, но
+    ТОЛЬКО у того, кто и так имеет право видеть эту проверку: владельца по
+    ключу или хозяина проверки по сессии кабинета. Им же отдаём редирект на
+    канонический адрес, чтобы старая закладка сама починилась.
+
+    Постороннему с порядковым номером — ничего: именно так чужая идея и
+    читалась перебором 42 -> 41 (E6).
+    """
+    rec = s.exec(select(DemandCheck).where(DemandCheck.public_id == key)).first()
+    if rec:
+        return rec, False
+    if not key.isdigit():
+        return None, False
+    rec = s.get(DemandCheck, int(key))
+    if not rec:
+        return None, False
+    contact = _current_contact(request)
+    mine = bool(contact and rec.contact and contact == rec.contact)
+    if _is_owner(request) or mine:
+        return rec, True
+    return None, False
+
+
 def _report_access_ok(request: Request, purchase: "ReportPurchase") -> bool:
     """Кому открывать ОПЛАЧЕННЫЙ отчёт на /report/{check_id}.
 
@@ -406,12 +451,17 @@ def _report_access_ok(request: Request, purchase: "ReportPurchase") -> bool:
 
 
 def _report_link(purchase: "ReportPurchase") -> str:
-    """Ссылка на отчёт для его покупателя -- сразу с токеном, чтобы
-    скопированная из кабинета ссылка открывалась и в другом браузере."""
+    """Ссылка на отчёт для его покупателя -- по неугадываемому адресу
+    проверки и сразу с токеном, чтобы скопированная из кабинета ссылка
+    открывалась и в другом браузере."""
     if not purchase.check_id:
         return ""
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, purchase.check_id)
+    if not rec:
+        return ""
     tok = purchase.access_token or ""
-    return f"/report/{purchase.check_id}" + (f"?t={tok}" if tok else "")
+    return f"/report/{rec.public_id}" + (f"?t={tok}" if tok else "")
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +512,7 @@ async def demand_check(data: IdeaIn, request: Request):
         result = await check_demand(data.idea)
     except DemandError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-    check_id = None
+    check_id = public_id = None
     try:  # сохранение не должно уметь ломать ответ пользователю
         known = [f["count"] for f in result["formulations"] if f["count"] is not None]
         # Уже вошедший в кабинет человек получает автопривязку без лишних
@@ -474,10 +524,12 @@ async def demand_check(data: IdeaIn, request: Request):
                           purpose=purpose)
         with Session(engine) as s:
             s.add(rec); s.commit(); s.refresh(rec)
-            check_id = rec.id
+            check_id, public_id = rec.id, rec.public_id
     except Exception:
         logging.getLogger(__name__).warning("demand check not persisted", exc_info=True)
-    return {"ok": True, "id": check_id, **result}
+    # public_id -- то, из чего витрина собирает адрес /r/. Номер записи
+    # остаётся для API (заказы, сохранение), но в адрес больше не попадает.
+    return {"ok": True, "id": check_id, "public_id": public_id, **result}
 
 
 @app.post("/api/sharpen")
@@ -499,18 +551,21 @@ LIVE_TEST_PRICE = int(os.environ.get("SOZDATEL_LIVE_TEST_PRICE", "1490"))
 
 
 @app.get("/r/{rid}", response_class=HTMLResponse)
-def result_page(rid: int):
+def result_page(rid: str, request: Request):
     """Страница результата проверки: инструмент, а не витрина. Узкая полоска
     преемственности вместо всего пути 0->7; отсюда же -- заказ живого теста."""
     with Session(engine) as s:
-        rec = s.get(DemandCheck, rid)
+        rec, redirect = _find_check(s, rid, request)
     if not rec or not rec.result_json:
         return HTMLResponse(_static("index.html"), status_code=404)
+    if redirect:
+        return RedirectResponse(f"/r/{rec.public_id}", status_code=307)
     tpl = _static("result.html")
     safe_json = rec.result_json.replace("</", "<\\/")
     idea_json = json.dumps(rec.idea, ensure_ascii=False).replace("</", "<\\/")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rec.id))
+        .replace("__PUBLIC_ID__", rec.public_id)
         .replace("__PRICE__", str(LIVE_TEST_PRICE))
         .replace("__AD_BUDGET__", AD_BUDGET_HINT)
         .replace("__PAY_ENABLED__", "true" if payments.configured() else "false")
@@ -1242,7 +1297,7 @@ def example_page(request: Request):
 
 
 @app.get("/report/{rid}", response_class=HTMLResponse)
-async def report_page(rid: int, request: Request):
+async def report_page(rid: str, request: Request):
     """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
     после оплаты, генерируются лениво при первом открытии (без воркеров,
     тот же принцип, что и во всём проекте)."""
@@ -1251,13 +1306,26 @@ async def report_page(rid: int, request: Request):
     # Промпты правились вслепую, а качество отчёта -- это весь платный продукт.
     owner = _is_owner(request)
     want_preview = request.query_params.get("preview") or ""
+
+    with Session(engine) as s:
+        # Тот же неугадываемый адрес, что и у страницы результата: тизер
+        # показывает текст чужой идеи, и по порядковому номеру его читали
+        # перебором ровно так же (E6).
+        rec, redirect = _find_check(s, rid, request)
+        if not rec or not rec.result_json:
+            return HTMLResponse(_static("index.html"), status_code=404)
+        if redirect:
+            keep = str(request.url.query)
+            return RedirectResponse(f"/report/{rec.public_id}" + (f"?{keep}" if keep else ""),
+                                    status_code=307)
+        rid = rec.id
+
+    # Владельческий прогон заводится ПОСЛЕ того, как проверка найдена: до
+    # этого сюда прилетала строка адреса, а не номер записи.
     if owner and want_preview in REPORT_PRICES:
         _owner_preview(rid, want_preview)
 
     with Session(engine) as s:
-        rec = s.get(DemandCheck, rid)
-        if not rec or not rec.result_json:
-            return HTMLResponse(_static("index.html"), status_code=404)
         purchase = _best_report_purchase(s, rid, include_preview=owner)
 
     # Покупка есть, но открывает её посторонний -- показываем тизер и

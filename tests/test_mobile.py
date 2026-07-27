@@ -85,8 +85,10 @@ with Session(engine) as s:
                           contact="sweep@example.com",
                           result_json=json.dumps(data, ensure_ascii=False))
         s.add(rec); s.commit(); s.refresh(rec)
-        out[purpose] = rec.id
-    s.add(ReportPurchase(check_id=out["business"], idea=idea, tier="full",
+        # В адресе страницы — неугадываемый public_id, номер остался для API.
+        out[purpose] = rec.public_id
+        out[purpose + "_id"] = rec.id
+    s.add(ReportPurchase(check_id=out["business_id"], idea=idea, tier="full",
                          contact="sweep@example.com", status="paid", amount=2990,
                          is_example=True,
                          report_json=json.dumps({"sections": [
@@ -111,7 +113,7 @@ with Session(engine) as s:
     rec = DemandCheck(idea="Подписка на носки по гороскопу с доставкой", best_count=30,
                       purpose="business", result_json=json.dumps(weak, ensure_ascii=False))
     s.add(rec); s.commit(); s.refresh(rec)
-    out["weak"] = rec.id
+    out["weak"] = rec.public_id
     s.commit()
 print(json.dumps(out))
 '''
