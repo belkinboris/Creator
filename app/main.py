@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -172,9 +173,14 @@ class TrackedProject(SQLModel, table=True):
 
 
 class DemandCheck(SQLModel, table=True):
-    """Каждая бесплатная проверка спроса: счётчик + страница результата /r/<id>."""
+    """Каждая бесплатная проверка спроса: счётчик + страница результата /r/<...>."""
     id: Optional[int] = Field(default=None, primary_key=True)
     created_at: datetime = Field(default_factory=utcnow)
+    # Адрес страницы результата. Раньше в нём стоял порядковый номер, и
+    # чужую идею можно было прочитать, набрав соседний: 42 -> 41. Ссылкой на
+    # результат люди делятся намеренно, поэтому вход не требуем -- просто
+    # делаем адрес неугадываемым (E6, тот же приём, что у ReportPurchase).
+    public_id: str = Field(default_factory=lambda: secrets.token_urlsafe(9), index=True)
     idea: str = ""
     best_count: Optional[int] = None
     result_json: str = ""
@@ -300,10 +306,24 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS sample_json VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS access_token VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS public_id VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
+
+try:  # Проверки, сделанные до появления неугадываемого адреса, иначе
+    # остались бы доступны по порядковому номеру (E6). Досыпаем по строке.
+    with Session(engine) as _s:
+        _old = _s.exec(select(DemandCheck).where(
+            (DemandCheck.public_id == "") | (DemandCheck.public_id.is_(None)))).all()
+        for _row in _old:
+            _row.public_id = secrets.token_urlsafe(9)
+            _s.add(_row)
+        if _old:
+            _s.commit()
+except Exception:
+    logging.getLogger(__name__).warning("backfill public_id failed", exc_info=True)
 
 try:  # Покупки, оформленные до появления токена, остались бы без ключа от
     # собственного отчёта: в кабинет по своей почте владелец покупки войдёт,
@@ -330,7 +350,7 @@ async def _lifespan(_app: FastAPI):
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
     for name in ("index.html", "project.html", "guide-direct.html", "result.html", "report.html",
-                 "social-contract.html", "account.html"):
+                 "social-contract.html", "account.html", "verify.html"):
         try:
             _static(name)
         except Exception:
@@ -381,6 +401,32 @@ def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
     return bool(contact and proj.contact and contact == proj.contact)
 
 
+def _find_check(s: Session, key: str, request: Request):
+    """Проверка спроса по адресу страницы. Возвращает (запись, надо_ли_редирект).
+
+    Адрес — неугадываемый `public_id`. Порядковый номер тоже принимаем, но
+    ТОЛЬКО у того, кто и так имеет право видеть эту проверку: владельца по
+    ключу или хозяина проверки по сессии кабинета. Им же отдаём редирект на
+    канонический адрес, чтобы старая закладка сама починилась.
+
+    Постороннему с порядковым номером — ничего: именно так чужая идея и
+    читалась перебором 42 -> 41 (E6).
+    """
+    rec = s.exec(select(DemandCheck).where(DemandCheck.public_id == key)).first()
+    if rec:
+        return rec, False
+    if not key.isdigit():
+        return None, False
+    rec = s.get(DemandCheck, int(key))
+    if not rec:
+        return None, False
+    contact = _current_contact(request)
+    mine = bool(contact and rec.contact and contact == rec.contact)
+    if _is_owner(request) or mine:
+        return rec, True
+    return None, False
+
+
 def _report_access_ok(request: Request, purchase: "ReportPurchase") -> bool:
     """Кому открывать ОПЛАЧЕННЫЙ отчёт на /report/{check_id}.
 
@@ -406,12 +452,17 @@ def _report_access_ok(request: Request, purchase: "ReportPurchase") -> bool:
 
 
 def _report_link(purchase: "ReportPurchase") -> str:
-    """Ссылка на отчёт для его покупателя -- сразу с токеном, чтобы
-    скопированная из кабинета ссылка открывалась и в другом браузере."""
+    """Ссылка на отчёт для его покупателя -- по неугадываемому адресу
+    проверки и сразу с токеном, чтобы скопированная из кабинета ссылка
+    открывалась и в другом браузере."""
     if not purchase.check_id:
         return ""
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, purchase.check_id)
+    if not rec:
+        return ""
     tok = purchase.access_token or ""
-    return f"/report/{purchase.check_id}" + (f"?t={tok}" if tok else "")
+    return f"/report/{rec.public_id}" + (f"?t={tok}" if tok else "")
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +513,7 @@ async def demand_check(data: IdeaIn, request: Request):
         result = await check_demand(data.idea)
     except DemandError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-    check_id = None
+    check_id = public_id = None
     try:  # сохранение не должно уметь ломать ответ пользователю
         known = [f["count"] for f in result["formulations"] if f["count"] is not None]
         # Уже вошедший в кабинет человек получает автопривязку без лишних
@@ -474,10 +525,12 @@ async def demand_check(data: IdeaIn, request: Request):
                           purpose=purpose)
         with Session(engine) as s:
             s.add(rec); s.commit(); s.refresh(rec)
-            check_id = rec.id
+            check_id, public_id = rec.id, rec.public_id
     except Exception:
         logging.getLogger(__name__).warning("demand check not persisted", exc_info=True)
-    return {"ok": True, "id": check_id, **result}
+    # public_id -- то, из чего витрина собирает адрес /r/. Номер записи
+    # остаётся для API (заказы, сохранение), но в адрес больше не попадает.
+    return {"ok": True, "id": check_id, "public_id": public_id, **result}
 
 
 @app.post("/api/sharpen")
@@ -499,18 +552,21 @@ LIVE_TEST_PRICE = int(os.environ.get("SOZDATEL_LIVE_TEST_PRICE", "1490"))
 
 
 @app.get("/r/{rid}", response_class=HTMLResponse)
-def result_page(rid: int):
+def result_page(rid: str, request: Request):
     """Страница результата проверки: инструмент, а не витрина. Узкая полоска
     преемственности вместо всего пути 0->7; отсюда же -- заказ живого теста."""
     with Session(engine) as s:
-        rec = s.get(DemandCheck, rid)
+        rec, redirect = _find_check(s, rid, request)
     if not rec or not rec.result_json:
-        return HTMLResponse(_static("index.html"), status_code=404)
+        return _lost_page()
+    if redirect:
+        return RedirectResponse(f"/r/{rec.public_id}", status_code=307)
     tpl = _static("result.html")
     safe_json = rec.result_json.replace("</", "<\\/")
     idea_json = json.dumps(rec.idea, ensure_ascii=False).replace("</", "<\\/")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rec.id))
+        .replace("__PUBLIC_ID__", rec.public_id)
         .replace("__PRICE__", str(LIVE_TEST_PRICE))
         .replace("__AD_BUDGET__", AD_BUDGET_HINT)
         .replace("__PAY_ENABLED__", "true" if payments.configured() else "false")
@@ -1242,7 +1298,7 @@ def example_page(request: Request):
 
 
 @app.get("/report/{rid}", response_class=HTMLResponse)
-async def report_page(rid: int, request: Request):
+async def report_page(rid: str, request: Request):
     """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
     после оплаты, генерируются лениво при первом открытии (без воркеров,
     тот же принцип, что и во всём проекте)."""
@@ -1251,13 +1307,26 @@ async def report_page(rid: int, request: Request):
     # Промпты правились вслепую, а качество отчёта -- это весь платный продукт.
     owner = _is_owner(request)
     want_preview = request.query_params.get("preview") or ""
+
+    with Session(engine) as s:
+        # Тот же неугадываемый адрес, что и у страницы результата: тизер
+        # показывает текст чужой идеи, и по порядковому номеру его читали
+        # перебором ровно так же (E6).
+        rec, redirect = _find_check(s, rid, request)
+        if not rec or not rec.result_json:
+            return _lost_page()
+        if redirect:
+            keep = str(request.url.query)
+            return RedirectResponse(f"/report/{rec.public_id}" + (f"?{keep}" if keep else ""),
+                                    status_code=307)
+        rid = rec.id
+
+    # Владельческий прогон заводится ПОСЛЕ того, как проверка найдена: до
+    # этого сюда прилетала строка адреса, а не номер записи.
     if owner and want_preview in REPORT_PRICES:
         _owner_preview(rid, want_preview)
 
     with Session(engine) as s:
-        rec = s.get(DemandCheck, rid)
-        if not rec or not rec.result_json:
-            return HTMLResponse(_static("index.html"), status_code=404)
         purchase = _best_report_purchase(s, rid, include_preview=owner)
 
     # Покупка есть, но открывает её посторонний -- показываем тизер и
@@ -1500,6 +1569,21 @@ async def diag_yandex(request: Request, phrase: str = "купить слона")
     return await diagnose(phrase)
 
 
+@app.get("/api/diag/mail")
+def diag_mail(request: Request, to: str = ""):
+    """Owner-only: что настроено в почте и уходит ли письмо на самом деле.
+
+    Настройка почты — четыре переменные окружения в чужой панели, и до этой
+    ручки владелец узнавал результат только по тому, пожаловался ли
+    покупатель. Открыть `/api/diag/mail?key=...&to=своя@почта.ru` — придёт
+    тестовое письмо либо человекочитаемая причина, почему не пришло.
+
+    Пароль не возвращается ни при каких условиях — только факт, что он задан.
+    """
+    _check_owner(request)
+    return mailer.diagnose(to)
+
+
 # ---------------------------------------------------------------------------
 # Этап ⓪→①: выбранный оффер → лендинг, сразу захощенный
 # ---------------------------------------------------------------------------
@@ -1685,12 +1769,28 @@ def compute_verdict(views: int, leads: int, target: int, signal: float, dead: fl
                       "той же странице."}
 
 
+def _smoke_stage(views: int, click_target: int) -> int:
+    """Этап проекта по шкале STAGE_NAMES. Единственное место, где это
+    правило живёт: копия в `static/project.html` уже разъезжалась.
+
+    Проект существует только потому, что человек прошёл бесплатную проверку
+    спроса И оплатил тест на людях -- мы собрали ему страницу. Значит этапы
+    «Идея» и «Спрос» у него ПОЗАДИ. Раньше здесь стояло `1 if views else 0`,
+    и покупатель сразу после оплаты видел «Этап 1 из 7 — Идея»: продукт
+    сообщал, что человек в самом начале, ровно в тот момент, когда он
+    только что заплатил.
+
+    Пока визитов меньше цели -- идёт «Тест на реальных людях»; как только их
+    хватило на вердикт, разговор идёт уже про «Заявки».
+    """
+    return 3 if click_target and views >= click_target else 2
+
+
 def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
     """Карточка проекта -- общая для владельца (/api/cabinet) и покупателя
-    (/api/account/me), чтобы оба видели один и тот же язык: этап 0..7,
-    прогресс, вердикт. Smoke-этап определяется данными: есть клики -> ①
-    Спрос, иначе ⓪ Идея."""
-    stage = 1 if views > 0 else 0
+    (/api/account/me), чтобы оба видели один и тот же язык: этап, прогресс,
+    вердикт."""
+    stage = _smoke_stage(views, p.click_target)
     v = compute_verdict(views, leads, p.click_target, p.lead_rate_signal, p.lead_rate_dead)
     rate = (leads / views) if views else 0.0
     if views == 0:
@@ -1731,6 +1831,10 @@ def verdict(idea_id: str, request: Request):
     return {"ok": True, "idea_id": idea_id, "product_name": proj.product_name,
             "h1": offer.get("h1", ""),
             "views": views, "leads": len(leads_rows), **v,
+            # Этап считает сервер: копия правила на странице уже разъехалась
+            # с ним и показывала оплатившему человеку «Идея».
+            "stage": _smoke_stage(views, proj.click_target),
+            "stage_names": STAGE_NAMES,
             "target": proj.click_target,
             "queries": offer.get("direct_queries", []),
             "landing_url": f"/l/{idea_id}",
@@ -2058,21 +2162,86 @@ async def account_request_link(data: AccountLinkIn, request: Request):
     return {"ok": True, "message": "Если эта почта известна нам, письмо со ссылкой уже отправлено."}
 
 
+def _verify_page(heading: str, lead: str, action: str, *,
+                 who: str = "", fine: str = "", status: int = 200) -> HTMLResponse:
+    """Страница вокруг ссылки входа -- в дизайн-системе, а не голым `<p>`.
+
+    Раньше отказ отдавался фрагментом без doctype и стилей: человек, у
+    которого перестала работать ссылка на оплаченный отчёт, видел чёрный
+    Times New Roman на белом и решал, что сайт сломан.
+    """
+    html_out = (_static("verify.html")
+                .replace("__HEADING__", heading)
+                .replace("__LEAD__", lead)
+                .replace("__WHO__", who)
+                .replace("__ACTION__", action)
+                .replace("__FINE__", fine))
+    return HTMLResponse(_fill_server_values(html_out), status_code=status)
+
+
+def _expired_link_page() -> HTMLResponse:
+    return _verify_page(
+        "Ссылка недействительна или устарела",
+        f"Ссылки для входа живут {MAGIC_LINK_TTL_MINUTES} минут и открываются один раз. "
+        "Запросите новую — она придёт на ту же почту.",
+        '<a class="btn" href="/account">Запросить новую ссылку</a>',
+        fine="Если письмо не приходит, проверьте папку «Спам».",
+        status=400)
+
+
+def _find_live_link(s: Session, token: str) -> Optional["MagicLinkToken"]:
+    link = s.exec(select(MagicLinkToken).where(MagicLinkToken.token == token)).first()
+    if (not link or link.used
+            or link.created_at < utcnow() - timedelta(minutes=MAGIC_LINK_TTL_MINUTES)):
+        return None
+    return link
+
+
 @app.get("/account/verify")
+def account_verify_page(token: str):
+    """Показывает страницу с кнопкой -- и НЕ гасит ссылку.
+
+    Почтовые провайдеры и антивирусы (mail.ru, Яндекс, Kaspersky) открывают
+    ссылки из писем сами, до человека, чтобы проверить их на вредоносность.
+    Пока вход происходил прямо здесь, такой обход съедал одноразовый токен:
+    человек кликал и получал «ссылка недействительна», просил новую -- и
+    сканер съедал её тоже. Замкнутый круг, в котором покупатель не может
+    открыть то, за что заплатил. Хуже того, ответ нёс `Set-Cookie` на
+    180 дней, то есть кабинет открывался машине, проверявшей ссылку.
+
+    Вход перенесён на POST: сканеры ходят GET и HEAD, форму не отправляют.
+    Лишний клик здесь не потеря -- он ещё и называет почту, в чей кабинет
+    человек входит.
+    """
+    with Session(engine) as s:
+        link = _find_live_link(s, token)
+        if not link:
+            return _expired_link_page()
+        contact = link.contact
+    return _verify_page(
+        "Вход в личный кабинет",
+        "Остался один шаг — подтвердите, что это вы открыли письмо.",
+        # Токен уходит в query действия, а не полем формы: разбор тела
+        # потребовал бы python-multipart, лишней зависимости в проде.
+        f'<form method="post" action="/account/verify?token='
+        f'{urllib.parse.quote(token)}">'
+        f'<button class="btn" type="submit">Войти в кабинет</button></form>',
+        who=f'<div class="who"><span>Кабинет</span><b>{html.escape(contact)}</b></div>',
+        fine=f"Ссылка действует {MAGIC_LINK_TTL_MINUTES} минут с момента отправки письма.")
+
+
+@app.post("/account/verify")
 def account_verify(token: str):
     with Session(engine) as s:
-        link = s.exec(select(MagicLinkToken).where(MagicLinkToken.token == token)).first()
-        if (not link or link.used
-                or link.created_at < utcnow() - timedelta(minutes=MAGIC_LINK_TTL_MINUTES)):
-            return HTMLResponse(
-                "<p>Ссылка недействительна или устарела. "
-                '<a href="/account">Запросите новую</a>.</p>', status_code=400)
+        link = _find_live_link(s, token)
+        if not link:
+            return _expired_link_page()
         link.used = True
         s.add(link)
         session_token = secrets.token_urlsafe(32)
         s.add(AccountSession(token=session_token, contact=link.contact))
         s.commit()
-    resp = RedirectResponse(url="/account")
+    resp = RedirectResponse(url="/account", status_code=303)
     resp.set_cookie(SESSION_COOKIE, session_token, max_age=180 * 24 * 3600,
                      httponly=True, samesite="lax")
     return resp
@@ -2171,6 +2340,34 @@ def demand_chosen(rid: int, data: ChosenOfferIn, request: Request):
     return {"ok": True}
 
 
+def _check_card(c: "DemandCheck") -> dict:
+    """Проверка спроса для кабинета — с цифрами, а не одним названием.
+
+    Человек с пятью проверенными идеями видел пять одинаковых строк и не мог
+    сказать, какая сильнее, не открыв каждую (E4). Показываем то, что уже
+    посчитано на бесплатной проверке: общий балл, слабое место и частотность.
+    Ничего нового не считаем и не обещаем.
+
+    Битый JSON не имеет права спрятать карточку из кабинета (принцип 7):
+    без цифр — значит без цифр, но строка на месте.
+    """
+    score = weakest = count = None
+    try:
+        data = json.loads(c.result_json) if c.result_json else {}
+        overall = data.get("overall") or {}
+        score = overall.get("value")
+        weakest = overall.get("weakest")
+        known = [f.get("count") for f in (data.get("formulations") or [])
+                 if isinstance(f, dict) and f.get("count") is not None]
+        count = max(known) if known else c.best_count
+    except (ValueError, TypeError, AttributeError):
+        count = c.best_count
+    return {"id": c.id, "idea": c.idea, "result_url": f"/r/{c.public_id}",
+            "score": score if isinstance(score, (int, float)) else None,
+            "weakest": weakest or "",
+            "count": count if isinstance(count, int) else None}
+
+
 @app.get("/api/account/me")
 def account_me(request: Request):
     contact = _current_contact(request)
@@ -2204,6 +2401,23 @@ def account_me(request: Request):
         # возвращать на витрину для фаундеров (принцип 4).
         purpose = checks[0].purpose if checks else "business"
         checks = [c for c in checks if c.id not in promoted_ids]
+        # От самой сильной идеи к самой слабой: это и есть ответ на вопрос
+        # «во что вкладываться» (E4). Проверки без балла (Вордстат молчал)
+        # уходят вниз -- сравнивать их не с чем, но и прятать нечестно.
+        # Сортировка устойчивая, поэтому при равном балле сохраняется
+        # прежний порядок: свежие сверху.
+        check_cards = [_check_card(c) for c in checks]
+        check_cards.sort(key=lambda k: (k["score"] is None, -(k["score"] or 0)))
+        # Адрес проверки, из которой выросла заявка. По номеру он открывался
+        # бы только у хозяина проверки, а её могли и не привязывать к
+        # кабинету -- тогда человек получал 404 на своей же заявке.
+        order_links = {}
+        for o in orders:
+            if not o.check_id:
+                continue
+            src = s.get(DemandCheck, o.check_id)
+            if src:
+                order_links[o.check_id] = f"/r/{src.public_id}"
         from collections import defaultdict
         idea_ids = [p.idea_id for p in projects]
         counts: dict[tuple[str, str], int] = defaultdict(int)
@@ -2224,8 +2438,8 @@ def account_me(request: Request):
                      "report_url": _report_link(r)} for r in reports],
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
                     "status": _effective_status(o.status, o.created_at),
-                    "continue_url": f"/r/{o.check_id}" if o.check_id else None} for o in orders],
-        "checks": [{"id": c.id, "idea": c.idea, "result_url": f"/r/{c.id}"} for c in checks],
+                    "continue_url": order_links.get(o.check_id)} for o in orders],
+        "checks": check_cards,
     }
 
 
@@ -2416,6 +2630,8 @@ def _fill_server_values(html: str) -> str:
     сравнив две страницы с кодом глазами (B5 в PRODUCT_ROADMAP).
     """
     for slot, value in (
+        # По умолчанию записки нет: её подставляет только _lost_page().
+        ("__LOST_NOTE__", ""),
         ("__CLICK_TARGET__", str(CLICK_TARGET)),
         ("__SIGNAL_PCT__", _pct(SIGNAL_RATE)),
         ("__DEAD_PCT__", _pct(DEAD_RATE)),
@@ -2441,6 +2657,24 @@ def _fill_server_values(html: str) -> str:
 
 def _with_server_values(name: str) -> str:
     return _fill_server_values(_static(name))
+
+
+def _lost_page() -> HTMLResponse:
+    """404 по ссылке на проверку: главная + записка о том, что произошло.
+
+    Ссылкой на результат делятся намеренно, поэтому обрезанная мессенджером
+    или устаревшая ссылка -- обычное дело. Раньше здесь отдавался
+    `_static("index.html")` в обход подстановки, и человек читал буквально
+    «Больше __SIGNAL_PCT__ — идея живая»: первое, что он узнавал о сервисе,
+    -- что сервис сломан. Молчаливая подмена страницы главной тоже плоха --
+    он шёл смотреть конкретную проверку и не понимал, куда попал.
+    """
+    note = ('<div class="lost-note" id="lost-note" role="status">'
+            '<b>Мы не нашли эту проверку.</b> Ссылка могла быть неполной — '
+            'мессенджеры часто обрезают длинные адреса. Опишите идею ниже: '
+            'проверим спрос заново, это бесплатно.</div>')
+    html_out = _fill_server_values(_static("index.html").replace("__LOST_NOTE__", note))
+    return HTMLResponse(html_out, status_code=404)
 
 
 _FONTS_DIR = BASE_DIR.parent / "static" / "fonts"

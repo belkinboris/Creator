@@ -51,6 +51,21 @@ def _yandex_response(text: str, *, with_reasoning: bool = False) -> dict:
     return {"output": output}
 
 
+def pub(rid):
+    """Адрес страницы по номеру записи.
+
+    Раньше в адресе стоял порядковый номер, и чужую идею можно было прочитать,
+    набрав соседний (E6). Теперь адрес — неугадываемый `public_id`; номер
+    остался только для API. Тесты создают проверки по-разному, поэтому адрес
+    берём здесь одним местом.
+    """
+    from app.main import DemandCheck, Session, engine
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, int(rid)) if str(rid).isdigit() else None
+        return rec.public_id if rec else str(rid)
+
+
+
 class TestOfferEngine:
     def test_short_idea_rejected(self):
         with pytest.raises(OfferEngineError):
@@ -110,6 +125,14 @@ class TestOfferEngine:
             return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}]}
         out = asyncio.run(sharpen_idea("Идея достаточно длинная для проверки отката", _post=fake_post))
         assert out["offers"][0]["idea_id"] == "a0"
+
+
+def _slots(html: str) -> str:
+    """Незаполненные слоты шаблона (`__ИМЯ__`) — то, что человек читает
+    буквально, если страницу отдали в обход подстановки серверных значений."""
+    import re as _re
+    body = _re.sub(r"<script.*?</script>", "", html, flags=_re.S)
+    return " ".join(sorted(set(_re.findall(r"__[A-Z_]+__", body))))
 
 
 DEMAND_DATA_FIXTURE = {
@@ -515,16 +538,39 @@ class TestCabinet:
 
         assert client.delete(f"/api/tracked/{tp_id}", headers=OWNER).status_code == 200
 
-    def test_smoke_stage_from_data(self):
+    def test_smoke_stage_starts_at_the_live_test_not_at_the_idea(self):
+        """Проект существует только потому, что человек прошёл проверку
+        спроса И оплатил тест на людях. Значит «Идея» и «Спрос» позади.
+        Раньше здесь было `1 if views else 0`, и покупатель сразу после
+        оплаты видел «Этап 1 из 7 — Идея»."""
         client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
             "offer": dict(VALID_OFFER, idea_id="cab_v1")})
         cab = client.get("/api/cabinet", headers=OWNER).json()
         sm = [s for s in cab["smoke"] if s["idea_id"] == "cab_v1"][0]
-        assert sm["stage"] == 0  # кликов нет — этап Оффер
+        assert sm["stage"] == 2 and sm["stage_name"] == "Тест на реальных людях"
         client.post("/api/smoke-event", json={"event": "page_view", "idea": "cab_v1"})
         cab = client.get("/api/cabinet", headers=OWNER).json()
         sm = [s for s in cab["smoke"] if s["idea_id"] == "cab_v1"][0]
-        assert sm["stage"] == 1 and sm["stage_name"] == "Спрос"
+        assert sm["stage"] == 2, "пока визитов мало — всё ещё идёт тест"
+
+    def test_smoke_stage_moves_to_leads_once_there_is_enough_data(self):
+        import app.main as m
+        from app.main import SmokeProject, Session, engine, select
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="cab_v2")})
+        # События пишем в базу напрямую: публичная ручка ограничена 30
+        # событиями в минуту на IP, и сорок подряд она не пропустит.
+        from app.main import SmokeEvent
+        with Session(engine) as s:
+            proj = s.exec(select(SmokeProject).where(
+                SmokeProject.idea_id == "cab_v2")).first()
+            target = proj.click_target
+            for _ in range(target):
+                s.add(SmokeEvent(idea="cab_v2", event="page_view"))
+            s.commit()
+        cab = client.get("/api/cabinet", headers=OWNER).json()
+        sm = [s for s in cab["smoke"] if s["idea_id"] == "cab_v2"][0]
+        assert sm["stage"] == 3 and sm["stage_name"] == "Заявки"
 
     def test_cabinet_requires_key(self):
         assert client.get("/api/cabinet").status_code == 401
@@ -1270,7 +1316,7 @@ class TestResultPageAndOrders:
     def test_demand_returns_id_and_result_page_works(self):
         rid = self._make_check()
         assert rid is not None
-        page = client.get(f"/r/{rid}")
+        page = client.get(f"/r/{pub(rid)}")
         assert page.status_code == 200
         assert "Этап 2 из 7" in page.text and "Этап 3" in page.text  # преемственность, без жаргона
         assert "Ступень" not in page.text
@@ -1300,7 +1346,7 @@ class TestResultPageAndOrders:
             rid = r.json()["id"]
         finally:
             m.check_demand = orig
-        page = client.get(f"/r/{rid}").text
+        page = client.get(f"/r/{pub(rid)}").text
         assert "нейросеть для рекламы" in page   # данные дошли до страницы
         assert "f.matched_phrase" in page         # фронтенд умеет её показать
 
@@ -1319,7 +1365,7 @@ class TestResultPageAndOrders:
             rid = client.post("/api/demand", json={"idea": "Идея без данных Вордстата для теста прочерка"}).json()["id"]
         finally:
             m.check_demand = orig
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert '"value": null' in text            # балл «Спрос» действительно null в вшитых данных
         assert "score-val na" in text              # шаблон умеет показать текст, а не голый дефис
 
@@ -1376,30 +1422,30 @@ class TestResultFunnel:
             m.check_demand = orig
 
     def test_steps_present_in_order(self):
-        text = client.get(f"/r/{self._make_check()}").text
+        text = client.get(f"/r/{pub(self._make_check())}").text
         positions = [text.index(f'data-step="{n}"') for n in (1, 2, 3, 4, 5)]
         assert positions == sorted(positions)          # шаги идут по порядку в разметке
 
     def test_only_first_step_active_on_load(self):
-        text = client.get(f"/r/{self._make_check()}").text
+        text = client.get(f"/r/{pub(self._make_check())}").text
         assert 'openStep(STEP_ORDER[0])' in text
         assert 'function advance(' in text and 'function reopen(' in text
 
     def test_score_detail_hidden_behind_toggle(self):
         """Разбор по 4 шкалам не должен идти полотном -- прячется за
         «Почему такая оценка?» и раскрывается по клику."""
-        text = client.get(f"/r/{self._make_check()}").text
+        text = client.get(f"/r/{pub(self._make_check())}").text
         assert 'id="scores" hidden' in text
         assert "Почему такая оценка?" in text
         assert "score-detail-toggle" in text
 
     def test_skip_link_present_for_sharpen_step(self):
-        text = client.get(f"/r/{self._make_check()}").text
+        text = client.get(f"/r/{pub(self._make_check())}").text
         assert "Пропустить" in text and "skipSharpen" in text
 
     def test_steps_without_data_excluded_from_order(self):
         """Пустые scores/competitors не рисуют шаг вовсе -- STEP_ORDER их не включает."""
-        text = client.get(f"/r/{self._make_check(scores=[], overall=None, competitors={'found': None, 'top': []})}").text
+        text = client.get(f"/r/{pub(self._make_check(scores=[], overall=None, competitors={'found': None, 'top': []}))}").text
         assert "hasComp ? 2 : null" in text            # логика исключения шага в разметке присутствует
         assert "hasScores ? 3 : null" in text
 
@@ -1407,7 +1453,7 @@ class TestResultFunnel:
         """По кастдев-фидбеку: «Кто уже отвечает на этот спрос» -- непонятное
         имя раздела, конкурентов надо смотреть раньше синтезирующей оценки,
         а не между сырым спросом и ей."""
-        text = client.get(f"/r/{self._make_check()}").text
+        text = client.get(f"/r/{pub(self._make_check())}").text
         assert "Кто уже отвечает на этот спрос" not in text
         assert "Конкуренты" in text
         assert text.index("Конкуренты") < text.index("Оценка идеи")
@@ -1656,7 +1702,7 @@ class TestSharpenPublic:
             rid = client.post("/api/demand", json={"idea": "Идея достаточно длинная для страницы заострения"}).json()["id"]
         finally:
             m.check_demand = orig
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert "/api/sharpen" in text
         assert "Заострим идею" in text
 
@@ -1664,7 +1710,7 @@ class TestSharpenPublic:
         """По кастдев-фидбеку: варианты заострения были неразличимы -- eyebrow
         (аудитория) уже генерируется offer_engine, но раньше не рендерился;
         боль теперь явно подписана, а не голым текстом под заголовком."""
-        text = client.get(f"/r/{self._make_check_for_sharpen()}").text
+        text = client.get(f"/r/{pub(self._make_check_for_sharpen())}").text
         assert "o.eyebrow" in text and "Для кого:" in text
         assert "Боль:" in text
 
@@ -1734,7 +1780,7 @@ class TestReportFlow:
 
     def test_report_page_shows_free_preview_and_locked_sections(self):
         rid = self._make_check()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert "4 200" in text or "4200" in text   # частотность в тизере, без LLM
         from app.report_engine import section_title
         assert section_title("summary") in text and section_title("verdict") in text
@@ -1744,7 +1790,7 @@ class TestReportFlow:
         """Бесплатный тизер — не только цифры: вердикт и реальные конкуренты,
         чтобы решение о покупке не требовало долистывать весь блюр."""
         rid = self._make_check()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert "t.ru" in text
         assert "Спрос есть" in text
 
@@ -1771,7 +1817,7 @@ class TestReportFlow:
             rid = client.post("/api/demand", json={"idea": "Идея достаточно длинная для анализа тизера"}).json()["id"]
         finally:
             m.check_demand = orig
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert 'class="stat"' not in text          # старая витрина из цифр убрана
         assert "рынок не забит" in text
         assert "спрос растёт сейчас" in text
@@ -1781,7 +1827,7 @@ class TestReportFlow:
         """Цены не только в самом низу заблюренного отчёта -- дублируются
         сразу после бесплатного тизера, чтобы не заставлять листать весь блюр."""
         rid = self._make_check()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert 'id="pricing-top"' in text
         assert text.index('id="pricing-top"') < text.index('id="sections"')
 
@@ -1817,7 +1863,7 @@ class TestReportFlow:
         monkeypatch.setattr(m, "generate_section", fake_section)
 
         # страница отдаётся сразу: ядро есть, разделы придут отдельными запросами
-        text = client.get(f"/report/{rid}?t={tok}").text
+        text = client.get(f"/report/{pub(rid)}?t={tok}").text
         assert "Ниша занята." in text
         assert calls["core"] == 1 and calls["sections"] == 0
         with Session(engine) as s:
@@ -1830,7 +1876,7 @@ class TestReportFlow:
         # повторный визит не должен звать модель снова -- всё уже сохранено
         monkeypatch.setattr(m, "generate_core", None)
         monkeypatch.setattr(m, "generate_section", None)
-        assert "Тестовый текст отчёта." in client.get(f"/report/{rid}?t={tok}").text
+        assert "Тестовый текст отчёта." in client.get(f"/report/{pub(rid)}?t={tok}").text
         assert client.post(f"/api/report/{rid}/section?key=summary&t={tok}").json()["cached"] is True
 
     def test_report_generation_failure_shows_friendly_error(self, monkeypatch):
@@ -1846,7 +1892,7 @@ class TestReportFlow:
         async def failing(idea, demand_data, tier, chosen_offer=None, purpose='business'):
             raise ReportEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
         monkeypatch.setattr(m, "generate_core", failing)
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert "Не получилось собрать отчёт" in text
 
     def test_webhook_routes_report_kind_to_report_purchase(self, monkeypatch):
@@ -1866,7 +1912,7 @@ class TestReportFlow:
             assert s.get(ReportPurchase, rep_id).status == "paid"
 
     def test_funnel_links_to_report(self):
-        text = client.get(f"/r/{self._make_check()}").text
+        text = client.get(f"/r/{pub(self._make_check())}").text
         assert "/report/" in text
         assert "отчёт по идее" in text.lower()
 
@@ -1896,7 +1942,7 @@ class TestGuideDirect:
             rid = client.post("/api/demand", json={"idea": "Достаточно длинная идея для ссылки на гайд"}).json()["id"]
         finally:
             m.check_demand = orig
-        assert "/guide/direct" in client.get(f"/r/{rid}").text
+        assert "/guide/direct" in client.get(f"/r/{pub(rid)}").text
 
 
 class TestSocialContractPurpose:
@@ -1968,11 +2014,11 @@ class TestSocialContractPurpose:
 
     def test_result_page_exposes_purpose(self):
         rid = self._make_check("social_contract")
-        assert 'const PURPOSE = "social_contract";' in client.get(f"/r/{rid}").text
+        assert 'const PURPOSE = "social_contract";' in client.get(f"/r/{pub(rid)}").text
 
     def test_result_page_defaults_purpose_for_business(self):
         rid = self._make_check()
-        assert 'const PURPOSE = "business";' in client.get(f"/r/{rid}").text
+        assert 'const PURPOSE = "business";' in client.get(f"/r/{pub(rid)}").text
 
     def test_result_page_promotes_business_plan_for_social_contract(self):
         """Человек с /social-contract пришёл за планом для комиссии, а главной
@@ -2016,7 +2062,7 @@ class TestSocialContractPurpose:
             seen["purpose"] = purpose
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         assert seen["purpose"] == "social_contract"
 
 
@@ -2092,7 +2138,7 @@ class TestFooterLinks:
                               json={"idea": "Достаточно длинная идея для проверки футера страницы"}).json()["id"]
         finally:
             m.check_demand = orig
-        self._assert_footer(client.get(f"/r/{rid}").text, "результата")
+        self._assert_footer(client.get(f"/r/{pub(rid)}").text, "результата")
 
     def test_project_has_footer(self):
         client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
@@ -2290,7 +2336,7 @@ class TestOwnerLearnsAboutOrders:
         assert len(sent) == 1
         subject, body = sent[0]
         assert "Бизнес-план" in subject and "rep@example.com" in body
-        assert f"/report/{rid}" in body
+        assert f"/report/{pub(rid)}" in body
 
     def test_paid_webhook_notifies_owner_once(self, monkeypatch):
         """Вебхук ЮКассы может прийти повторно -- письмо должно уйти один раз."""
@@ -2344,7 +2390,7 @@ class TestOwnerLearnsAboutOrders:
         monkeypatch.setattr(m, "generate_core", failing)
         with Session(engine) as s:
             tok = s.get(ReportPurchase, oid).access_token
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         assert len(sent) == 2                      # письмо о сбое всё-таки ушло
         assert "не собрался" in sent[1][0]
 
@@ -2418,7 +2464,7 @@ class TestPaidReportFailureIsNoticed:
         sent = []
         monkeypatch.setattr(m.mailer, "send", lambda to, subject, body, **kw: sent.append((to, subject, body)))
 
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         assert len(sent) == 1
         to, subject, body = sent[0]
         assert to == "owner@example.com"
@@ -2429,8 +2475,8 @@ class TestPaidReportFailureIsNoticed:
             assert p.gen_error and p.fail_notified is True
 
         # покупатель перезагружает страницу -- второго письма быть не должно
-        client.get(f"/report/{rid}?t={tok}")
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         assert len(sent) == 1
 
     def test_unpaid_request_does_not_alarm_owner(self, monkeypatch):
@@ -2453,7 +2499,7 @@ class TestPaidReportFailureIsNoticed:
         monkeypatch.setattr(m.mailer, "configured", lambda: True)
         sent = []
         monkeypatch.setattr(m.mailer, "send", lambda to, subject, body, **kw: sent.append(to))
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{pub(rid)}")
         assert sent == []
 
     def test_broken_mail_does_not_break_the_page(self, monkeypatch):
@@ -2467,7 +2513,7 @@ class TestPaidReportFailureIsNoticed:
         def boom(*a, **kw):
             raise RuntimeError("SMTP лёг")
         monkeypatch.setattr(m.mailer, "send", boom)
-        r = client.get(f"/report/{rid}?t={tok}")
+        r = client.get(f"/report/{pub(rid)}?t={tok}")
         assert r.status_code == 200
         assert "Не получилось собрать отчёт" in r.text
 
@@ -2477,7 +2523,7 @@ class TestPaidReportFailureIsNoticed:
         rid, oid, tok = self._paid_purchase(monkeypatch)
         self._break_generation(monkeypatch)
         monkeypatch.delenv("SOZDATEL_OWNER_EMAIL", raising=False)
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         data = client.get("/api/orders", headers=OWNER).json()
         row = [r for r in data["reports"] if r["id"] == oid][0]
         assert row["status"] == "paid"
@@ -2485,7 +2531,7 @@ class TestPaidReportFailureIsNoticed:
         assert "ИИ думал слишком долго" in row["gen_error"]
         assert row["tier_label"] == "Бизнес-план"
         # ссылка из /desk ведёт прямо в отчёт -- вместе с токеном покупателя
-        assert row["report_url"] == f"/report/{rid}?t={tok}"
+        assert row["report_url"] == f"/report/{pub(rid)}?t={tok}"
 
     def test_desk_renders_failed_delivery(self):
         text = (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
@@ -2580,8 +2626,8 @@ class TestAccountCabinet:
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_" + contact, contact=contact))
             s.commit()
-        r = client.get(f"/account/verify?token=tok_{contact}", follow_redirects=False)
-        assert r.status_code in (302, 307)
+        r = client.post(f"/account/verify?token=tok_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
         return r.cookies.get("sozdatel_session")
 
     def test_verify_rejects_unknown_token(self):
@@ -2592,7 +2638,7 @@ class TestAccountCabinet:
         session_token = self._issue_session(monkeypatch, "reuse@example.com")
         assert session_token
         # тот же токен второй раз -- уже использован
-        r = client.get("/account/verify?token=tok_reuse@example.com", follow_redirects=False)
+        r = client.post("/account/verify?token=tok_reuse@example.com", follow_redirects=False)
         assert r.status_code == 400
         client.cookies.clear()
 
@@ -2657,21 +2703,31 @@ class TestAccountCabinet:
         быть видна в кабинете -- иначе человек, начавший что-то, но не
         доведший до конца, теряет к этому доступ."""
         import app.main as m
-        from app.main import LiveTestOrder, Session, engine
+        from app.main import DemandCheck, LiveTestOrder, Session, engine
         contact = "pending_order@example.com"
         with Session(engine) as s:
+            # Проверка НЕ привязана к кабинету: человек заказал живой тест,
+            # не сохраняя её. Ровно этот случай и ломался -- ссылка вела на
+            # порядковый номер, который для него уже закрыт (E6), и кабинет
+            # отдавал 404 на его же заявке.
+            src = DemandCheck(idea="идея без запуска",
+                              result_json='{"verdict": {"level": "niche", "text": "т"}}')
+            s.add(src); s.commit(); s.refresh(src)
             s.add(LiveTestOrder(idea="идея без запуска", contact=contact,
-                                status="pending_payment", check_id=77))
+                                status="pending_payment", check_id=src.id))
             s.commit()
+            pid = src.public_id
         session_token = self._issue_session(monkeypatch, contact)
         client.cookies.set("sozdatel_session", session_token)
         r = client.get("/api/account/me")
-        client.cookies.clear()
         d = r.json()
         assert len(d["orders"]) == 1
         assert d["orders"][0]["idea"] == "идея без запуска"
         assert d["orders"][0]["status"] == "pending_payment"
-        assert d["orders"][0]["continue_url"] == "/r/77"
+        assert d["orders"][0]["continue_url"] == f"/r/{pid}"
+        # и ссылка действительно открывается, а не ведёт в 404
+        assert client.get(d["orders"][0]["continue_url"]).status_code == 200
+        client.cookies.clear()
 
     def test_me_hides_launched_order_from_orders_list(self, monkeypatch):
         """Заявка уже стала проектом (idea_id проставлен) -- показывается
@@ -2773,14 +2829,14 @@ class TestSaveCheckToAccount:
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_save_" + contact, contact=contact))
             s.commit()
-        r = client.get(f"/account/verify?token=tok_save_{contact}", follow_redirects=False)
-        assert r.status_code in (302, 307)
+        r = client.post(f"/account/verify?token=tok_save_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
         return r.cookies.get("sozdatel_session")
 
     def test_result_page_exposes_saved_flag(self):
         client.cookies.clear()
         rid = self._make_check()
-        assert "const SAVED = false;" in client.get(f"/r/{rid}").text
+        assert "const SAVED = false;" in client.get(f"/r/{pub(rid)}").text
 
     def test_save_requires_valid_email_when_anonymous(self):
         client.cookies.clear()
@@ -2922,8 +2978,8 @@ class TestProjectPageCustomerAccess:
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_proj_" + contact, contact=contact))
             s.commit()
-        r = client.get(f"/account/verify?token=tok_proj_{contact}", follow_redirects=False)
-        assert r.status_code in (302, 307)
+        r = client.post(f"/account/verify?token=tok_proj_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
         return r.cookies.get("sozdatel_session")
 
     def test_owner_key_still_works(self):
@@ -3015,7 +3071,7 @@ class TestCustomerDevPass:
             rid = client.post("/api/demand", json={"idea": "Идея достаточно длинная для проверки порядка CTA"}).json()["id"]
         finally:
             m.check_demand = orig
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert text.index('id="order"') < text.index('class="alt-path"')
 
     def test_contact_placeholders_short_enough_for_mobile(self):
@@ -3053,18 +3109,33 @@ class TestCustomerDevPass:
         assert "Запускаем Яндекс Директ" not in home
 
         rid = TestReportFlow()._make_check()
-        result_text = client.get(f"/r/{rid}").text
+        result_text = client.get(f"/r/{pub(rid)}").text
         assert "сами запустим рекламу" not in result_text
 
-    def test_no_data_wording_reads_as_finding_not_error(self):
-        """"нет данных" рядом с частотностью читалось как «сайт сломан» --
-        по фидбеку заменили на формулировку-вывод о рынке."""
+    def test_missing_frequency_is_not_called_a_finding(self):
+        """Прежнее решение здесь ОТМЕНЕНО, и вот почему.
+
+        Когда-то «нет данных» рядом с частотностью читалось как «сайт
+        сломан», и по фидбеку это заменили на «почти не ищут» -- на
+        формулировку-вывод о рынке. Но `count = None` означает «оба пути
+        Вордстата не дали числа» (так и написано в докстринге
+        `wordstat_best`), а не «спроса нет»: это вывод, которого мы не
+        вправе делать (принцип 1). Хуже того, при неработающем Вордстате
+        КАЖДЫЙ посетитель видел три строки «почти не ищут» и уходил
+        хоронить живую идею.
+
+        Исходная жалоба решается не враньём в другую сторону, а словами:
+        «нет данных у Яндекса» называет источник, поэтому не читается как
+        наша поломка. Плюс рядом теперь есть вердикт и блок «Проверка не
+        состоялась», которых тогда не было.
+        """
         result_text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
-        assert '>нет данных<' not in result_text
-        assert result_text.count("почти не ищут") >= 2   # freq-row и score-cell
+        assert "нет данных у Яндекса" in result_text
+        # вывод про рынок на месте отсутствующего числа больше не появляется
+        assert "почти не ищут" not in result_text.split("v.level === 'weak'")[0]
         report_text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
-        assert "'нет данных'" not in report_text
-        assert "почти не ищут" in report_text
+        # в отчёте фраза осталась только там, где спрос ПОДТВЕРЖДЁННО слабый
+        assert "verdict_level === 'weak'" in report_text
 
     def test_report_has_single_pricing_block_not_duplicated(self):
         """Цены дублировались сверху и снизу отчёта -- по фидбеку нижний
@@ -3084,7 +3155,7 @@ class TestCustomerDevPass:
         """"Посмотреть отчёт" был btn-ghost -- по фидбеку поднят до полного
         чернильного веса, отчёт не второсортная опция."""
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
-        assert '<a class="btn" href="/report/__CHECK_ID__">Посмотреть отчёт</a>' in text
+        assert '<a class="btn" href="/report/__PUBLIC_ID__">Посмотреть отчёт</a>' in text
 
 
 class TestFunnelCopyClarity:
@@ -3152,8 +3223,11 @@ class TestStageMerge:
     def test_project_page_uses_merged_7_stage_scale(self):
         text = (main_module.BASE_DIR.parent / "static" / "project.html").read_text()
         assert "Тест на реальных людях" in text
-        assert "из 7" in text
-        assert "length:7" in text.replace(" ", "")
+        # длина шкалы и сам этап приходят с сервера, а не зашиты на странице:
+        # копия правила уже разъезжалась и показывала оплатившему «Идея»
+        assert "names.length" in text
+        assert "d.stage_names" in text
+        assert "d.views > 0 ? 1 : 0" not in text
         assert "Реклама" not in text   # старое отдельное название шага ушло
 
     def test_desk_stage_badge_parameterized_by_scale_length(self):
@@ -3228,7 +3302,7 @@ class TestChosenOfferReachesReport:
             seen["offer"] = chosen_offer
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         assert seen["offer"] is not None
         assert seen["offer"]["h1"] == self.OFFER["h1"]
 
@@ -3243,7 +3317,7 @@ class TestChosenOfferReachesReport:
             seen["offer"] = chosen_offer
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
-        assert client.get(f"/report/{rid}?t={tok}").status_code == 200
+        assert client.get(f"/report/{pub(rid)}?t={tok}").status_code == 200
         assert seen["offer"] is None
 
     def test_broken_json_does_not_break_paid_report(self, monkeypatch):
@@ -3258,7 +3332,7 @@ class TestChosenOfferReachesReport:
             assert chosen_offer is None
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "текст"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
-        assert client.get(f"/report/{rid}?t={tok}").status_code == 200
+        assert client.get(f"/report/{pub(rid)}?t={tok}").status_code == 200
 
     def test_saved_check_of_another_cabinet_is_protected(self):
         """id проверок перебираются, а выбор влияет на платный отчёт."""
@@ -3273,14 +3347,14 @@ class TestChosenOfferReachesReport:
         """Иначе человек не может понять, учли его выбор или нет."""
         rid = self._make_check()
         client.post(f"/api/demand/{rid}/chosen", json={"offer": self.OFFER})
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert "Разбираем формулировку" in text
         assert "Шторы за неделю" in text      # разметка <em> снята, слот не сломан
         assert "__CHOSEN_BLOCK__" not in text
 
     def test_report_page_without_choice_has_no_empty_block(self):
         rid = self._make_check()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert "Разбираем формулировку" not in text
         assert "__CHOSEN_BLOCK__" not in text
 
@@ -3298,8 +3372,8 @@ class TestAccountFirstEntry:
         from app.main import MagicLinkToken, Session, engine
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_fe_" + contact, contact=contact)); s.commit()
-        r = client.get(f"/account/verify?token=tok_fe_{contact}", follow_redirects=False)
-        assert r.status_code in (302, 307)
+        r = client.post(f"/account/verify?token=tok_fe_{contact}", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
 
     def _check(self, contact, purpose="business"):
         from app.main import DemandCheck, Session, engine
@@ -3568,7 +3642,7 @@ class TestWeOnlyPromiseWhatWeDo:
 
     def test_funnel_does_not_promise_we_launch_the_ads(self):
         rid = self._check()
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert "запустим первую рекламу" not in text
         assert "Мы запускаем живой тест" not in text
         # и говорит, кто именно запускает
@@ -3589,7 +3663,7 @@ class TestWeOnlyPromiseWhatWeDo:
         а не после. Он больше самой услуги."""
         import app.main as m
         rid = self._check()
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert "Рекламный бюджет в цену не входит" in text
         assert m.AD_BUDGET_HINT in text
         assert "__AD_BUDGET__" not in text
@@ -3608,7 +3682,7 @@ class TestWeOnlyPromiseWhatWeDo:
         """«Вернёмся с первыми цифрами» -- мы никуда не возвращаемся, человек
         смотрит их сам в кабинете."""
         rid = self._check()
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert "вернёмся с первыми цифрами" not in text.lower()
         assert 'href="/account"' in text
 
@@ -3699,8 +3773,11 @@ class TestNoHardcodedServerValuesInStatic:
             "__PREVIEW_JSON__", "__REPORT_JSON__", "__UNLOCKED_TIER__", "__ORDER_STATUS__",
             "__GEN_ERROR__", "__PRICES_JSON__", "__SECTIONS_JSON__", "__QUICK_KEYS_JSON__",
             "__OWNER_BAR__", "__TIER_KEYS_JSON__", "__SAMPLE_JSON__", "__ACCESS_NOTE__",
+            "__PUBLIC_ID__",
             "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
+            # страница подтверждения входа -- заполняет _verify_page
+            "__HEADING__", "__LEAD__", "__WHO__", "__ACTION__", "__FINE__",
         }
         filled = set(re.findall(r'\("(__[A-Z0-9_]+__)"',
                                 inspect.getsource(m._fill_server_values)))
@@ -3723,7 +3800,7 @@ class TestNoHardcodedServerValuesInStatic:
         finally:
             m.check_demand = orig
         for url in ("/", "/social-contract", "/guide/direct", "/oferta",
-                    f"/r/{rid}", f"/report/{rid}", "/account"):
+                    f"/r/{pub(rid)}", f"/report/{pub(rid)}", "/account"):
             text = client.get(url).text
             assert not re.search(r"__[A-Z][A-Z0-9_]*__", text), f"незаполненный слот на {url}"
 
@@ -3771,7 +3848,7 @@ class TestOwnerReportPreview:
         seen = {}
         self._stub_generate(monkeypatch, seen)
         rid = self._check()
-        r = client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        r = client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)
         assert r.status_code == 200
         assert seen["tier"] == "full"           # собрался именно платный тариф
         assert "Разбор идеи по данным проверки." in r.text
@@ -3781,7 +3858,7 @@ class TestOwnerReportPreview:
         seen = {}
         self._stub_generate(monkeypatch, seen)
         rid = self._check("social_contract")
-        client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)
         assert seen["purpose"] == "social_contract"
 
     def test_preview_does_not_unlock_the_report_for_anyone_else(self, monkeypatch):
@@ -3789,8 +3866,8 @@ class TestOwnerReportPreview:
         бизнес-план за 2990 ₽ даром."""
         self._stub_generate(monkeypatch)
         rid = self._check()
-        client.get(f"/report/{rid}?preview=full", headers=OWNER)
-        text = client.get(f"/report/{rid}").text          # посторонний, без ключа
+        client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)
+        text = client.get(f"/report/{pub(rid)}").text          # посторонний, без ключа
         # Бесплатный образец (балл + один раздел) посторонний видит — это
         # витрина. А вот платный разбор обязан остаться запертым.
         assert "const UNLOCKED_TIER = null;" in text
@@ -3801,7 +3878,7 @@ class TestOwnerReportPreview:
         from app.main import ReportPurchase, Session, engine, select
         self._stub_generate(monkeypatch)
         rid = self._check()
-        client.get(f"/report/{rid}?preview=full")          # без ключа
+        client.get(f"/report/{pub(rid)}?preview=full")          # без ключа
         with Session(engine) as s:
             rows = s.exec(select(ReportPurchase).where(ReportPurchase.check_id == rid)).all()
         assert rows == []
@@ -3811,10 +3888,10 @@ class TestOwnerReportPreview:
         неоплаченная заявка в /desk."""
         self._stub_generate(monkeypatch)
         rid = self._check()
-        client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)
         reports = client.get("/api/orders", headers=OWNER).json()["reports"]
         assert all(r["check_id"] != rid for r in reports if "check_id" in r)
-        assert all(rp["report_url"] != f"/report/{rid}" for rp in reports)
+        assert all(rp["report_url"] != f"/report/{pub(rid)}" for rp in reports)
 
     def test_preview_is_not_regenerated_on_every_open(self, monkeypatch):
         """Каждый прогон стоит вызова модели — второй заход должен брать
@@ -3826,15 +3903,15 @@ class TestOwnerReportPreview:
             return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": "т"}]}
         monkeypatch.setattr(m, "generate_core", fake_generate)
         rid = self._check()
-        client.get(f"/report/{rid}?preview=full", headers=OWNER)
-        client.get(f"/report/{rid}?preview=full", headers=OWNER)
+        client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)
+        client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)
         assert len(calls) == 1
 
     def test_unknown_tier_is_ignored(self, monkeypatch):
         from app.main import ReportPurchase, Session, engine, select
         self._stub_generate(monkeypatch)
         rid = self._check()
-        client.get(f"/report/{rid}?preview=../../etc/passwd", headers=OWNER)
+        client.get(f"/report/{pub(rid)}?preview=../../etc/passwd", headers=OWNER)
         with Session(engine) as s:
             rows = s.exec(select(ReportPurchase).where(ReportPurchase.check_id == rid)).all()
         assert rows == []
@@ -3842,8 +3919,8 @@ class TestOwnerReportPreview:
     def test_owner_bar_is_invisible_to_everyone_else(self):
         rid = self._check()
         # проверяем отрисованный блок, а не описание класса в CSS
-        assert 'class="owner-bar"' not in client.get(f"/report/{rid}").text
-        assert 'class="owner-bar"' in client.get(f"/report/{rid}?key=test-owner-key").text
+        assert 'class="owner-bar"' not in client.get(f"/report/{pub(rid)}").text
+        assert 'class="owner-bar"' in client.get(f"/report/{pub(rid)}?key=test-owner-key").text
 
     def test_failed_preview_does_not_email_the_owner(self, monkeypatch):
         """Письмо про сорванную доставку — про оплаченный заказ. Свой же
@@ -3855,7 +3932,7 @@ class TestOwnerReportPreview:
         monkeypatch.setattr(m, "generate_core", boom)
         monkeypatch.setattr(m.mailer, "notify_owner", lambda *a, **k: sent.append(a) or True)
         rid = self._check()
-        assert client.get(f"/report/{rid}?preview=full", headers=OWNER).status_code == 200
+        assert client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER).status_code == 200
         assert sent == []
 
 
@@ -3948,7 +4025,7 @@ class TestPublicReportExample:
         monkeypatch.setattr(m, "generate_core", fake_core)
         monkeypatch.setattr(m, "generate_section", fake_section)
         rid = self._check()
-        client.get(f"/report/{rid}?preview=full", headers=OWNER)   # ядро
+        client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)   # ядро
         client.post(f"/api/report/{rid}/section?key=summary", headers=OWNER)   # раздел
         return rid
 
@@ -3967,7 +4044,7 @@ class TestPublicReportExample:
     def test_showcases_do_not_promise_an_example_that_does_not_exist(self):
         self._clear_examples()
         rid = self._check()
-        for url in (f"/r/{rid}", "/social-contract"):
+        for url in (f"/r/{pub(rid)}", "/social-contract"):
             text = client.get(url).text
             assert "Посмотреть пример отчёта" not in text, url
             assert "__EXAMPLE_LINK__" not in text, url
@@ -3987,7 +4064,7 @@ class TestPublicReportExample:
         rid = self._built_report(monkeypatch)
         client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
         other = self._check()
-        for url in (f"/r/{other}", "/social-contract"):
+        for url in (f"/r/{pub(other)}", "/social-contract"):
             text = client.get(url).text
             assert 'href="/example"' in text, url
 
@@ -4060,7 +4137,7 @@ class TestTierDifferenceAtTheDecisionPoint:
 
     def test_both_tiers_named_with_prices_on_the_result_page(self):
         import app.main as m
-        text = client.get(f"/r/{self._check()}").text
+        text = client.get(f"/r/{pub(self._check())}").text
         for tier in m.REPORT_PRICES.values():
             assert tier["label"] in text
             assert f"{tier['price']} ₽" in text
@@ -4069,7 +4146,7 @@ class TestTierDifferenceAtTheDecisionPoint:
     def test_cheap_tier_lists_exactly_what_it_contains(self):
         """Состав берётся из движка, а не пишется руками."""
         from app.report_engine import ALL_SECTIONS, QUICK_KEYS
-        text = client.get(f"/r/{self._check()}").text
+        text = client.get(f"/r/{pub(self._check())}").text
         for key, title in ALL_SECTIONS:
             if key in QUICK_KEYS:
                 assert title in text, f"секция дешёвого тарифа не названа: {title}"
@@ -4095,7 +4172,7 @@ class TestTierDifferenceAtTheDecisionPoint:
     def test_social_contract_sees_the_same_breakdown(self):
         """Блок меняет роль на главный — состав тарифов должен уехать с ним."""
         import app.main as m
-        text = client.get(f"/r/{self._check('social_contract')}").text
+        text = client.get(f"/r/{pub(self._check('social_contract'))}").text
         assert m.REPORT_PRICES["full"]["label"] in text
         assert f"{m.REPORT_PRICES['full']['price']} ₽" in text
         assert 'id="alt-report"' in text and "__TIER_SUMMARY__" not in text
@@ -4177,7 +4254,7 @@ class TestOfferCoversWhatWeSell:
             rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
         finally:
             m.check_demand = orig
-        for url in (f"/r/{rid}", f"/report/{rid}"):
+        for url in (f"/r/{pub(rid)}", f"/report/{pub(rid)}"):
             text = client.get(url).text
             assert "вернём деньги полностью" in text, url
             assert 'href="/oferta"' in text, url
@@ -4234,7 +4311,7 @@ class TestReportBuildsProgressively:
         calls = []
         self._stub(monkeypatch, calls)
         rid, tok = self._paid_check(monkeypatch)
-        assert client.get(f"/report/{rid}?t={tok}").status_code == 200
+        assert client.get(f"/report/{pub(rid)}?t={tok}").status_code == 200
         assert calls == ["core"]
 
     def test_sections_arrive_one_by_one(self, monkeypatch):
@@ -4242,7 +4319,7 @@ class TestReportBuildsProgressively:
         calls = []
         self._stub(monkeypatch, calls)
         rid, tok = self._paid_check(monkeypatch)
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         for key in section_keys("full")[:3]:
             r = client.post(f"/api/report/{rid}/section?key={key}&t={tok}")
             assert r.status_code == 200, key
@@ -4254,7 +4331,7 @@ class TestReportBuildsProgressively:
         calls = []
         self._stub(monkeypatch, calls)
         rid, tok = self._paid_check(monkeypatch)
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         client.post(f"/api/report/{rid}/section?key=summary&t={tok}")
         again = client.post(f"/api/report/{rid}/section?key=summary&t={tok}")
         assert again.json()["cached"] is True
@@ -4268,7 +4345,7 @@ class TestReportBuildsProgressively:
         from app.report_engine import section_keys
         self._stub(monkeypatch)
         rid, tok = self._paid_check(monkeypatch)
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         order = section_keys("full")
         for key in (order[3], order[0], order[1]):
             client.post(f"/api/report/{rid}/section?key={key}&t={tok}")
@@ -4298,7 +4375,7 @@ class TestReportBuildsProgressively:
     def test_cheap_tier_cannot_pull_full_tier_sections(self, monkeypatch):
         self._stub(monkeypatch)
         rid, tok = self._paid_check(monkeypatch, tier="quick")
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         assert client.post(f"/api/report/{rid}/section?key=finance&t={tok}").status_code == 404
         assert client.post(f"/api/report/{rid}/section?key=summary&t={tok}").status_code == 200
 
@@ -4307,7 +4384,7 @@ class TestReportBuildsProgressively:
         import app.main as m
         self._stub(monkeypatch)
         rid, tok = self._paid_check(monkeypatch)
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         client.post(f"/api/report/{rid}/section?key=summary&t={tok}")
         async def boom(key, *a, **kw):
             raise m.ReportEngineError("модель недоступна")
@@ -4315,7 +4392,7 @@ class TestReportBuildsProgressively:
         r = client.post(f"/api/report/{rid}/section?key=market&t={tok}")
         assert r.status_code == 502 and "недоступна" in r.json()["error"]
         # уже собранный раздел на месте
-        assert "Текст summary." in client.get(f"/report/{rid}?t={tok}").text
+        assert "Текст summary." in client.get(f"/report/{pub(rid)}?t={tok}").text
 
     def test_locked_section_shows_its_question(self):
         """Запертый раздел продаёт вопросом, на который отвечает, а не
@@ -4374,7 +4451,7 @@ class TestFreeSampleSellsTheReport:
     def test_unpaid_visitor_sees_real_analysis(self, monkeypatch):
         self._stub(monkeypatch)
         rid = self._check()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert "Настоящий текст разбора." in text          # целый раздел
         assert "Ниша держится на рекомендациях." in text   # объяснение балла
         assert "Заказы не повторяются" in text             # названный риск
@@ -4386,9 +4463,9 @@ class TestFreeSampleSellsTheReport:
         calls = []
         self._stub(monkeypatch, calls)
         rid = self._check()
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{pub(rid)}")
         assert calls == ["core", "summary"]
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{pub(rid)}")
         assert calls == ["core", "summary"]                # второй визит бесплатен
         with Session(engine) as s:
             assert s.get(DemandCheck, rid).sample_json
@@ -4409,7 +4486,7 @@ class TestFreeSampleSellsTheReport:
         monkeypatch.setattr(m, "generate_core", fake_core)
         monkeypatch.setattr(m, "generate_section", fake_section)
         rid = self._check("social_contract")
-        client.get(f"/report/{rid}")
+        client.get(f"/report/{pub(rid)}")
         assert seen == {"core": "social_contract", "section": "social_contract"}
 
     def test_buyer_does_not_pay_for_a_sample(self, monkeypatch):
@@ -4425,7 +4502,7 @@ class TestFreeSampleSellsTheReport:
             o.status = "paid"; s.add(o); s.commit()
             tok = o.access_token
         calls.clear()
-        client.get(f"/report/{rid}?t={tok}")
+        client.get(f"/report/{pub(rid)}?t={tok}")
         assert calls == ["core"]        # только ядро платного отчёта, образца нет
 
     def test_page_survives_a_failed_sample(self, monkeypatch):
@@ -4436,7 +4513,7 @@ class TestFreeSampleSellsTheReport:
         monkeypatch.setattr(m, "generate_core", boom)
         monkeypatch.setattr(m, "generate_section", boom)
         rid = self._check()
-        r = client.get(f"/report/{rid}")
+        r = client.get(f"/report/{pub(rid)}")
         assert r.status_code == 200
         assert "const SAMPLE = null;" in r.text
 
@@ -4445,7 +4522,7 @@ class TestFreeSampleSellsTheReport:
         import app.main as m
         self._stub(monkeypatch)
         rid = self._check()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert "const UNLOCKED_TIER = null;" in text
         assert "const TIER_KEYS = [];" in text
         assert m.SAMPLE_SECTION == "summary"
@@ -4455,7 +4532,7 @@ class TestFreeSampleSellsTheReport:
         from app.report_engine import SECTION_SPECS
         self._stub(monkeypatch)
         rid = self._check()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         finance_ask = [s for s in SECTION_SPECS if s["key"] == "finance"][0]["ask"]
         assert finance_ask in text
 
@@ -4702,8 +4779,8 @@ class TestPaidReportIsNotPublic:
         from app.main import MagicLinkToken, Session, engine
         with Session(engine) as s:
             s.add(MagicLinkToken(token="tok_acc_" + contact, contact=contact)); s.commit()
-        assert client.get(f"/account/verify?token=tok_acc_{contact}",
-                          follow_redirects=False).status_code in (302, 307)
+        assert client.post(f"/account/verify?token=tok_acc_{contact}",
+                          follow_redirects=False).status_code in (302, 303, 307)
 
     def _publish_example(self, contact):
         """Пример в сервисе ровно один: публикация снимает старый. Ставим
@@ -4726,7 +4803,7 @@ class TestPaidReportIsNotPublic:
     def test_stranger_cannot_read_a_paid_report_by_guessing_the_number(self, monkeypatch):
         rid, _ = self._paid(monkeypatch, contact="secret_buyer@example.com")
         self._logout()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert "СЕКРЕТНЫЙ ВЫВОД" not in text
         assert "400 000 РУБЛЕЙ" not in text
         assert 'const UNLOCKED_TIER = null' in text or "UNLOCKED_TIER = null" in text
@@ -4762,7 +4839,7 @@ class TestPaidReportIsNotPublic:
         rid, _ = self._paid(monkeypatch, contact="sample_buyer@example.com")
         self._logout()
         calls.clear()
-        assert client.get(f"/report/{rid}").status_code == 200
+        assert client.get(f"/report/{pub(rid)}").status_code == 200
         assert calls == []
 
     def test_lost_link_is_not_offered_to_pay_a_second_time(self, monkeypatch):
@@ -4771,7 +4848,7 @@ class TestPaidReportIsNotPublic:
         за одно и то же дважды."""
         rid, _ = self._paid(monkeypatch, contact="double_pay@example.com")
         self._logout()
-        text = client.get(f"/report/{rid}").text
+        text = client.get(f"/report/{pub(rid)}").text
         assert 'id="access-note"' in text
         # витрину гасит сама страница по наличию этой плашки
         assert "getElementById('access-note')" in text
@@ -4781,7 +4858,7 @@ class TestPaidReportIsNotPublic:
         браузере, и глухая ошибка человеку ничего не объяснит (принцип 7)."""
         rid, _ = self._paid(monkeypatch, contact="lost_link@example.com")
         self._logout()
-        r = client.get(f"/report/{rid}")
+        r = client.get(f"/report/{pub(rid)}")
         assert r.status_code == 200
         assert "уже оплачен" in r.text
         assert "/account" in r.text
@@ -4791,7 +4868,7 @@ class TestPaidReportIsNotPublic:
     def test_buyer_opens_his_report_by_the_link_payment_returned_him(self, monkeypatch):
         rid, tok = self._paid(monkeypatch, contact="link_buyer@example.com")
         self._logout()
-        text = client.get(f"/report/{rid}?t={tok}").text
+        text = client.get(f"/report/{pub(rid)}?t={tok}").text
         assert "СЕКРЕТНЫЙ ВЫВОД" in text and "400 000 РУБЛЕЙ" in text
 
     def test_buyer_who_lost_the_link_opens_it_from_his_cabinet(self, monkeypatch):
@@ -4800,14 +4877,14 @@ class TestPaidReportIsNotPublic:
         rid, _ = self._paid(monkeypatch, contact="cabinet_buyer@example.com")
         self._login("cabinet_buyer@example.com")
         try:
-            assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{rid}").text
+            assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{pub(rid)}").text
         finally:
             self._logout()
 
     def test_owner_still_sees_everything_by_key(self, monkeypatch):
         rid, _ = self._paid(monkeypatch, contact="key_buyer@example.com")
         self._logout()
-        assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{rid}", headers=OWNER).text
+        assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{pub(rid)}", headers=OWNER).text
 
     # --- чужие ключи не подходят ---
 
@@ -4815,7 +4892,7 @@ class TestPaidReportIsNotPublic:
         rid, _ = self._paid(monkeypatch, contact="mine@example.com")
         self._login("notmine@example.com")
         try:
-            assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{rid}").text
+            assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{pub(rid)}").text
         finally:
             self._logout()
 
@@ -4823,7 +4900,7 @@ class TestPaidReportIsNotPublic:
         rid_a, _ = self._paid(monkeypatch, contact="a_buyer@example.com")
         _, tok_b = self._paid(monkeypatch, contact="b_buyer@example.com")
         self._logout()
-        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{rid_a}?t={tok_b}").text
+        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{pub(rid_a)}?t={tok_b}").text
 
     def test_empty_token_is_not_a_master_key(self, monkeypatch):
         """Покупки, оформленные до появления токена, досыпаются при старте.
@@ -4836,11 +4913,11 @@ class TestPaidReportIsNotPublic:
                 ReportPurchase.contact == "legacy@example.com")).first()
             o.access_token = ""; s.add(o); s.commit()
         self._logout()
-        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{rid}?t=").text
+        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{pub(rid)}?t=").text
         # но по своей почте покупатель входит и без токена
         self._login("legacy@example.com")
         try:
-            assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{rid}").text
+            assert "СЕКРЕТНЫЙ ВЫВОД" in client.get(f"/report/{pub(rid)}").text
         finally:
             self._logout()
 
@@ -4856,7 +4933,7 @@ class TestPaidReportIsNotPublic:
         finally:
             self._logout()
         row = [r for r in reports if r["check_id"] == rid][0]
-        assert row["report_url"] == f"/report/{rid}?t={tok}"
+        assert row["report_url"] == f"/report/{pub(rid)}?t={tok}"
 
     def test_payment_returns_the_buyer_with_his_token(self, monkeypatch):
         """Вернувшись с оплаты, человек обязан увидеть отчёт сразу, ещё не
@@ -4885,7 +4962,7 @@ class TestPaidReportIsNotPublic:
         with Session(engine) as s:
             tok = s.exec(select(ReportPurchase).where(
                 ReportPurchase.contact == "return@example.com")).first().access_token
-        assert f"/report/{rid}?t={tok}" in seen["url"]
+        assert f"/report/{pub(rid)}?t={tok}" in seen["url"]
         assert "paid=1" in seen["url"]
 
     def test_token_does_not_leak_through_referer(self):
@@ -4911,7 +4988,7 @@ class TestPaidReportIsNotPublic:
         text = client.get("/example").text
         assert "СЕКРЕТНЫЙ ВЫВОД" in text
         # ...но по номеру проверки он по-прежнему закрыт
-        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{rid}").text
+        assert "СЕКРЕТНЫЙ ВЫВОД" not in client.get(f"/report/{pub(rid)}").text
 
     def test_example_does_not_generate_on_visitors_behalf(self, monkeypatch):
         """Опубликованный пример мог оказаться неполным. Полный список
@@ -4993,7 +5070,7 @@ class TestBuyerHearsFromUs:
         assert "оплата принята" in subject.lower()
         with Session(engine) as s:
             tok = s.get(ReportPurchase, oid).access_token
-        assert f"/report/{rid}?t={tok}" in body        # ссылка ведёт прямо в отчёт
+        assert f"/report/{pub(rid)}?t={tok}" in body        # ссылка ведёт прямо в отчёт
         assert "2990 ₽" in body and "Бизнес-план" in body
 
     def test_letter_says_the_tab_can_be_closed(self, monkeypatch):
@@ -5132,7 +5209,7 @@ class TestBuyerHearsFromUs:
         rid, oid, _ = self._pay(monkeypatch, "report", "afterpay@example.com")
         with Session(engine) as s:
             tok = s.get(ReportPurchase, oid).access_token
-        text = client.get(f"/report/{rid}?t={tok}&paid=1").text
+        text = client.get(f"/report/{pub(rid)}?t={tok}&paid=1").text
         note = re.search(r'id="paid-note">(.*?)</div>', text, re.S).group(1)
         assert "Оплата принята" in note
         assert "личном кабинете" in note and "/account" in note
@@ -5150,7 +5227,7 @@ class TestBuyerHearsFromUs:
             row = s.get(ReportPurchase, oid)
             tok, notified = row.access_token, row.buyer_notified
         assert notified is False
-        text = client.get(f"/report/{rid}?t={tok}&paid=1").text
+        text = client.get(f"/report/{pub(rid)}?t={tok}&paid=1").text
         note = re.search(r'id="paid-note">(.*?)</div>', text, re.S).group(1)
         assert "Оплата принята" in note
         assert "письмом" not in note
@@ -5163,7 +5240,7 @@ class TestBuyerHearsFromUs:
         rid, oid, _ = self._pay(monkeypatch, "report", "latervisit@example.com")
         with Session(engine) as s:
             tok = s.get(ReportPurchase, oid).access_token
-        assert "Оплата принята" not in client.get(f"/report/{rid}?t={tok}").text
+        assert "Оплата принята" not in client.get(f"/report/{pub(rid)}?t={tok}").text
 
 
 class TestMailerKnowsWhatItCanSend:
@@ -5225,7 +5302,7 @@ class TestWeakDemandStopsSelling:
     def test_page_carries_the_honest_lead_for_weak_demand(self):
         """Главным действием становится бесплатное — переформулировать."""
         rid = self._check("weak", 30)
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert 'id="weak-lead"' in text
         assert "попробуйте другую формулировку" in text.lower()
 
@@ -5242,7 +5319,7 @@ class TestWeakDemandStopsSelling:
         """Оговорка стоит у самой кнопки живого теста: именно этот продукт
         наши же цифры и ставят под сомнение."""
         rid = self._check("weak", 30)
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert 'id="weak-caveat"' in text
         assert "рискует не набрать" in text
         # и говорит, что деньги на рекламу всё равно уйдут
@@ -5253,7 +5330,7 @@ class TestWeakDemandStopsSelling:
         с витриной (B5)."""
         import app.main as m
         rid = self._check("weak", 30)
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert "__CLICK_TARGET__" not in text          # слот подставлен
         assert f"{m.CLICK_TARGET} визитов" in text
 
@@ -5277,7 +5354,7 @@ class TestWeakDemandStopsSelling:
         обесценится и его перестанут читать."""
         for level, count in (("niche", 1200), ("strong", 5000)):
             rid = self._check(level, count)
-            text = client.get(f"/r/{rid}").text
+            text = client.get(f"/r/{pub(rid)}").text
             # блок в разметке есть всегда, но скрыт — включает его только JS
             assert 'class="weak-lead" id="weak-lead"' in text
             assert "weak-lead').classList.add('show')" in text.replace('\n', '')
@@ -5286,9 +5363,9 @@ class TestWeakDemandStopsSelling:
         """Человек вправе купить, даже когда мы отговариваем: наше дело —
         сказать правду, а не решить за него."""
         rid = self._check("weak", 30)
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert 'id="order-btn"' in text                # заявка на живой тест
-        assert f'href="/report/{rid}"' in text         # и отчёт
+        assert f'href="/report/{pub(rid)}"' in text   # и отчёт
 
 
 class TestTierListIsReadableAtTheDecisionPoint:
@@ -5391,7 +5468,834 @@ class TestTierListIsReadableAtTheDecisionPoint:
             rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
         finally:
             m.check_demand = orig
-        text = client.get(f"/r/{rid}").text
+        text = client.get(f"/r/{pub(rid)}").text
         assert "__TIER_SUMMARY__" not in text
         assert 'class="tier-groups"' in text
         assert "<b>Деньги:</b>" in text
+
+
+class TestMailerSpeaksBothPorts:
+    """Провайдер даёт два адреса на выбор: 465 шифрует с первого байта, 587
+    начинает открыто и поднимает шифрование командой STARTTLS. Код умел только
+    первый — владелец, вписавший 587 (reg.ru показывает оба), получал бы
+    невнятную ошибку SSL при полностью верных логине и пароле."""
+
+    class _FakeSMTP:
+        calls = []
+
+        def __init__(self, host, port, timeout=None):
+            type(self).calls.append(("connect", host, port))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ehlo(self):
+            type(self).calls.append(("ehlo",))
+
+        def starttls(self):
+            type(self).calls.append(("starttls",))
+
+        def login(self, user, password):
+            type(self).calls.append(("login", user))
+
+        def send_message(self, msg):
+            type(self).calls.append(("send", msg["To"]))
+
+    def _env(self, monkeypatch, port):
+        from app import mailer
+        monkeypatch.setenv("SOZDATEL_SMTP_HOST", "smtp.example.ru")
+        monkeypatch.setenv("SOZDATEL_SMTP_PORT", str(port))
+        monkeypatch.setenv("SOZDATEL_SMTP_USER", "info@example.ru")
+        monkeypatch.setenv("SOZDATEL_SMTP_PASSWORD", "secret")
+        ssl_cls = type("SSLFake", (self._FakeSMTP,), {"calls": []})
+        plain_cls = type("PlainFake", (self._FakeSMTP,), {"calls": []})
+        monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", ssl_cls)
+        monkeypatch.setattr(mailer.smtplib, "SMTP", plain_cls)
+        return mailer, ssl_cls, plain_cls
+
+    def test_port_465_talks_ssl_from_the_first_byte(self, monkeypatch):
+        mailer, ssl_cls, plain_cls = self._env(monkeypatch, 465)
+        mailer.send("to@example.ru", "тема", "тело")
+        assert ("connect", "smtp.example.ru", 465) in ssl_cls.calls
+        assert ("send", "to@example.ru") in ssl_cls.calls
+        assert plain_cls.calls == []
+        assert not any(c[0] == "starttls" for c in ssl_cls.calls)
+
+    def test_port_587_raises_encryption_with_starttls(self, monkeypatch):
+        mailer, ssl_cls, plain_cls = self._env(monkeypatch, 587)
+        mailer.send("to@example.ru", "тема", "тело")
+        assert ("connect", "smtp.example.ru", 587) in plain_cls.calls
+        assert ("starttls",) in plain_cls.calls
+        assert ("send", "to@example.ru") in plain_cls.calls
+        assert ssl_cls.calls == []
+
+    def test_starttls_happens_before_login(self, monkeypatch):
+        """Логин в открытом канале отдал бы пароль в сеть как есть."""
+        mailer, _, plain_cls = self._env(monkeypatch, 587)
+        mailer.send("to@example.ru", "тема", "тело")
+        names = [c[0] for c in plain_cls.calls]
+        assert names.index("starttls") < names.index("login")
+
+
+class TestOwnerCanDiagnoseMail:
+    """Настройка почты — четыре переменные в чужой панели, и до этой ручки
+    владелец узнавал результат только по тому, пожаловался ли покупатель.
+    Тот же приём, что уже выручил с Вордстатом: показать причину, а не гадать."""
+
+    def _clean(self, monkeypatch):
+        for name in ("SOZDATEL_SMTP_HOST", "SOZDATEL_SMTP_PORT", "SOZDATEL_SMTP_USER",
+                     "SOZDATEL_SMTP_PASSWORD", "SOZDATEL_OWNER_EMAIL"):
+            monkeypatch.delenv(name, raising=False)
+
+    def _configured(self, monkeypatch, port="465", user="info@example.ru"):
+        monkeypatch.setenv("SOZDATEL_SMTP_HOST", "smtp.example.ru")
+        monkeypatch.setenv("SOZDATEL_SMTP_PORT", port)
+        monkeypatch.setenv("SOZDATEL_SMTP_USER", user)
+        monkeypatch.setenv("SOZDATEL_SMTP_PASSWORD", "secret")
+        monkeypatch.setenv("SOZDATEL_OWNER_EMAIL", "owner@example.com")
+
+    def test_owner_key_is_required(self):
+        """Ручка показывает настройки сервера — посторонним её знать незачем."""
+        assert client.get("/api/diag/mail").status_code == 401
+
+    def test_names_every_missing_variable(self, monkeypatch):
+        self._clean(monkeypatch)
+        d = client.get("/api/diag/mail", headers=OWNER).json()
+        joined = " ".join(d["problems"])
+        for name in ("SOZDATEL_SMTP_HOST", "SOZDATEL_SMTP_USER",
+                     "SOZDATEL_SMTP_PASSWORD", "SOZDATEL_OWNER_EMAIL"):
+            assert name in joined, name
+        assert d["configured"] is False
+
+    def test_password_is_never_returned(self, monkeypatch):
+        """Диагностика не имеет права стать способом прочитать пароль."""
+        self._configured(monkeypatch)
+        raw = client.get("/api/diag/mail", headers=OWNER).text
+        assert "secret" not in raw
+        assert client.get("/api/diag/mail", headers=OWNER).json()["settings"]["password_set"] is True
+
+    def test_non_numeric_port_is_called_out(self, monkeypatch):
+        self._configured(monkeypatch, port="четыреста")
+        d = client.get("/api/diag/mail", headers=OWNER).json()
+        assert any("SOZDATEL_SMTP_PORT" in p for p in d["problems"])
+
+    def test_login_that_is_not_an_address_is_called_out(self, monkeypatch):
+        """Частая ошибка: в логин пишут имя пользователя вместо адреса ящика,
+        и тогда не работают ни SPF, ни DKIM."""
+        self._configured(monkeypatch, user="info")
+        d = client.get("/api/diag/mail", headers=OWNER).json()
+        assert any("целиком" in p for p in d["problems"])
+
+    def test_mode_follows_the_port(self, monkeypatch):
+        self._configured(monkeypatch, port="465")
+        assert client.get("/api/diag/mail", headers=OWNER).json()["settings"]["mode"] == "SSL"
+        self._configured(monkeypatch, port="587")
+        assert client.get("/api/diag/mail", headers=OWNER).json()["settings"]["mode"] == "STARTTLS"
+
+    def test_without_an_address_nothing_is_sent(self, monkeypatch):
+        """Открыть ручку, чтобы просто посмотреть настройки, должно быть
+        безопасно — письмо уходит только когда его попросили."""
+        self._configured(monkeypatch)
+        import app.main as m
+        sent = []
+        monkeypatch.setattr(m.mailer, "send", lambda *a, **kw: sent.append(a))
+        d = client.get("/api/diag/mail", headers=OWNER).json()
+        assert d["test_send"] is None and sent == []
+
+    def test_successful_send_is_reported_with_a_next_step(self, monkeypatch):
+        from app import mailer
+        self._configured(monkeypatch)
+        got = []
+        d = mailer.diagnose("boris@example.com", _send=lambda msg: got.append(msg["To"]))
+        assert d["test_send"]["ok"] is True
+        assert got == ["boris@example.com"]
+        assert "Спам" in d["test_send"]["next"]
+
+    def test_wrong_password_is_explained_in_plain_words(self, monkeypatch):
+        """Получить в ответ SMTPAuthenticationError значит остаться там же,
+        где был."""
+        import smtplib
+        from app import mailer
+        self._configured(monkeypatch)
+        def boom(msg):
+            raise smtplib.SMTPAuthenticationError(535, b"5.7.8 auth failed")
+        d = mailer.diagnose("boris@example.com", _send=boom)
+        assert d["test_send"]["ok"] is False
+        assert "логин или пароль" in d["test_send"]["error"]
+        assert "SMTPAuthenticationError" in d["test_send"]["technical"]
+
+    def test_ssl_mismatch_suggests_the_other_port(self, monkeypatch):
+        import ssl as _ssl
+        from app import mailer
+        self._configured(monkeypatch, port="465")
+        def boom(msg):
+            raise _ssl.SSLError("wrong version number")
+        d = mailer.diagnose("boris@example.com", _send=boom)
+        assert "587" in d["test_send"]["error"]
+
+    def test_unknown_host_is_explained(self, monkeypatch):
+        import socket as _socket
+        from app import mailer
+        self._configured(monkeypatch)
+        def boom(msg):
+            raise _socket.gaierror("Name or service not known")
+        d = mailer.diagnose("boris@example.com", _send=boom)
+        assert "SOZDATEL_SMTP_HOST" in d["test_send"]["error"]
+
+    def test_bad_recipient_address_does_not_reach_the_server(self, monkeypatch):
+        from app import mailer
+        self._configured(monkeypatch)
+        got = []
+        d = mailer.diagnose("не почта", _send=lambda msg: got.append(msg))
+        assert d["test_send"]["ok"] is False and got == []
+
+    def test_handle_never_returns_500(self, monkeypatch):
+        """Диагностика, падающая пятисотой, бесполезна ровно тогда, когда
+        нужна (принцип 7)."""
+        import app.main as m
+        self._configured(monkeypatch)
+        monkeypatch.setattr(m.mailer, "send",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("что угодно")))
+        r = client.get("/api/diag/mail?to=boris@example.com", headers=OWNER)
+        assert r.status_code == 200
+        assert r.json()["test_send"]["ok"] is False
+
+    def test_unconfigured_mail_says_so_instead_of_trying(self, monkeypatch):
+        from app import mailer
+        self._clean(monkeypatch)
+        d = mailer.diagnose("boris@example.com")
+        assert d["test_send"]["ok"] is False
+        assert "не настроена" in d["test_send"]["error"]
+
+
+class TestDeskShowsMailState:
+    """Почта — единственная подсистема, которая ломается молча: не ушло письмо
+    со ссылкой входа или об оплате, и об этом никто не узнаёт. JSON-ручки для
+    этого мало: владелец настраивает четыре переменные в чужой панели, где
+    «разбегаются глаза», и читать сырой ответ ему негде."""
+
+    def _desk(self):
+        return (main_module.BASE_DIR.parent / "static" / "desk.html").read_text()
+
+    def test_desk_has_a_mail_block(self):
+        text = self._desk()
+        assert 'id="mailbox"' in text
+        assert "/api/diag/mail" in text
+
+    def test_block_offers_a_test_send(self):
+        """Без кнопки владельцу пришлось бы дожидаться живого покупателя,
+        чтобы узнать, работает ли почта."""
+        text = self._desk()
+        assert 'id="mail-to"' in text and 'id="mail-send"' in text
+        assert "sendTestMail" in text
+
+    def test_green_means_a_letter_actually_went(self):
+        """«Переменные заданы» — не то же самое, что «письма уходят». Зелёная
+        надпись рядом с красной ошибкой противоречила бы сама себе."""
+        text = self._desk()
+        assert "переменные заданы" in text
+        assert "письмо уходит" in text
+        # зелёный статус ставится только в ветке удачной отправки
+        after = text.split("sendTestMail")[1]
+        assert 'mailbox-state ok' in after
+
+    def test_block_loads_with_the_desk(self):
+        assert "loadMail()" in self._desk()
+
+    def test_technical_line_comes_after_the_human_one(self):
+        """Одна строка SMTPAuthenticationError владельцу ничего не говорит,
+        но и без неё непонятно, что чинить."""
+        text = self._desk()
+        assert "t.error + (t.technical" in text.replace("\n", " ")
+
+
+class TestIdeaIsNotReadableByGuessing:
+    """E6: страница результата адресовалась порядковым номером, и чужую идею
+    читали перебором: 42 -> 41. Ссылкой на результат люди делятся намеренно,
+    поэтому вход требовать нельзя — но адрес обязан быть неугадываемым.
+    Тот же приём, что уже закрыл платный отчёт (A9)."""
+
+    SECRET = "Секретная идея, которую человек никому не показывал"
+
+    def _check(self, contact="", purpose="business"):
+        from app.main import DemandCheck, Session, engine
+        data = {"formulations": [{"phrase": "фраза", "count": 1200}],
+                "best_phrase": "фраза",
+                "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                "competitors": {"found": 900, "top": []},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        with Session(engine) as s:
+            rec = DemandCheck(idea=self.SECRET, best_count=1200, contact=contact,
+                              purpose=purpose,
+                              result_json=json.dumps(data, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id, rec.public_id
+
+    def _login(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_e6_" + contact, contact=contact)); s.commit()
+        assert client.post(f"/account/verify?token=tok_e6_{contact}",
+                          follow_redirects=False).status_code in (302, 303, 307)
+
+    def _logout(self):
+        client.post("/api/account/logout")
+
+    # --- сама дыра ---
+
+    def test_stranger_cannot_read_an_idea_by_the_sequential_number(self):
+        rid, _ = self._check()
+        self._logout()
+        r = client.get(f"/r/{rid}", follow_redirects=False)
+        assert r.status_code == 404
+        assert self.SECRET not in r.text
+
+    def test_report_teaser_hides_the_idea_from_the_same_guessing(self):
+        """Тизер отчёта показывает текст идеи ровно так же — дыра была на
+        двух страницах, а не на одной."""
+        rid, _ = self._check()
+        self._logout()
+        r = client.get(f"/report/{rid}", follow_redirects=False)
+        assert r.status_code == 404
+        assert self.SECRET not in r.text
+
+    def test_neighbouring_numbers_reveal_nothing(self):
+        """Проверка «в лоб»: пройтись по номерам, как это сделал бы любопытный."""
+        rid, _ = self._check()
+        self._logout()
+        for n in range(max(1, rid - 3), rid + 2):
+            for path in (f"/r/{n}", f"/report/{n}"):
+                assert self.SECRET not in client.get(path, follow_redirects=False).text, path
+
+    # --- и при этом ссылкой по-прежнему можно делиться ---
+
+    def test_the_public_link_works_for_anyone_who_has_it(self):
+        """Главное ограничение задачи: делиться результатом можно и дальше,
+        вход мы не требуем."""
+        _, pid = self._check()
+        self._logout()
+        r = client.get(f"/r/{pid}")
+        assert r.status_code == 200 and self.SECRET in r.text
+
+    def test_public_link_is_not_guessable(self):
+        _, pid = self._check()
+        assert len(pid) >= 10
+        assert not pid.isdigit()
+
+    def test_two_checks_get_different_addresses(self):
+        _, a = self._check()
+        _, b = self._check()
+        assert a != b
+
+    # --- старые ссылки не бьются у тех, кто и так имел право ---
+
+    def test_owner_with_the_old_numeric_link_is_redirected_to_the_new_one(self):
+        rid, pid = self._check()
+        r = client.get(f"/r/{rid}", headers=OWNER, follow_redirects=False)
+        assert r.status_code == 307
+        assert r.headers["location"] == f"/r/{pid}"
+
+    def test_author_of_the_check_keeps_his_old_link(self):
+        """Человек, привязавший проверку к кабинету, не должен потерять
+        закладку из-за нашей правки."""
+        rid, pid = self._check(contact="mine_e6@example.com")
+        self._login("mine_e6@example.com")
+        try:
+            r = client.get(f"/r/{rid}", follow_redirects=False)
+            assert r.status_code == 307 and r.headers["location"] == f"/r/{pid}"
+        finally:
+            self._logout()
+
+    def test_someone_elses_session_does_not_open_the_numeric_link(self):
+        rid, _ = self._check(contact="mine_e6b@example.com")
+        self._login("notmine_e6@example.com")
+        try:
+            assert client.get(f"/r/{rid}", follow_redirects=False).status_code == 404
+        finally:
+            self._logout()
+
+    def test_report_redirect_keeps_the_query(self):
+        """Иначе владельческий прогон и токен покупателя терялись бы на
+        редиректе."""
+        rid, pid = self._check()
+        r = client.get(f"/report/{rid}?preview=quick", headers=OWNER, follow_redirects=False)
+        assert r.status_code == 307
+        assert r.headers["location"] == f"/report/{pid}?preview=quick"
+
+    # --- ссылки, которые раздаём мы сами ---
+
+    def test_demand_api_returns_the_public_address(self):
+        """Витрина строит адрес из ответа сервера — иначе она увела бы
+        человека на номер, который для него же и закрыт."""
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "п", "count": 10}], "best_phrase": "п",
+                    "verdict": {"level": "niche", "text": "т"},
+                    "competitors": {"found": 1, "top": []},
+                    "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            d = client.post("/api/demand", json={"idea": "Идея для проверки адреса"}).json()
+        finally:
+            m.check_demand = orig
+        assert d["public_id"] and not str(d["public_id"]).isdigit()
+        assert client.get(f"/r/{d['public_id']}").status_code == 200
+
+    def test_showcases_send_people_to_the_public_address(self):
+        for name in ("index.html", "social-contract.html"):
+            src = (main_module.BASE_DIR.parent / "static" / name).read_text()
+            assert "data.public_id" in src, name
+
+    def test_buyer_link_uses_the_public_address(self):
+        """Ссылка из письма и из кабинета не должна вести на закрытый номер."""
+        from app.main import ReportPurchase, Session, engine
+        import app.main as m
+        rid, pid = self._check(contact="buyer_e6@example.com")
+        with Session(engine) as s:
+            p = ReportPurchase(check_id=rid, idea=self.SECRET, tier="full", amount=2990,
+                               status="paid", contact="buyer_e6@example.com")
+            s.add(p); s.commit(); s.refresh(p)
+            link = m._report_link(p)
+        assert link.startswith(f"/report/{pid}?t=")
+        assert f"/report/{rid}" not in link
+
+
+class TestIdeasCanBeCompared:
+    """E4: человек с пятью проверенными идеями видел пять одинаковых строк и
+    не мог сказать, какая сильнее, не открыв каждую. Цифры уже посчитаны на
+    бесплатной проверке — вопрос был только в том, чтобы их показать и
+    расставить строки по силе."""
+
+    def _login(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_e4_" + contact, contact=contact)); s.commit()
+        assert client.post(f"/account/verify?token=tok_e4_{contact}",
+                          follow_redirects=False).status_code in (302, 303, 307)
+
+    def _logout(self):
+        client.post("/api/account/logout")
+
+    def _check(self, contact, idea, score, count, weakest="Спрос", broken=False):
+        from app.main import DemandCheck, Session, engine
+        if broken:
+            raw = "{не json"
+        else:
+            raw = json.dumps({
+                "formulations": [{"phrase": "ф", "count": count}],
+                "best_phrase": "ф",
+                "verdict": {"level": "niche", "text": "т"},
+                "competitors": {"found": 10, "top": []},
+                "scores": [],
+                "overall": ({"value": score, "weakest": weakest, "basis": "б"}
+                            if score is not None else None)}, ensure_ascii=False)
+        with Session(engine) as s:
+            rec = DemandCheck(idea=idea, contact=contact, best_count=count, result_json=raw)
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id
+
+    def _cards(self, contact):
+        self._login(contact)
+        try:
+            return client.get("/api/account/me").json()["checks"]
+        finally:
+            self._logout()
+
+    def test_check_carries_the_numbers_it_was_judged_by(self):
+        c = "cmp1@example.com"
+        self._check(c, "Пошив штор", 7, 1200, weakest="Конкуренция")
+        card = self._cards(c)[0]
+        assert card["score"] == 7
+        assert card["count"] == 1200
+        assert card["weakest"] == "Конкуренция"
+
+    def test_strongest_idea_comes_first(self):
+        """Это и есть ответ на вопрос «во что вкладываться»: порядок строк."""
+        c = "cmp2@example.com"
+        self._check(c, "Слабая", 2, 30)
+        self._check(c, "Сильная", 8, 5000)
+        self._check(c, "Средняя", 5, 900)
+        assert [x["idea"] for x in self._cards(c)] == ["Сильная", "Средняя", "Слабая"]
+
+    def test_checks_without_a_score_go_last_but_stay_visible(self):
+        """Вордстат мог промолчать. Сравнивать такую проверку не с чем, но
+        прятать её из кабинета — значит терять работу человека."""
+        c = "cmp3@example.com"
+        self._check(c, "Без балла", None, None)
+        self._check(c, "С баллом", 4, 400)
+        cards = self._cards(c)
+        assert [x["idea"] for x in cards] == ["С баллом", "Без балла"]
+        assert cards[-1]["score"] is None
+
+    def test_broken_json_does_not_hide_the_card(self):
+        """Принцип 7: без цифр — значит без цифр, но строка на месте."""
+        c = "cmp4@example.com"
+        self._check(c, "Битая запись", 9, 999, broken=True)
+        cards = self._cards(c)
+        assert len(cards) == 1 and cards[0]["idea"] == "Битая запись"
+        assert cards[0]["score"] is None
+
+    def test_cabinet_renders_the_figures(self):
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert "figures" in text and "c.score" in text and "c.count" in text
+        assert "запросов/мес" in text
+
+    def test_note_appears_only_when_there_is_something_to_compare(self):
+        """Над одной строкой подпись про сортировку — шум."""
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert "items.length > 1" in text
+        assert "От самой сильной идеи к самой слабой" in text
+
+    def test_link_from_the_cabinet_opens(self):
+        """Ссылка ведёт на неугадываемый адрес, а не на закрытый номер (E6)."""
+        from app.main import DemandCheck, Session, engine
+        c = "cmp5@example.com"
+        rid = self._check(c, "Идея из кабинета", 6, 800)
+        with Session(engine) as s:
+            pid = s.get(DemandCheck, rid).public_id
+        card = self._cards(c)[0]
+        assert card["result_url"] == f"/r/{pid}"
+        assert client.get(card["result_url"]).status_code == 200
+
+
+class TestCabinetLinksSurvivedTheAddressChange:
+    """Регрессия, которую внесла E6: ссылки в кабинете остались с порядковым
+    номером. Он открывается только у хозяина ПРОВЕРКИ, а у заявки на живой
+    тест проверка к кабинету может быть не привязана вовсе — и человек
+    получал 404 на своей же заявке."""
+
+    def _login(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_lnk_" + contact, contact=contact)); s.commit()
+        assert client.post(f"/account/verify?token=tok_lnk_{contact}",
+                          follow_redirects=False).status_code in (302, 303, 307)
+
+    def test_live_test_order_link_opens_for_its_buyer(self):
+        from app.main import DemandCheck, LiveTestOrder, Session, engine
+        contact = "lnk1@example.com"
+        with Session(engine) as s:
+            src = DemandCheck(idea="Идея заявки",     # контакт НЕ проставлен
+                              result_json='{"verdict": {"level": "niche", "text": "т"}}')
+            s.add(src); s.commit(); s.refresh(src)
+            s.add(LiveTestOrder(idea="Идея заявки", contact=contact,
+                                status="pending_payment", check_id=src.id))
+            s.commit()
+        self._login(contact)
+        try:
+            url = client.get("/api/account/me").json()["orders"][0]["continue_url"]
+            assert not url.rstrip("/").split("/")[-1].isdigit(), url
+            assert client.get(url).status_code == 200
+        finally:
+            client.post("/api/account/logout")
+
+    def test_link_is_absent_when_the_check_is_gone(self):
+        """Ссылка в никуда хуже отсутствия ссылки."""
+        from app.main import LiveTestOrder, Session, engine
+        contact = "lnk2@example.com"
+        with Session(engine) as s:
+            s.add(LiveTestOrder(idea="Заявка без проверки", contact=contact,
+                                status="pending_payment", check_id=999777))
+            s.commit()
+        self._login(contact)
+        try:
+            assert client.get("/api/account/me").json()["orders"][0]["continue_url"] is None
+        finally:
+            client.post("/api/account/logout")
+
+
+class TestUnmeasuredDemandIsNotSoldAsMeasured:
+    """A12: когда Вордстат не дал числа, страница вела себя так, будто дала.
+    Напротив каждой фразы стояло «почти не ищут» — вывод о рынке на месте
+    отсутствующего числа, — а финал продавал тест и разбор как обычно.
+
+    Это самое вероятное состояние прода сегодня: у владельца ещё нет
+    OAuth-токена Вордстата. То есть каждый посетитель видел три строки
+    «почти не ищут» и уходил хоронить живую идею.
+
+    Разметка блока лежит на странице всегда, показывает его скрипт по уровню
+    вердикта — поэтому поведение сторожит браузерный тест
+    tests/test_mobile.py::test_unmeasured_demand_stops_selling_in_a_real_browser,
+    а проверки ниже отвечают за тексты."""
+
+    def _check(self):
+        from app.main import DemandCheck, Session, engine
+        data = {"formulations": [{"phrase": "пошив штор", "count": None},
+                                 {"phrase": "сшить шторы", "count": None}],
+                "best_phrase": "пошив штор",
+                "verdict": {"level": "unknown",
+                            "text": "Данные Яндекса о числе запросов сейчас недоступны."},
+                "competitors": {"found": None, "top": []},
+                "scores": [], "overall": None}
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Идея без цифр",
+                              result_json=json.dumps(data, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.public_id
+
+    def test_absent_number_is_not_called_a_market_finding(self):
+        """`count = None` означает «оба пути Вордстата не дали числа» (см.
+        докстринг wordstat_best), а не «спроса нет»."""
+        text = client.get(f"/r/{self._check()}").text
+        assert "нет данных у Яндекса" in text
+        assert "почти не ищут" not in text.split("v.level === 'weak'")[0]
+
+    def test_page_says_the_check_did_not_happen(self):
+        text = client.get(f"/r/{self._check()}").text
+        assert "v.level === 'unknown'" in text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "не состоялась" in block
+        assert "не значит, что спроса нет" in block
+
+    def test_free_retry_becomes_the_main_action(self):
+        """Единственное честное действие здесь бесплатное — повторить."""
+        text = client.get(f"/r/{self._check()}").text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "Проверить ещё раз" in block
+        assert "getElementById('order').className = 'alt-path'" in block
+        assert "getElementById('alt-report').className = 'alt-path'" in block
+
+    def test_buttons_are_still_there(self):
+        """Отговариваем, но не решаем за человека."""
+        text = client.get(f"/r/{self._check()}").text
+        assert 'id="order-btn"' in text and 'id="alt-report"' in text
+
+    def test_report_block_stops_claiming_we_counted_something(self):
+        """«Разбор на данных, которые мы уже честно посчитали» на экране, где
+        ничего не посчитано, — то же враньё, только ниже."""
+        text = client.get(f"/r/{self._check()}").text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "alt-p" in block
+        assert "цифр спроса" in block
+
+    def test_header_stops_promising_the_next_stage(self):
+        text = client.get(f"/r/{self._check()}").text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "path-next-text" in block and "повторить проверку" in block
+
+    def test_retry_leads_to_the_right_showcase(self):
+        """Получателя соцконтракта нельзя возвращать на витрину фаундеров."""
+        text = client.get(f"/r/{self._check()}").text
+        block = text.split("v.level === 'unknown'")[1][:2200]
+        assert "IS_SOCIAL_CONTRACT ? '/social-contract' : '/'" in block
+
+
+class TestLandingPromisesNothingOnTheOwnersBehalf:
+    """A14: страница, за которую платят 1490 ₽ нам и 3–5 тысяч Яндексу,
+    несла зашитые обещания, которых владелец идеи не давал.
+
+    Найдено кастдев-проходом по `/l/`. Три вещи сразу:
+      · «Ранним — 50% на первый месяц» — скидку мы придумали за него и
+        показывали живым людям;
+      · «Запускаемся скоро» / «продукт готовится к запуску» — предполагало,
+        что продукта ещё нет. Для услуги (пошив штор, груминг, пекарня)
+        человек ищет исполнителя СЕГОДНЯ, и такая рамка его отпугивает —
+        а мы потом по этой конверсии выносим вердикт «спроса нет»;
+      · слово «лендинг» в подвале — запрещено во всех текстах для
+        пользователя, но тесты сканировали только `static/`, а шаблон
+        лежит в `app/`.
+    """
+
+    def _text(self):
+        import re
+        html = main_module.render_landing(VALID_OFFER)
+        body = html[html.index('<div class="wrap">'):html.index("<script>")]
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body))
+
+    def test_no_invented_discount(self):
+        """Скидка на чужой продукт — обещание, которое владелец не давал и
+        может не сдержать."""
+        t = self._text().lower()
+        assert "50%" not in t
+        assert "скидк" not in t
+        assert "первый месяц" not in t
+
+    def test_does_not_assume_the_product_is_unlaunched(self):
+        """Услугу заказывают сегодня, а не «когда откроем доступ»."""
+        t = self._text().lower()
+        for bad in ("запускаемся скоро", "готовится к запуску",
+                    "ранний доступ", "ранним", "откроем доступ"):
+            assert bad not in t, bad
+
+    def test_forbidden_words_are_absent_from_the_landing_too(self):
+        """Файл лежит в app/, поэтому под сторожа по static/ не попадал —
+        а это единственная страница, которую видят посторонние люди."""
+        t = self._text().lower()
+        for bad in ("лендинг", "оффер", "смоук", "smoke", "гипотез", "конверси"):
+            assert bad not in t, bad
+
+    def test_it_still_says_what_will_happen_next(self):
+        """Убрать обещание не значит оставить человека без ответа."""
+        t = self._text()
+        assert "Оставить заявку" in t
+        assert "напишем вам" in t.lower()
+        assert "Заявка принята" in t
+
+    def test_privacy_consent_survived(self):
+        """152-ФЗ и модерация Директа: без ссылки на политику страница не
+        имеет права собирать контакты."""
+        html = main_module.render_landing(VALID_OFFER)
+        assert 'href="/legal"' in html
+        assert "политикой персональных данных" in html
+
+    def test_the_offer_itself_still_reaches_the_page(self):
+        """Правка текстов вокруг формы не должна съесть саму идею."""
+        html = main_module.render_landing(VALID_OFFER)
+        assert VALID_OFFER["h1"] in html
+        assert VALID_OFFER["sub"] in html
+        assert VALID_OFFER["pains"][0]["h2"] in html
+
+
+class TestBrokenLinkLandsOnAWorkingPage:
+    """E7: битая ссылка на результат отдавала главную с СЫРЫМИ слотами.
+
+    Найдено кастдев-проходом «что видит человек, когда всё сломалось».
+    Оба 404-пути (`/r/` и `/report/`) возвращали `_static("index.html")`
+    в обход `_fill_server_values` — и человек читал на главной буквально
+    «Больше __SIGNAL_PCT__ — идея живая, меньше __DEAD_PCT__». Первое, что
+    он видит о сервисе, — что сервис сломан.
+
+    Ссылками на результат делятся намеренно (см. CLAUDE.md про public_id),
+    поэтому обрезанная в мессенджере или устаревшая ссылка — обычное дело,
+    а не экзотика. Второе следствие того же места: человек приходил по
+    ссылке «посмотри мою проверку», молча попадал на главную и не понимал,
+    что произошло. Поэтому 404 не просто чинится, а объясняется — и
+    оставляет форму проверки под рукой (принцип 7: деградация вместо
+    ошибки, но не молчаливая).
+    """
+
+    def test_result_404_has_no_raw_slots(self):
+        r = client.get("/r/nosuchcheck")
+        assert r.status_code == 404
+        assert "__" not in _slots(r.text), _slots(r.text)
+
+    def test_report_404_has_no_raw_slots(self):
+        r = client.get("/report/nosuchcheck")
+        assert r.status_code == 404
+        assert "__" not in _slots(r.text), _slots(r.text)
+
+    def test_404_explains_what_happened(self):
+        """Молча подменить запрошенную страницу главной — значит соврать,
+        что человек попал куда хотел."""
+        t = client.get("/r/nosuchcheck").text
+        assert "не нашли" in t.lower()
+        assert "ссылк" in t.lower()
+
+    def test_404_keeps_the_free_check_at_hand(self):
+        """Тупик из битой ссылки делать незачем: форма проверки уже здесь."""
+        t = client.get("/r/nosuchcheck").text
+        assert 'id="idea"' in t
+        assert 'id="check-btn"' in t
+
+    def test_normal_home_page_says_nothing_about_a_broken_link(self):
+        """Записка появляется только по 404, иначе она пугает всех подряд."""
+        r = client.get("/")
+        assert r.status_code == 200
+        assert "не нашли" not in r.text.lower()
+
+    def test_normal_home_page_has_no_raw_slots_either(self):
+        """Сторож на будущее: новый слот в index.html без подстановки
+        сломает главную ровно так же."""
+        r = client.get("/")
+        assert "__" not in _slots(r.text), _slots(r.text)
+
+
+class TestMagicLinkSurvivesMailScanners:
+    """A15: почтовый сканер съедал ссылку входа раньше человека.
+
+    Найдено кастдев-проходом по пути «покупатель вернулся за своим отчётом».
+    Токен гасился прямо в GET-обработчике, а почтовые провайдеры и антивирусы
+    (mail.ru, Яндекс, Kaspersky) открывают ссылки из писем сами, до человека,
+    чтобы проверить их на вредоносность. Последствий было два, и оба тяжёлые:
+
+      · **человек не мог войти вообще.** Он кликает — «Ссылка недействительна»,
+        просит новую — сканер съедает и её. Замкнутый круг, из которого нет
+        выхода: заплатил 2990 ₽ и не может открыть купленное;
+      · **сессия выдавалась сканеру.** GET отвечал 307 с `Set-Cookie` на
+        180 дней — то есть кабинет покупателя открывался машине, которая
+        просто проверяла ссылку.
+
+    Лечится тем, что вход происходит на POST, а GET только показывает
+    страницу с кнопкой: сканеры ходят GET и HEAD, форму не отправляют.
+    Заодно страница отказа перестала быть голым `<p>` без стилей — человек,
+    потерявший доступ к оплаченному, видел чёрный Times New Roman на белом,
+    и это выглядит как сломанный сайт, а не как объяснение.
+    """
+
+    def _token(self, name, contact="scan@example.com", **kw):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token=name, contact=contact, **kw))
+            s.commit()
+        return name
+
+    def test_scanner_get_does_not_consume_the_link(self):
+        """Главное: после автоматического открытия ссылка ещё жива."""
+        self._token("scan_alive")
+        client.get("/account/verify?token=scan_alive", follow_redirects=False)
+        r = client.post("/account/verify?token=scan_alive", follow_redirects=False)
+        assert r.status_code in (302, 303, 307), r.status_code
+        client.cookies.clear()
+
+    def test_scanner_get_gets_no_session(self):
+        """Сессия на 180 дней не должна достаться машине, проверявшей ссылку."""
+        client.cookies.clear()
+        self._token("scan_nocookie")
+        r = client.get("/account/verify?token=scan_nocookie", follow_redirects=False)
+        assert r.status_code == 200
+        assert "sozdatel_session" not in r.cookies
+        client.cookies.clear()
+
+    def test_get_shows_a_page_with_a_button(self):
+        self._token("scan_page")
+        t = client.get("/account/verify?token=scan_page").text
+        assert "<!doctype" in t.lower()
+        assert 'method="post"' in t.lower()
+        assert "Войти" in t
+
+    def test_get_names_the_account_being_entered(self):
+        """Человек должен видеть, в чей кабинет входит: почт бывает две."""
+        self._token("scan_named", contact="buyer@example.com")
+        assert "buyer@example.com" in client.get("/account/verify?token=scan_named").text
+
+    def test_post_logs_in_and_burns_the_token(self):
+        self._token("scan_burn")
+        r = client.post("/account/verify?token=scan_burn", follow_redirects=False)
+        assert r.status_code in (302, 303, 307)
+        assert r.cookies.get("sozdatel_session")
+        client.cookies.clear()
+        again = client.post("/account/verify?token=scan_burn", follow_redirects=False)
+        assert again.status_code == 400
+        client.cookies.clear()
+
+    def test_expired_link_is_refused_on_both_verbs(self):
+        from app.main import utcnow
+        from datetime import timedelta
+        import app.main as m
+        self._token("scan_old",
+                    created_at=utcnow() - timedelta(minutes=m.MAGIC_LINK_TTL_MINUTES + 1))
+        assert client.get("/account/verify?token=scan_old").status_code == 400
+        assert client.post("/account/verify?token=scan_old",
+                           follow_redirects=False).status_code == 400
+
+    def test_refusal_is_a_real_page_not_a_bare_fragment(self):
+        """Потерявший доступ к оплаченному не должен решить, что сайт умер."""
+        t = client.get("/account/verify?token=no-such-token").text
+        assert "<!doctype" in t.lower()
+        assert "IBM Plex" in t
+        assert "устарела" in t or "недействительна" in t
+
+    def test_refusal_offers_the_way_back(self):
+        t = client.get("/account/verify?token=no-such-token").text
+        assert 'href="/account"' in t
+
+    def test_verify_page_has_no_raw_slots(self):
+        self._token("scan_slots")
+        for t in (client.get("/account/verify?token=scan_slots").text,
+                  client.get("/account/verify?token=nope").text):
+            assert "__" not in _slots(t), _slots(t)

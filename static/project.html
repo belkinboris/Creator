@@ -231,12 +231,16 @@ async function load(){
   if(d.contacts && d.contacts.length)
     contacts.innerHTML = "Контакты заявок (видны только вам): " + d.contacts.join(", ");
 
-  const stage = d.views > 0 ? 1 : 0;
-  document.getElementById("path-stage").textContent = `Этап ${stage+1} из 7`;
+  // Этап и названия шкалы приходят с сервера. Здесь была вторая копия
+  // правила, и она разъехалась: человеку, только что оплатившему тест,
+  // страница показывала «Этап 1 из 7 — Идея».
+  const names = d.stage_names || STAGES;
+  const stage = (d.stage !== undefined && d.stage !== null) ? d.stage : 2;
+  document.getElementById("path-stage").textContent = `Этап ${stage+1} из ${names.length}`;
   document.getElementById("path-name").textContent =
-    STAGES[stage] + (stage === 0 ? " — набираем первые визиты" : " — проверяем живыми кликами");
+    names[stage] + (d.views >= d.target ? " — есть по чему судить" : " — набираем визиты");
   document.getElementById("path-bar").innerHTML =
-    Array.from({length:7}, (_,i)=> `<i class="${i<=stage?'done':''}"></i>`).join('');
+    Array.from({length:names.length}, (_,i)=> `<i class="${i<=stage?'done':''}"></i>`).join('');
 }
 async function rename(){
   const name = prompt("Новое имя проекта:", document.getElementById("pname").textContent.trim());

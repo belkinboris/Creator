@@ -85,8 +85,10 @@ with Session(engine) as s:
                           contact="sweep@example.com",
                           result_json=json.dumps(data, ensure_ascii=False))
         s.add(rec); s.commit(); s.refresh(rec)
-        out[purpose] = rec.id
-    s.add(ReportPurchase(check_id=out["business"], idea=idea, tier="full",
+        # В адресе страницы — неугадываемый public_id, номер остался для API.
+        out[purpose] = rec.public_id
+        out[purpose + "_id"] = rec.id
+    s.add(ReportPurchase(check_id=out["business_id"], idea=idea, tier="full",
                          contact="sweep@example.com", status="paid", amount=2990,
                          is_example=True,
                          report_json=json.dumps({"sections": [
@@ -101,7 +103,20 @@ with Session(engine) as s:
         s.add(SmokeEvent(idea="sweep1", event="page_view"))
     for _ in range(3):
         s.add(SmokeEvent(idea="sweep1", event="lead_submitted", contact="lead@example.com"))
+    # Токен входа одноразовый, поэтому каждому тесту, который логинится,
+    # нужен свой -- иначе второй молча увидит страницу гостя.
     s.add(MagicLinkToken(token="sweep_token", contact="sweep@example.com"))
+    s.add(MagicLinkToken(token="sweep_token2", contact="sweep@example.com"))
+    s.add(MagicLinkToken(token="sweep_token3", contact="sweep@example.com"))
+    # Ещё две проверки того же человека — чтобы в кабинете было что сравнивать
+    # между собой (E4): порядок строк и есть ответ «какая идея сильнее».
+    for name, sc, cnt in (("Слабая идея для сравнения", 2, 40),
+                          ("Сильная идея для сравнения", 9, 7400)):
+        cmp_raw = dict(data)
+        cmp_raw["overall"] = {"value": sc, "weakest": "Спрос", "basis": "б"}
+        cmp_raw["formulations"] = [{"phrase": "ф", "count": cnt}]
+        s.add(DemandCheck(idea=name, best_count=cnt, contact="sweep@example.com",
+                          result_json=json.dumps(cmp_raw, ensure_ascii=False)))
     # Идея, которую почти не ищут: вердикт имеет право сказать «нет», и
     # страница обязана перестать продавать так, будто ничего не случилось.
     weak = dict(data)
@@ -111,7 +126,21 @@ with Session(engine) as s:
     rec = DemandCheck(idea="Подписка на носки по гороскопу с доставкой", best_count=30,
                       purpose="business", result_json=json.dumps(weak, ensure_ascii=False))
     s.add(rec); s.commit(); s.refresh(rec)
-    out["weak"] = rec.id
+    out["weak"] = rec.public_id
+    # Вордстат не дал чисел вовсе -- самое вероятное состояние прода, пока у
+    # владельца нет OAuth-токена. Не то же самое, что «спроса нет» (A12).
+    nodata = dict(data)
+    nodata["formulations"] = [{"phrase": "пошив штор на заказ", "count": None},
+                              {"phrase": "сшить шторы на дому", "count": None}]
+    nodata["verdict"] = {"level": "unknown",
+                         "text": "Данные Яндекса о числе запросов сейчас недоступны."}
+    nodata["competitors"] = {"found": None, "top": []}
+    nodata["scores"] = []
+    nodata["overall"] = None
+    rec = DemandCheck(idea="Идея, которую не удалось измерить", best_count=None,
+                      purpose="business", result_json=json.dumps(nodata, ensure_ascii=False))
+    s.add(rec); s.commit(); s.refresh(rec)
+    out["nodata"] = rec.public_id
     s.commit()
 print(json.dumps(out))
 '''
@@ -279,6 +308,15 @@ def _open(browser, url, *, width=NARROW, cookies=None):
     return ctx, page
 
 
+def _login(page, base, token):
+    """Вход в кабинет — так, как его проходит человек: страница подтверждения
+    и кнопка. GET по ссылке из письма намеренно НЕ пускает внутрь (A15:
+    иначе почтовый сканер съедал бы ссылку раньше человека)."""
+    _goto(page, f"{base}/account/verify?token={token}")
+    page.click("form[action^='/account/verify'] button")
+    page.wait_for_timeout(700)
+
+
 def _audit(page, width=NARROW):
     return {
         "page_scrolls_sideways": page.evaluate(
@@ -322,6 +360,9 @@ def test_public_pages_fit_narrow_screen(site, browser):
         ("отчёт", f"/report/{ids['business']}"),
         ("публичный пример отчёта", "/example"),
         ("кабинет до входа", "/account"),
+        # Обе стороны страницы входа: подтверждение и отказ по мёртвой ссылке.
+        ("подтверждение входа", "/account/verify?token=sweep_token3"),
+        ("отказ по мёртвой ссылке", "/account/verify?token=protuhla"),
         ("оферта", "/oferta"),
         ("соглашение", "/agreement"),
         ("конфиденциальность", "/privacy"),
@@ -383,7 +424,7 @@ def test_cabinet_fits_narrow_screen_when_logged_in(site, browser):
     ctx = _context(browser)
     page = ctx.new_page()
     try:
-        _goto(page, f"{site['base']}/account/verify?token=sweep_token")
+        _login(page, site["base"], "sweep_token")
         _goto(page, f"{site['base']}/account")
         assert page.locator("#known").is_visible(), "вход в кабинет не сработал"
         _assert_clean(page, "кабинет покупателя")
@@ -444,5 +485,126 @@ def test_good_demand_keeps_the_live_test_as_the_main_action(site, browser):
         assert not page.locator("#weak-caveat").is_visible()
         assert page.evaluate(
             "() => document.getElementById('order').className") == "next"
+    finally:
+        ctx.close()
+
+
+def test_owner_sees_mail_state_in_the_desk(site, browser):
+    """Блок «Почта» рисует скрипт по ответу /api/diag/mail — подстроками в
+    HTML такое не проверить (урок A11). Смотрим глазами браузера."""
+    ctx = _context(browser)
+    ctx.add_init_script(f"sessionStorage.setItem('sozdatel_key','{OWNER_KEY}')")
+    page = ctx.new_page()
+    try:
+        _goto(page, f"{site['base']}/desk")
+        page.wait_for_selector("#mailbox", state="visible", timeout=10000)
+        # в прогоне SMTP не настроен — блок обязан сказать это прямо
+        state = page.inner_text("#mail-state")
+        assert "не настроена" in state, state
+        problems = page.eval_on_selector_all(".mail-problems li", "e => e.map(x => x.innerText)")
+        assert any("SOZDATEL_SMTP_HOST" in p for p in problems), problems
+
+        # кнопка проверки работает и объясняет отказ, а не молчит
+        page.fill("#mail-to", "boris@example.com")
+        page.click("#mail-send")
+        page.wait_for_timeout(1200)
+        assert "не настроена" in page.inner_text("#mail-result").lower()
+        _assert_clean(page, "кабинет владельца, блок почты")
+    finally:
+        ctx.close()
+
+
+def test_cabinet_ranks_ideas_so_they_can_be_compared(site, browser):
+    """E4. Сортировку делает сервер, а цифры рисует скрипт — проверяем то,
+    что человек реально видит, а не подстроки в шаблоне."""
+    ctx, page = _open(browser, f"{site['base']}/")
+    try:
+        _login(page, site["base"], "sweep_token2")
+        _goto(page, f"{site['base']}/account")
+        page.wait_for_selector(".item", timeout=10000)
+        names = page.eval_on_selector_all(
+            ".item .name", "e => e.map(x => x.innerText)")
+        strong = names.index("Сильная идея для сравнения")
+        weak = names.index("Слабая идея для сравнения")
+        assert strong < weak, names
+
+        # цифры, по которым сравнивают, видны в строке
+        row = page.locator(".item", has=page.locator("text=Сильная идея для сравнения"))
+        figures = row.locator(".figures").inner_text()
+        assert "9" in figures and "7" in figures, figures
+        assert "запросов/мес" in figures
+
+        # подпись объясняет, почему такой порядок
+        assert "самой сильной" in page.inner_text(".list-note")
+        _assert_clean(page, "кабинет со сравнением идей")
+    finally:
+        ctx.close()
+
+
+def test_unmeasured_demand_stops_selling_in_a_real_browser(site, browser):
+    """A12. Блок включает скрипт по уровню вердикта — подстроками в HTML это
+    не проверить. Смотрим, что видно на экране, когда Вордстат не дал цифр,
+    и что при настоящих цифрах ничего не изменилось."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['nodata']}")
+    try:
+        for _ in range(6):
+            btns = page.locator(".step-next .btn:visible, #skip-sharpen:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+
+        assert page.locator("#weak-lead").is_visible(), \
+            "без цифр спроса главным действием обязано стать бесплатное"
+        lead = page.inner_text("#weak-lead")
+        assert "не состоялась" in lead, lead
+        assert "не значит, что спроса нет" in lead
+
+        # напротив фраз — «нет данных», а не вывод о рынке
+        freqs = page.eval_on_selector_all(".freq-num", "e => e.map(x => x.innerText)")
+        assert freqs and all("нет данных" in f for f in freqs), freqs
+        assert not any("почти не ищут" in f for f in freqs), freqs
+
+        cls = page.evaluate("""() => ({o: document.getElementById('order').className,
+                                       r: document.getElementById('alt-report').className})""")
+        assert cls == {"o": "alt-path", "r": "alt-path"}, cls
+        assert page.locator("#order-btn").is_visible()   # купить всё ещё можно
+        _assert_clean(page, "результат без цифр спроса")
+    finally:
+        ctx.close()
+
+    # обратная сторона: с настоящими цифрами блок не появляется
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}")
+    try:
+        for _ in range(6):
+            btns = page.locator(".step-next .btn:visible, #skip-sharpen:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+        assert not page.locator("#weak-lead").is_visible()
+        assert page.evaluate(
+            "() => document.getElementById('order').className") == "next"
+    finally:
+        ctx.close()
+
+
+def test_paid_project_is_not_labelled_as_just_an_idea(site, browser):
+    """A13. Этап рисует скрипт по ответу сервера — подстроками не проверить.
+    Человек, оплативший тест на людях, не должен видеть свой проект на
+    этапе «Идея»: он уже прошёл и идею, и спрос, и заплатил."""
+    ctx, page = _open(browser, f"{site['base']}/p/sweep1?key={OWNER_KEY}")
+    try:
+        page.wait_for_selector("#path-name", timeout=10000)
+        page.wait_for_timeout(600)
+        stage = page.inner_text("#path-stage")
+        name = page.inner_text("#path-name")
+        assert "Идея" not in name, f"{stage} | {name}"
+        assert "Спрос" not in name, f"{stage} | {name}"
+        assert "Тест на реальных людях" in name or "Заявки" in name, name
+        # шкала берётся с сервера: делений столько же, сколько названий
+        segs = page.eval_on_selector_all("#path-bar i", "e => e.length")
+        assert segs == 7, segs
+        _assert_clean(page, "страница проекта, метка этапа")
     finally:
         ctx.close()

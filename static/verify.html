@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Вход в кабинет — Создатель</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2712%27 fill=%27%23FFDE59%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-family=%27Arial,sans-serif%27 font-size=%2736%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%231B1C20%27%3EС%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/fonts/fonts.css">
+<style>
+  :root{--bg:#FBF6EA;--box:#FFFDF6;--line:#E9E1CB;--ink:#1B1C20;--muted:#6F6A5C;
+    --marker:#FFDE59;--btn:#1B1C20}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);
+    font:400 16px/1.55 "IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:520px;margin:0 auto;padding-left:22px;padding-right:22px}
+  a{color:var(--ink)}
+  header{border-bottom:1px solid var(--line)}
+  .nav{display:flex;align-items:baseline;padding-top:14px;padding-bottom:14px}
+  .logo{font-weight:700;font-size:17px;color:var(--ink);text-decoration:none;letter-spacing:-.01em}
+  .hl{background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
+
+  main{padding-top:56px;padding-bottom:56px}
+  .card{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:26px}
+  h1{font-size:22px;line-height:1.3;font-weight:600;letter-spacing:-.01em}
+  .lead{color:var(--muted);font-size:15px;margin-top:12px}
+  .who{margin-top:16px;padding-top:16px;border-top:1px solid var(--line);font-size:15px}
+  .who span{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
+  .who b{font-weight:600;word-break:break-all}
+  .act{margin-top:22px}
+  .btn{appearance:none;border:0;cursor:pointer;border-radius:6px;display:inline-block;
+    background:var(--btn);color:#fff;font:600 15px "IBM Plex Sans",sans-serif;
+    padding:12px 20px;text-decoration:none}
+  .btn:hover{background:#000}
+  .fine{color:var(--muted);font-size:13px;margin-top:14px}
+  @media (max-width:560px){
+    main{padding-top:32px}
+    .card{padding:20px}
+    .btn{width:100%;text-align:center}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="nav wrap"><a class="logo" href="/">Созда<span class="hl">тель</span></a></div>
+</header>
+<main class="wrap">
+  <div class="card">
+    <h1>__HEADING__</h1>
+    <p class="lead">__LEAD__</p>
+    __WHO__
+    <div class="act">__ACTION__</div>
+    <p class="fine">__FINE__</p>
+  </div>
+</main>
+</body>
+</html>
