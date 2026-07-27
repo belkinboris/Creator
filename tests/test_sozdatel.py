@@ -5186,3 +5186,106 @@ class TestMailerKnowsWhatItCanSend:
         def boom(msg):
             raise RuntimeError("SMTP лёг")
         assert mailer.notify_buyer("a@b.ru", "тема", "тело", _send=boom) is False
+
+
+class TestWeakDemandStopsSelling:
+    """A11: страница показывала «в поиске эту идею почти не ищут» — и вела к
+    той же кнопке, что идею с хорошим спросом. Живой тест здесь особенно
+    сомнителен: он гоняет рекламу по ТЕМ ЖЕ запросам, а вывод мы делаем по
+    CLICK_TARGET визитам, которых при частотности ниже 300 в месяц просто
+    неоткуда взять. Принцип 2: смысл сервиса в том, чтобы человек НЕ потратил
+    деньги зря.
+
+    ВАЖНО про эти тесты: разметка блока лежит на странице ВСЕГДА, а показывает
+    его скрипт по уровню вердикта. Значит проверки ниже сторожат только тексты
+    и подстановку серверных значений — отключи логику, и они останутся
+    зелёными. Само поведение сторожит браузерный
+    tests/test_mobile.py::test_weak_demand_stops_selling_in_a_real_browser."""
+
+    def _check(self, level, count, purpose="business"):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        texts = {"weak": "В поиске эту идею почти не ищут.",
+                 "niche": "Спрос небольшой, но он есть.",
+                 "strong": "Спрос есть."}
+        data = {"formulations": [{"phrase": "фраза", "count": count},
+                                 {"phrase": "вторая", "count": max(0, count // 3)}],
+                "best_phrase": "фраза",
+                "verdict": {"level": level, "text": texts[level]},
+                "competitors": {"found": 40, "top": []},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 1, "note": ""}],
+                "overall": {"value": 1, "weakest": "Спрос", "basis": "Опущен до спроса."}}
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Подписка на носки по гороскопу", best_count=count,
+                              purpose=purpose,
+                              result_json=json.dumps(data, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id
+
+    def test_page_carries_the_honest_lead_for_weak_demand(self):
+        """Главным действием становится бесплатное — переформулировать."""
+        rid = self._check("weak", 30)
+        text = client.get(f"/r/{rid}").text
+        assert 'id="weak-lead"' in text
+        assert "попробуйте другую формулировку" in text.lower()
+
+    def test_lead_is_shown_only_when_demand_is_weak(self):
+        """Проверка на самом коде: блок включает JS по уровню вердикта."""
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert "v.level === 'weak'" in text
+        # и обе платные кнопки при этом перестают быть главными
+        block = text.split("v.level === 'weak'")[1][:2000]
+        assert "getElementById('order').className = 'alt-path'" in block
+        assert "getElementById('alt-report').className = 'alt-path'" in block
+
+    def test_live_test_carries_an_explicit_caveat(self):
+        """Оговорка стоит у самой кнопки живого теста: именно этот продукт
+        наши же цифры и ставят под сомнение."""
+        rid = self._check("weak", 30)
+        text = client.get(f"/r/{rid}").text
+        assert 'id="weak-caveat"' in text
+        assert "рискует не набрать" in text
+        # и говорит, что деньги на рекламу всё равно уйдут
+        assert "бюджет при этом всё равно тратится" in text
+
+    def test_caveat_names_the_number_we_judge_by(self):
+        """Число берётся с сервера, а не пишется руками: порог уже разъезжался
+        с витриной (B5)."""
+        import app.main as m
+        rid = self._check("weak", 30)
+        text = client.get(f"/r/{rid}").text
+        assert "__CLICK_TARGET__" not in text          # слот подставлен
+        assert f"{m.CLICK_TARGET} визитов" in text
+
+    def test_header_stops_promising_the_next_stage(self):
+        """Шапка обещала «Этап 3 — соберём проверочную страницу» так, будто
+        вердикта не было."""
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        block = text.split("v.level === 'weak'")[1][:2000]
+        assert "path-next-text" in block
+        assert "переформулировать" in block
+
+    def test_free_action_leads_to_the_right_showcase(self):
+        """Получателя соцконтракта нельзя возвращать на витрину для
+        фаундеров (принцип 4)."""
+        text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        block = text.split("v.level === 'weak'")[1][:2000]
+        assert "IS_SOCIAL_CONTRACT ? '/social-contract' : '/'" in block
+
+    def test_good_demand_is_untouched(self):
+        """Предупреждение не должно всплывать там, где спрос есть: иначе оно
+        обесценится и его перестанут читать."""
+        for level, count in (("niche", 1200), ("strong", 5000)):
+            rid = self._check(level, count)
+            text = client.get(f"/r/{rid}").text
+            # блок в разметке есть всегда, но скрыт — включает его только JS
+            assert 'class="weak-lead" id="weak-lead"' in text
+            assert "weak-lead').classList.add('show')" in text.replace('\n', '')
+
+    def test_buttons_are_not_hidden(self):
+        """Человек вправе купить, даже когда мы отговариваем: наше дело —
+        сказать правду, а не решить за него."""
+        rid = self._check("weak", 30)
+        text = client.get(f"/r/{rid}").text
+        assert 'id="order-btn"' in text                # заявка на живой тест
+        assert f'href="/report/{rid}"' in text         # и отчёт
