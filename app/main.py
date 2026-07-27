@@ -2254,6 +2254,34 @@ def demand_chosen(rid: int, data: ChosenOfferIn, request: Request):
     return {"ok": True}
 
 
+def _check_card(c: "DemandCheck") -> dict:
+    """Проверка спроса для кабинета — с цифрами, а не одним названием.
+
+    Человек с пятью проверенными идеями видел пять одинаковых строк и не мог
+    сказать, какая сильнее, не открыв каждую (E4). Показываем то, что уже
+    посчитано на бесплатной проверке: общий балл, слабое место и частотность.
+    Ничего нового не считаем и не обещаем.
+
+    Битый JSON не имеет права спрятать карточку из кабинета (принцип 7):
+    без цифр — значит без цифр, но строка на месте.
+    """
+    score = weakest = count = None
+    try:
+        data = json.loads(c.result_json) if c.result_json else {}
+        overall = data.get("overall") or {}
+        score = overall.get("value")
+        weakest = overall.get("weakest")
+        known = [f.get("count") for f in (data.get("formulations") or [])
+                 if isinstance(f, dict) and f.get("count") is not None]
+        count = max(known) if known else c.best_count
+    except (ValueError, TypeError, AttributeError):
+        count = c.best_count
+    return {"id": c.id, "idea": c.idea, "result_url": f"/r/{c.public_id}",
+            "score": score if isinstance(score, (int, float)) else None,
+            "weakest": weakest or "",
+            "count": count if isinstance(count, int) else None}
+
+
 @app.get("/api/account/me")
 def account_me(request: Request):
     contact = _current_contact(request)
@@ -2287,6 +2315,23 @@ def account_me(request: Request):
         # возвращать на витрину для фаундеров (принцип 4).
         purpose = checks[0].purpose if checks else "business"
         checks = [c for c in checks if c.id not in promoted_ids]
+        # От самой сильной идеи к самой слабой: это и есть ответ на вопрос
+        # «во что вкладываться» (E4). Проверки без балла (Вордстат молчал)
+        # уходят вниз -- сравнивать их не с чем, но и прятать нечестно.
+        # Сортировка устойчивая, поэтому при равном балле сохраняется
+        # прежний порядок: свежие сверху.
+        check_cards = [_check_card(c) for c in checks]
+        check_cards.sort(key=lambda k: (k["score"] is None, -(k["score"] or 0)))
+        # Адрес проверки, из которой выросла заявка. По номеру он открывался
+        # бы только у хозяина проверки, а её могли и не привязывать к
+        # кабинету -- тогда человек получал 404 на своей же заявке.
+        order_links = {}
+        for o in orders:
+            if not o.check_id:
+                continue
+            src = s.get(DemandCheck, o.check_id)
+            if src:
+                order_links[o.check_id] = f"/r/{src.public_id}"
         from collections import defaultdict
         idea_ids = [p.idea_id for p in projects]
         counts: dict[tuple[str, str], int] = defaultdict(int)
@@ -2307,8 +2352,8 @@ def account_me(request: Request):
                      "report_url": _report_link(r)} for r in reports],
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
                     "status": _effective_status(o.status, o.created_at),
-                    "continue_url": f"/r/{o.check_id}" if o.check_id else None} for o in orders],
-        "checks": [{"id": c.id, "idea": c.idea, "result_url": f"/r/{c.id}"} for c in checks],
+                    "continue_url": order_links.get(o.check_id)} for o in orders],
+        "checks": check_cards,
     }
 
 

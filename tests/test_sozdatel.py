@@ -2672,21 +2672,31 @@ class TestAccountCabinet:
         быть видна в кабинете -- иначе человек, начавший что-то, но не
         доведший до конца, теряет к этому доступ."""
         import app.main as m
-        from app.main import LiveTestOrder, Session, engine
+        from app.main import DemandCheck, LiveTestOrder, Session, engine
         contact = "pending_order@example.com"
         with Session(engine) as s:
+            # Проверка НЕ привязана к кабинету: человек заказал живой тест,
+            # не сохраняя её. Ровно этот случай и ломался -- ссылка вела на
+            # порядковый номер, который для него уже закрыт (E6), и кабинет
+            # отдавал 404 на его же заявке.
+            src = DemandCheck(idea="идея без запуска",
+                              result_json='{"verdict": {"level": "niche", "text": "т"}}')
+            s.add(src); s.commit(); s.refresh(src)
             s.add(LiveTestOrder(idea="идея без запуска", contact=contact,
-                                status="pending_payment", check_id=77))
+                                status="pending_payment", check_id=src.id))
             s.commit()
+            pid = src.public_id
         session_token = self._issue_session(monkeypatch, contact)
         client.cookies.set("sozdatel_session", session_token)
         r = client.get("/api/account/me")
-        client.cookies.clear()
         d = r.json()
         assert len(d["orders"]) == 1
         assert d["orders"][0]["idea"] == "идея без запуска"
         assert d["orders"][0]["status"] == "pending_payment"
-        assert d["orders"][0]["continue_url"] == "/r/77"
+        assert d["orders"][0]["continue_url"] == f"/r/{pid}"
+        # и ссылка действительно открывается, а не ведёт в 404
+        assert client.get(d["orders"][0]["continue_url"]).status_code == 200
+        client.cookies.clear()
 
     def test_me_hides_launched_order_from_orders_list(self, monkeypatch):
         """Заявка уже стала проектом (idea_id проставлен) -- показывается
@@ -5802,3 +5812,147 @@ class TestIdeaIsNotReadableByGuessing:
             link = m._report_link(p)
         assert link.startswith(f"/report/{pid}?t=")
         assert f"/report/{rid}" not in link
+
+
+class TestIdeasCanBeCompared:
+    """E4: человек с пятью проверенными идеями видел пять одинаковых строк и
+    не мог сказать, какая сильнее, не открыв каждую. Цифры уже посчитаны на
+    бесплатной проверке — вопрос был только в том, чтобы их показать и
+    расставить строки по силе."""
+
+    def _login(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_e4_" + contact, contact=contact)); s.commit()
+        assert client.get(f"/account/verify?token=tok_e4_{contact}",
+                          follow_redirects=False).status_code in (302, 307)
+
+    def _logout(self):
+        client.post("/api/account/logout")
+
+    def _check(self, contact, idea, score, count, weakest="Спрос", broken=False):
+        from app.main import DemandCheck, Session, engine
+        if broken:
+            raw = "{не json"
+        else:
+            raw = json.dumps({
+                "formulations": [{"phrase": "ф", "count": count}],
+                "best_phrase": "ф",
+                "verdict": {"level": "niche", "text": "т"},
+                "competitors": {"found": 10, "top": []},
+                "scores": [],
+                "overall": ({"value": score, "weakest": weakest, "basis": "б"}
+                            if score is not None else None)}, ensure_ascii=False)
+        with Session(engine) as s:
+            rec = DemandCheck(idea=idea, contact=contact, best_count=count, result_json=raw)
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id
+
+    def _cards(self, contact):
+        self._login(contact)
+        try:
+            return client.get("/api/account/me").json()["checks"]
+        finally:
+            self._logout()
+
+    def test_check_carries_the_numbers_it_was_judged_by(self):
+        c = "cmp1@example.com"
+        self._check(c, "Пошив штор", 7, 1200, weakest="Конкуренция")
+        card = self._cards(c)[0]
+        assert card["score"] == 7
+        assert card["count"] == 1200
+        assert card["weakest"] == "Конкуренция"
+
+    def test_strongest_idea_comes_first(self):
+        """Это и есть ответ на вопрос «во что вкладываться»: порядок строк."""
+        c = "cmp2@example.com"
+        self._check(c, "Слабая", 2, 30)
+        self._check(c, "Сильная", 8, 5000)
+        self._check(c, "Средняя", 5, 900)
+        assert [x["idea"] for x in self._cards(c)] == ["Сильная", "Средняя", "Слабая"]
+
+    def test_checks_without_a_score_go_last_but_stay_visible(self):
+        """Вордстат мог промолчать. Сравнивать такую проверку не с чем, но
+        прятать её из кабинета — значит терять работу человека."""
+        c = "cmp3@example.com"
+        self._check(c, "Без балла", None, None)
+        self._check(c, "С баллом", 4, 400)
+        cards = self._cards(c)
+        assert [x["idea"] for x in cards] == ["С баллом", "Без балла"]
+        assert cards[-1]["score"] is None
+
+    def test_broken_json_does_not_hide_the_card(self):
+        """Принцип 7: без цифр — значит без цифр, но строка на месте."""
+        c = "cmp4@example.com"
+        self._check(c, "Битая запись", 9, 999, broken=True)
+        cards = self._cards(c)
+        assert len(cards) == 1 and cards[0]["idea"] == "Битая запись"
+        assert cards[0]["score"] is None
+
+    def test_cabinet_renders_the_figures(self):
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert "figures" in text and "c.score" in text and "c.count" in text
+        assert "запросов/мес" in text
+
+    def test_note_appears_only_when_there_is_something_to_compare(self):
+        """Над одной строкой подпись про сортировку — шум."""
+        text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
+        assert "items.length > 1" in text
+        assert "От самой сильной идеи к самой слабой" in text
+
+    def test_link_from_the_cabinet_opens(self):
+        """Ссылка ведёт на неугадываемый адрес, а не на закрытый номер (E6)."""
+        from app.main import DemandCheck, Session, engine
+        c = "cmp5@example.com"
+        rid = self._check(c, "Идея из кабинета", 6, 800)
+        with Session(engine) as s:
+            pid = s.get(DemandCheck, rid).public_id
+        card = self._cards(c)[0]
+        assert card["result_url"] == f"/r/{pid}"
+        assert client.get(card["result_url"]).status_code == 200
+
+
+class TestCabinetLinksSurvivedTheAddressChange:
+    """Регрессия, которую внесла E6: ссылки в кабинете остались с порядковым
+    номером. Он открывается только у хозяина ПРОВЕРКИ, а у заявки на живой
+    тест проверка к кабинету может быть не привязана вовсе — и человек
+    получал 404 на своей же заявке."""
+
+    def _login(self, contact):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_lnk_" + contact, contact=contact)); s.commit()
+        assert client.get(f"/account/verify?token=tok_lnk_{contact}",
+                          follow_redirects=False).status_code in (302, 307)
+
+    def test_live_test_order_link_opens_for_its_buyer(self):
+        from app.main import DemandCheck, LiveTestOrder, Session, engine
+        contact = "lnk1@example.com"
+        with Session(engine) as s:
+            src = DemandCheck(idea="Идея заявки",     # контакт НЕ проставлен
+                              result_json='{"verdict": {"level": "niche", "text": "т"}}')
+            s.add(src); s.commit(); s.refresh(src)
+            s.add(LiveTestOrder(idea="Идея заявки", contact=contact,
+                                status="pending_payment", check_id=src.id))
+            s.commit()
+        self._login(contact)
+        try:
+            url = client.get("/api/account/me").json()["orders"][0]["continue_url"]
+            assert not url.rstrip("/").split("/")[-1].isdigit(), url
+            assert client.get(url).status_code == 200
+        finally:
+            client.post("/api/account/logout")
+
+    def test_link_is_absent_when_the_check_is_gone(self):
+        """Ссылка в никуда хуже отсутствия ссылки."""
+        from app.main import LiveTestOrder, Session, engine
+        contact = "lnk2@example.com"
+        with Session(engine) as s:
+            s.add(LiveTestOrder(idea="Заявка без проверки", contact=contact,
+                                status="pending_payment", check_id=999777))
+            s.commit()
+        self._login(contact)
+        try:
+            assert client.get("/api/account/me").json()["orders"][0]["continue_url"] is None
+        finally:
+            client.post("/api/account/logout")

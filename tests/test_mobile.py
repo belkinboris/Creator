@@ -103,7 +103,19 @@ with Session(engine) as s:
         s.add(SmokeEvent(idea="sweep1", event="page_view"))
     for _ in range(3):
         s.add(SmokeEvent(idea="sweep1", event="lead_submitted", contact="lead@example.com"))
+    # Токен входа одноразовый, поэтому каждому тесту, который логинится,
+    # нужен свой -- иначе второй молча увидит страницу гостя.
     s.add(MagicLinkToken(token="sweep_token", contact="sweep@example.com"))
+    s.add(MagicLinkToken(token="sweep_token2", contact="sweep@example.com"))
+    # Ещё две проверки того же человека — чтобы в кабинете было что сравнивать
+    # между собой (E4): порядок строк и есть ответ «какая идея сильнее».
+    for name, sc, cnt in (("Слабая идея для сравнения", 2, 40),
+                          ("Сильная идея для сравнения", 9, 7400)):
+        cmp_raw = dict(data)
+        cmp_raw["overall"] = {"value": sc, "weakest": "Спрос", "basis": "б"}
+        cmp_raw["formulations"] = [{"phrase": "ф", "count": cnt}]
+        s.add(DemandCheck(idea=name, best_count=cnt, contact="sweep@example.com",
+                          result_json=json.dumps(cmp_raw, ensure_ascii=False)))
     # Идея, которую почти не ищут: вердикт имеет право сказать «нет», и
     # страница обязана перестать продавать так, будто ничего не случилось.
     weak = dict(data)
@@ -471,5 +483,31 @@ def test_owner_sees_mail_state_in_the_desk(site, browser):
         page.wait_for_timeout(1200)
         assert "не настроена" in page.inner_text("#mail-result").lower()
         _assert_clean(page, "кабинет владельца, блок почты")
+    finally:
+        ctx.close()
+
+
+def test_cabinet_ranks_ideas_so_they_can_be_compared(site, browser):
+    """E4. Сортировку делает сервер, а цифры рисует скрипт — проверяем то,
+    что человек реально видит, а не подстроки в шаблоне."""
+    ctx, page = _open(browser, f"{site['base']}/account/verify?token=sweep_token2")
+    try:
+        _goto(page, f"{site['base']}/account")
+        page.wait_for_selector(".item", timeout=10000)
+        names = page.eval_on_selector_all(
+            ".item .name", "e => e.map(x => x.innerText)")
+        strong = names.index("Сильная идея для сравнения")
+        weak = names.index("Слабая идея для сравнения")
+        assert strong < weak, names
+
+        # цифры, по которым сравнивают, видны в строке
+        row = page.locator(".item", has=page.locator("text=Сильная идея для сравнения"))
+        figures = row.locator(".figures").inner_text()
+        assert "9" in figures and "7" in figures, figures
+        assert "запросов/мес" in figures
+
+        # подпись объясняет, почему такой порядок
+        assert "самой сильной" in page.inner_text(".list-note")
+        _assert_clean(page, "кабинет со сравнением идей")
     finally:
         ctx.close()

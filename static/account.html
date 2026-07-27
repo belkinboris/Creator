@@ -67,6 +67,14 @@
     border:1px solid var(--line);background:var(--box);border-radius:8px;padding:14px 16px;margin-bottom:8px}
   .item .name{font-size:15px;font-weight:600}
   .item .sub2{color:var(--muted);font-size:13px;margin-top:2px}
+  /* Цифры проверки: по ним человек и сравнивает свои идеи между собой (E4).
+     Моно-шрифт — только на самих числах, как везде в системе. */
+  .item .figures{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;
+    color:var(--muted);font-size:13px}
+  .item .fig b{color:var(--ink);font:600 14px "IBM Plex Mono",monospace;
+    background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 2px}
+  .item .fig.plain b{background:none;padding:0}
+  .list-note{color:var(--muted);font-size:13px;margin:-4px 0 10px}
   .empty{color:var(--muted);font-size:15px;padding:8px 0}
 
   /* Экран первого входа: одна мысль, одно действие. */
@@ -207,12 +215,25 @@ function stageBadge(stageIdx, name){
       <a class="btn-ghost" href="${rp.report_url}">Открыть →</a>
     </div>`;
 
-  const checkRow = c => `
+  // Пять проверенных идей выглядели как пять одинаковых строк, и понять,
+  // какая сильнее, можно было только открыв каждую (E4). Цифры уже посчитаны
+  // на бесплатной проверке — показываем их, ничего нового не обещая.
+  const fmtNum = n => Number(n).toLocaleString('ru-RU');
+  const checkRow = c => {
+    const figs = [];
+    if (c.score !== null && c.score !== undefined)
+      figs.push(`<span class="fig"><b>${c.score}</b>/10</span>`);
+    if (c.count !== null && c.count !== undefined)
+      figs.push(`<span class="fig plain"><b>${fmtNum(c.count)}</b> запросов/мес</span>`);
+    if (c.weakest) figs.push(`<span class="fig">слабое место — ${escapeHtml(c.weakest.toLowerCase())}</span>`);
+    return `
     <div class="item">
       <div><div class="name">${escapeHtml(c.idea || 'Без названия')}</div>
-        <div class="sub2">Бесплатная проверка спроса</div></div>
+        <div class="sub2">Бесплатная проверка спроса</div>
+        ${figs.length ? `<div class="figures">${figs.join('')}</div>` : ''}</div>
       <a class="btn-ghost" href="${c.result_url}">Открыть →</a>
     </div>`;
+  };
 
   // Порядок -- от самого продвинутого к самому раннему: сверху то, во что
   // человек уже вложился. Пустые разделы не выводятся: заголовок над
@@ -223,10 +244,16 @@ function stageBadge(stageIdx, name){
     ['Отчёты и бизнес-планы', d.reports, reportRow],
     ['Проверки спроса', d.checks, checkRow],
   ];
+  // Подпись появляется, только когда сравнивать действительно есть что:
+  // над одной строкой она была бы шумом.
+  const noteFor = (title, items) =>
+    (title === 'Проверки спроса' && items.length > 1)
+      ? '<p class="list-note">От самой сильной идеи к самой слабой — по общему баллу проверки.</p>'
+      : '';
   const html = SECTIONS
     .filter(([, items]) => items.length)
     .map(([title, items, row]) =>
-      `<div class="list-title">${title}</div>` + items.map(row).join(''))
+      `<div class="list-title">${title}</div>` + noteFor(title, items) + items.map(row).join(''))
     .join('');
 
   if (html) {
