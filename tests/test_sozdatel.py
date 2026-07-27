@@ -3769,3 +3769,59 @@ class TestOwnerReportPreview:
         rid = self._check()
         assert client.get(f"/report/{rid}?preview=full", headers=OWNER).status_code == 200
         assert sent == []
+
+
+class TestFontsAreServedFromOurOwnHost:
+    """B6: шрифты грузились с fonts.googleapis.com рендер-блокирующим тегом.
+    Из России домен часто недоступен, а такой тег держит отрисовку всей
+    страницы: человек видел белый экран до сетевого таймаута, а не «просто
+    другой шрифт». Принцип 8 — всё работает из России."""
+
+    STATIC = main_module.BASE_DIR.parent / "static"
+
+    def test_no_page_reaches_out_to_google(self):
+        bad = [p.name for p in sorted(self.STATIC.glob("*.html"))
+               if "fonts.googleapis.com" in p.read_text() or "fonts.gstatic.com" in p.read_text()]
+        assert not bad, "страницы всё ещё тянут шрифты у Google: " + ", ".join(bad)
+
+    def test_every_page_links_the_local_stylesheet(self):
+        """Пропустить страницу — значит оставить её без фирменного шрифта."""
+        bad = [p.name for p in sorted(self.STATIC.glob("*.html"))
+               if '/fonts/fonts.css' not in p.read_text()]
+        assert not bad, "страницы без локального шрифта: " + ", ".join(bad)
+
+    def test_stylesheet_is_served_and_points_only_at_us(self):
+        r = client.get("/fonts/fonts.css")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/css")
+        assert "https://" not in r.text          # ни одной внешней ссылки внутри
+        assert "/fonts/IBMPlexSans-400-cyrillic.woff2" in r.text
+
+    def test_every_font_referenced_by_the_stylesheet_exists(self):
+        """Опечатка в имени файла = молча пропавший шрифт на всём сайте."""
+        css = client.get("/fonts/fonts.css").text
+        names = set(re.findall(r"url\(/fonts/([^)]+)\)", css))
+        assert names, "в стилях не осталось ни одного шрифта"
+        for name in sorted(names):
+            r = client.get(f"/fonts/{name}")
+            assert r.status_code == 200, f"{name} не отдаётся"
+            assert r.headers["content-type"] == "font/woff2"
+
+    def test_cyrillic_is_covered(self):
+        """Сайт русский: без кириллического подмножества фирменный шрифт не
+        применится вовсе, и это заметят все."""
+        css = client.get("/fonts/fonts.css").text
+        assert "cyrillic" in css
+        assert re.search(r"unicode-range:[^;]*U\+0400-045F", css)
+
+    def test_font_route_does_not_serve_anything_else(self):
+        """Роут отдаёт файлы с диска — он не должен превращаться в способ
+        читать что попало, включая HTML-шаблоны с неподставленными слотами."""
+        for name in ("../index.html", "..%2Findex.html", "index.html",
+                     "../../app/main.py", "fonts.css/../../index.html"):
+            assert client.get(f"/fonts/{name}").status_code in (403, 404), name
+
+    def test_fonts_are_cached_hard(self):
+        """Файлы неизменяемые: имя меняется вместе с содержимым."""
+        r = client.get("/fonts/fonts.css")
+        assert "immutable" in r.headers.get("cache-control", "")
