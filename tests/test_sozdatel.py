@@ -5289,3 +5289,109 @@ class TestWeakDemandStopsSelling:
         text = client.get(f"/r/{rid}").text
         assert 'id="order-btn"' in text                # заявка на живой тест
         assert f'href="/report/{rid}"' in text         # и отчёт
+
+
+class TestTierListIsReadableAtTheDecisionPoint:
+    """B7: C2 поставила состав тарифов к кнопке, когда разделов было восемь.
+    После посекционной переработки (E5) их 21, и полный тариф на витрине
+    превратился в строчную простыню из шестнадцати фрагментов через запятую.
+    Блок, созданный помогать решению, решению мешал.
+
+    Здесь нет JS-развилки: блок собирает сервер, поэтому проверки ниже
+    сторожат настоящее поведение, а не текст в шаблоне."""
+
+    def _block(self):
+        import app.main as m
+        return m._tier_summary_html()
+
+    def _plain(self, html_text):
+        return re.sub(r"<[^>]+>", " ", html_text)
+
+    def test_full_tier_is_grouped_not_one_long_line(self):
+        import app.main as m
+        block = self._block()
+        items = re.findall(r"<li>(.*?)</li>", block, re.S)
+        assert len(items) >= 4, "полный тариф снова одной строкой"
+        # каждая группа названа — именно имя группы держит взгляд
+        names = [n for n, _ in m.SECTION_GROUPS]
+        shown = [n for n in names if f"<b>{n}:</b>" in block]
+        assert len(shown) >= 4, f"группы не названы: {shown}"
+
+    def test_money_group_carries_the_estimate(self):
+        """Ради этой строки человек с /social-contract и платит: смета есть
+        только в полном тарифе (это и была находка C2)."""
+        block = self._block()
+        money = [x for x in re.findall(r"<li>(.*?)</li>", block, re.S)
+                 if "Деньги" in x]
+        assert money, "группы «Деньги» на витрине нет"
+        assert "финансовая модель" in money[0].lower()
+
+    def test_no_section_of_the_full_tier_is_lost(self):
+        """Главное свойство блока: он обещает ровно то, что движок отдаёт."""
+        import app.main as m
+        plain = self._plain(self._block()).lower()
+        for key, title in m.ALL_SECTIONS:
+            short = title.split(" — ")[0].strip().lower()
+            assert short in plain, f"раздел «{title}» пропал с витрины"
+
+    def test_section_without_a_group_still_reaches_the_showcase(self):
+        """Раскладка по группам не должна уметь ронять секцию. Молча
+        пропасть — это ровно тот разъезд движка и витрины, против которого
+        весь этот блок и написан (принцип 3)."""
+        import app.main as m
+        with_new = list(m.ALL_SECTIONS) + [("newthing", "Совершенно новая секция")]
+        orig = m.ALL_SECTIONS
+        m.ALL_SECTIONS = with_new
+        try:
+            plain = self._plain(m._tier_summary_html()).lower()
+        finally:
+            m.ALL_SECTIONS = orig
+        assert "совершенно новая секция" in plain
+
+    def test_count_is_computed_not_written_by_hand(self):
+        import app.main as m
+        extra = [k for k, _ in m.ALL_SECTIONS if k not in m.QUICK_KEYS]
+        assert f"ещё {len(extra)} " in self._plain(self._block())
+
+    def test_cheap_tier_stays_a_plain_list(self):
+        """Пять пунктов читаются одной строкой — дробить их на группы значит
+        сделать хуже там, где было хорошо."""
+        import app.main as m
+        block = self._block()
+        head = block.split('<ul class="tier-groups">')[0]
+        for key, title in m.ALL_SECTIONS:
+            if key in m.QUICK_KEYS:
+                assert title.split(" — ")[0].strip() in head, title
+
+    def test_tier_names_and_prices_still_come_from_the_code(self):
+        """B5: копия названия или цены в статике — уже трижды пойманный
+        источник вранья."""
+        import app.main as m
+        block = self._block()
+        for tier in ("quick", "full"):
+            assert m.REPORT_PRICES[tier]["label"] in block
+            assert f'{m.REPORT_PRICES[tier]["price"]} ₽' in block
+        # Что копия названия не вернулась в статику, сторожит уже
+        # TestNoHardcodedServerValuesInStatic — там проверка точнее: она
+        # ищет название в кавычках-ёлочках, а не любое вхождение слова
+        # (в result.html оно законно встречается в комментарии к коду).
+
+    def test_showcase_renders_the_groups_on_the_page(self):
+        """Блок должен доезжать до браузера подставленным, а не слотом."""
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        text = client.get(f"/r/{rid}").text
+        assert "__TIER_SUMMARY__" not in text
+        assert 'class="tier-groups"' in text
+        assert "<b>Деньги:</b>" in text

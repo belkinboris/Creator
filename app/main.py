@@ -995,27 +995,57 @@ def _tier_summary_html() -> str:
 
     Состав собирается из ALL_SECTIONS/QUICK_KEYS, а не пишется руками:
     вторая копия списка разъехалась бы с движком, как уже разъезжались цены.
+
+    Разделов в полном тарифе стало 21 вместо восьми (E5), и перечисление
+    через запятую превратилось в строчную простыню из шестнадцати фрагментов:
+    блок, созданный помогать решению, решению мешал (B7). Дешёвый тариф
+    так и перечисляем — пять пунктов читаются, — а полный разложен по
+    группам `SECTION_GROUPS`: имя группы держит взгляд, а «Финансовая
+    модель» находится в «Деньгах», а не тонет в середине списка. Для
+    соцконтракта это ровно та строка, ради которой человек и платит.
     """
     # Заголовок «План запуска — по этапам» внутри перечисления через запятую
     # читается двусмысленно из-за тире: берём часть до него.
     def short(title: str) -> str:
         return title.split(" — ")[0].strip()
 
+    titles = dict(ALL_SECTIONS)
     quick = [short(t) for k, t in ALL_SECTIONS if k in QUICK_KEYS]
-    extra = [short(t) for k, t in ALL_SECTIONS if k not in QUICK_KEYS]
-    rows = [
-        (REPORT_PRICES["quick"]["label"], REPORT_PRICES["quick"]["price"],
-         ", ".join(quick) + "."),
-        (REPORT_PRICES["full"]["label"], REPORT_PRICES["full"]["price"],
-         "всё это и ещё " + ", ".join(t.lower() for t in extra) + "."),
-    ]
-    items = "".join(
+    extra_keys = [k for k, _ in ALL_SECTIONS if k not in QUICK_KEYS]
+
+    group_html = ""
+    for name, keys in SECTION_GROUPS:
+        mine = [short(titles[k]).lower() for k in keys if k in extra_keys]
+        if mine:
+            group_html += (f'<li><b>{html.escape(name)}:</b> '
+                           f'{html.escape(", ".join(mine))}</li>')
+    # Секция, которой нет ни в одной группе, обязана всё равно попасть на
+    # витрину: молча пропасть — это ровно тот разъезд движка и витрины,
+    # против которого вся эта функция и написана (принцип 3).
+    covered = {k for _, keys in SECTION_GROUPS for k in keys}
+    loose = [short(titles[k]).lower() for k in extra_keys if k not in covered]
+    if loose:
+        group_html += f'<li>{html.escape(", ".join(loose))}</li>'
+
+    quick_label = REPORT_PRICES["quick"]["label"]
+    # Число разделов считаем, а не пишем: набор секций уже менялся.
+    lead = (f'Всё из тарифа «{quick_label}» и ещё '
+            f'{len(extra_keys)} {_plural(len(extra_keys), "раздел", "раздела", "разделов")}:')
+
+    return (
+        '<div class="tier-what-block">'
         f'<div class="tier-row">'
-        f'<span class="tier-name">{html.escape(label)} — <b>{price} ₽</b></span>'
-        f'<span class="tier-what">{html.escape(what)}</span>'
+        f'<span class="tier-name">{html.escape(quick_label)} — '
+        f'<b>{REPORT_PRICES["quick"]["price"]} ₽</b></span>'
+        f'<span class="tier-what">{html.escape(", ".join(quick))}.</span>'
         f'</div>'
-        for label, price, what in rows)
-    return f'<div class="tier-what-block">{items}</div>'
+        f'<div class="tier-row">'
+        f'<span class="tier-name">{html.escape(REPORT_PRICES["full"]["label"])} — '
+        f'<b>{REPORT_PRICES["full"]["price"]} ₽</b></span>'
+        f'<span class="tier-what">{html.escape(lead)}</span>'
+        f'<ul class="tier-groups">{group_html}</ul>'
+        f'</div>'
+        '</div>')
 
 
 def _example_link(text: str) -> str:
