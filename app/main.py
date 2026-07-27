@@ -58,7 +58,8 @@ engine = create_engine(DATABASE_URL, **_engine_kwargs)
 from app.offer_engine import OfferEngineError, sharpen_idea  # noqa: E402
 from app.demand import DemandError, check_demand, generate_idea, diagnose  # noqa: E402
 from app.report_engine import (  # noqa: E402
-    ReportEngineError, generate_report, ALL_SECTIONS, QUICK_KEYS,
+    ReportEngineError, generate_core, generate_section, generate_report,
+    ALL_SECTIONS, QUICK_KEYS, SECTION_GROUPS, section_keys, section_title,
     PURPOSES as report_purposes,
 )
 from app import payments  # noqa: E402
@@ -76,6 +77,7 @@ def utcnow() -> datetime:
 # лету при чтении (created_at + порог < сейчас), не мутирует БД: ни воркеров,
 # ни крона нет, статус просто перестаёт звать на оплату уже неживую ссылку.
 PENDING_PAYMENT_TIMEOUT_MINUTES = 20
+PURPOSE_DEFAULT = "business"
 
 # Пороги вердикта теста на реальных людях -- ЕДИНСТВЕННЫЙ источник правды.
 # Раньше числа были зашиты в модель, а витрины называли совсем другие: главная
@@ -183,6 +185,10 @@ class DemandCheck(SQLModel, table=True):
     # "social_contract" (лендинг /social-contract, выплата от государства).
     # Определяет оптику платного отчёта -- см. PURPOSES в report_engine.
     purpose: str = "business"
+    # Бесплатный образец платного разбора: балл, объяснение, названные риски
+    # и один настоящий раздел. Генерируется лениво при первом открытии
+    # /report/{id} без оплаты и кэшируется навсегда -- см. _ensure_sample.
+    sample_json: str = ""
     # JSON выбранного на /r/ заострённого позиционирования. Живёт здесь, а не
     # на заказе, потому что отчёт заказывают уже со страницы /report/{check_id},
     # которая знает только check_id: иначе выбор человека до отчёта не доезжает.
@@ -202,6 +208,7 @@ class LiveTestOrder(SQLModel, table=True):
     amount: int = 0
     chosen_offer: str = ""    # JSON: полный оффер, выбранный на /r/{id} -- см. LAUNCH_REQUIRED_FIELDS
     paid_notified: bool = False   # владельцу сообщили об оплате/заявке
+    buyer_notified: bool = False    # покупателю сообщили о его заказе -- см. ReportPurchase
     idea_id: Optional[str] = None   # проставляется автозапуском/владельцем -- ссылка на запущенный SmokeProject
 
 
@@ -226,10 +233,20 @@ class ReportPurchase(SQLModel, table=True):
     gen_error: str = ""
     fail_notified: bool = False   # владельцу сообщили о сорванной доставке
     paid_notified: bool = False   # владельцу сообщили о самой оплате/заявке
+    # Письмо ПОКУПАТЕЛЮ -- отдельный флаг, не общий с владельческим: письмо
+    # владельцу и письмо покупателю решают разные задачи, и успех одного не
+    # имеет права погасить второе (тот же урок, что fail_notified в A2).
+    buyer_notified: bool = False
     # Публичный пример на /example. Настоящий сгенерированный отчёт, а не
     # написанный руками: показывать более гладкий текст, чем отдаёт движок,
     # значит продавать не то, что отдаём (принцип 3). Помечает владелец.
     is_example: bool = False
+    # Ключ от собственного отчёта. Страница /report/{check_id} адресуется
+    # порядковым номером проверки, то есть чужой оплаченный бизнес-план
+    # открывался перебором: 42 -> 41. Токен уходит в return_url оплаты и в
+    # ссылку из кабинета; кто вошёл в кабинет своей почтой, проходит и без
+    # него (см. _report_access_ok).
+    access_token: str = Field(default_factory=lambda: secrets.token_urlsafe(16))
 
 
 class MagicLinkToken(SQLModel, table=True):
@@ -280,9 +297,28 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS is_example BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS sample_json VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS access_token VARCHAR DEFAULT ''"))
+        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
+
+try:  # Покупки, оформленные до появления токена, остались бы без ключа от
+    # собственного отчёта: в кабинет по своей почте владелец покупки войдёт,
+    # а прямая ссылка перестала бы работать. Досыпаем по строке, не пачкой --
+    # токен на то и токен, что у каждой покупки свой.
+    with Session(engine) as _s:
+        _old = _s.exec(select(ReportPurchase).where(
+            (ReportPurchase.access_token == "") | (ReportPurchase.access_token.is_(None)))).all()
+        for _row in _old:
+            _row.access_token = secrets.token_urlsafe(16)
+            _s.add(_row)
+        if _old:
+            _s.commit()
+except Exception:
+    logging.getLogger(__name__).warning("backfill access_token failed", exc_info=True)
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -343,6 +379,39 @@ def _project_access_ok(request: Request, proj: "SmokeProject") -> bool:
         return True
     contact = _current_contact(request)
     return bool(contact and proj.contact and contact == proj.contact)
+
+
+def _report_access_ok(request: Request, purchase: "ReportPurchase") -> bool:
+    """Кому открывать ОПЛАЧЕННЫЙ отчёт на /report/{check_id}.
+
+    Страница адресуется порядковым номером проверки спроса, и до этого
+    оплаченный бизнес-план отдавался любому, кто наберёт номер: 42 -> 41.
+    Утекал не только текст за 2990 ₽, но и чужие деньги -- посторонний мог
+    через /api/report/{id}/section гонять генерацию по чужой покупке.
+
+    Три двери, все три -- у настоящего покупателя:
+      · владелец по ключу (как везде);
+      · ссылка с токеном -- уходит в return_url оплаты и в кабинет;
+      · сессия кабинета с той же почтой, на которую оформлен заказ, --
+        человек, потерявший ссылку, входит по magic-link и открывает отчёт
+        без всякого токена.
+    """
+    if _is_owner(request):
+        return True
+    token = (request.query_params.get("t") or "").strip()
+    if token and purchase.access_token and secrets.compare_digest(token, purchase.access_token):
+        return True
+    contact = _current_contact(request)
+    return bool(contact and purchase.contact and contact == purchase.contact)
+
+
+def _report_link(purchase: "ReportPurchase") -> str:
+    """Ссылка на отчёт для его покупателя -- сразу с токеном, чтобы
+    скопированная из кабинета ссылка открывалась и в другом браузере."""
+    if not purchase.check_id:
+        return ""
+    tok = purchase.access_token or ""
+    return f"/report/{purchase.check_id}" + (f"?t={tok}" if tok else "")
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +562,9 @@ async def live_test_order(data: LiveTestIn, request: Request):
         if _notify_owner_order(request, what="живой тест", order_id=order_id, idea=idea,
                                contact=contact, amount=LIVE_TEST_PRICE, paid=False):
             _mark_notified(LiveTestOrder, order_id)
+        if _notify_buyer_order(request, kind="livetest", order_id=order_id, idea=idea,
+                               contact=contact, amount=LIVE_TEST_PRICE, paid=False):
+            _mark_notified(LiveTestOrder, order_id, field="buyer_notified")
         return {"ok": True, "paid": False,
                 "message": "Заявка принята. Свяжемся в течение дня и соберём проверочную "
                            "страницу под вашу идею — рекламу вы запустите сами по нашей инструкции."}
@@ -531,11 +603,19 @@ async def yookassa_webhook(request: Request):
     kind = meta.get("kind", "livetest")   # старые платежи до kind -- считаем livetest
     model = {"livetest": LiveTestOrder, "report": ReportPurchase}.get(kind, LiveTestOrder)
     notify = None
+    buyer = None
     try:
         with Session(engine) as s:
             order = s.get(model, int(order_id)) if order_id else None
             if order and order.status != "paid":
                 order.status = "paid"; s.add(order); s.commit()
+            if order is not None and not order.buyer_notified:
+                # Письмо покупателю собирается отдельно от владельческого и по
+                # своему флагу: у них разные адресаты и разные задачи.
+                buyer = {"kind": kind, "order_id": order.id, "idea": order.idea,
+                         "contact": order.contact, "amount": order.amount,
+                         "tier": getattr(order, "tier", ""),
+                         "link": _report_link(order) if kind == "report" else ""}
             if order is not None and not order.paid_notified:
                 # Собираем данные письма ВНУТРИ сессии, а шлём после неё:
                 # SMTP может отвечать секундами, держать на нём транзакцию
@@ -545,7 +625,7 @@ async def yookassa_webhook(request: Request):
                     notify = {"what": f"отчёт «{label}»", "order_id": order.id,
                               "idea": order.idea, "contact": order.contact,
                               "amount": order.amount,
-                              "link": f"/report/{order.check_id}" if order.check_id else ""}
+                              "link": _report_link(order)}
                 else:
                     notify = {"what": "живой тест", "order_id": order.id,
                               "idea": order.idea, "contact": order.contact,
@@ -569,6 +649,8 @@ async def yookassa_webhook(request: Request):
         logging.getLogger(__name__).warning("webhook order update failed", exc_info=True)
     if notify and _notify_owner_order(request, paid=True, **notify):
         _mark_notified(model, notify["order_id"])
+    if buyer and _notify_buyer_order(request, paid=True, **buyer):
+        _mark_notified(model, buyer["order_id"], field="buyer_notified")
     return {"ok": True}
 
 
@@ -611,6 +693,55 @@ def _report_preview(demand_data: dict) -> dict:
         "timing_note": notes.get("timing", ""),
         "execution_note": notes.get("execution", ""),
     }
+
+
+# Раздел, который отдаётся бесплатно целиком. Резюме — самый ценный раздел, и
+# именно поэтому он в образце: человек не купит разбор, о качестве которого
+# не может судить. Раньше бесплатная часть была пересказом цифр со страницы
+# спроса — ни строчки анализа, оценить нечего, платить не за что.
+SAMPLE_SECTION = "summary"
+
+
+async def _ensure_sample(check_id: int) -> dict | None:
+    """Бесплатный образец платного разбора: балл, объяснение, названные риски
+    и один настоящий раздел целиком.
+
+    Считается ОДИН раз на проверку и кэшируется навсегда: это два вызова
+    модели, и платит за них владелец. Генерируем лениво — только когда
+    человек реально открыл страницу отчёта, то есть думает о покупке.
+    Сбой не имеет права уронить страницу: без образца она просто остаётся
+    такой, какой была (принцип 7 — деградация вместо ошибки).
+    """
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, check_id)
+        if not rec or not rec.result_json:
+            return None
+        if rec.sample_json:
+            try:
+                return json.loads(rec.sample_json)
+            except ValueError:
+                pass
+        idea, purpose = rec.idea, rec.purpose
+        chosen = _chosen_offer(rec)
+        demand_data = json.loads(rec.result_json)
+
+    try:
+        core = await generate_core(idea, demand_data, "quick",
+                                   chosen_offer=chosen, purpose=purpose)
+        section = await generate_section(SAMPLE_SECTION, idea, demand_data, "quick",
+                                         chosen_offer=chosen, purpose=purpose)
+    except ReportEngineError:
+        logging.getLogger(__name__).info("sample not built for check %s", check_id,
+                                         exc_info=True)
+        return None
+
+    sample = {**core, "section": section}
+    with Session(engine) as s:
+        fresh = s.get(DemandCheck, check_id)
+        if fresh and not fresh.sample_json:
+            fresh.sample_json = json.dumps(sample, ensure_ascii=False)
+            s.add(fresh); s.commit()
+    return sample
 
 
 PREVIEW_STATUS = "preview"   # владельческий прогон без оплаты, см. _owner_preview
@@ -661,20 +792,27 @@ async def report_order(data: ReportIn, request: Request):
         order = ReportPurchase(check_id=data.check_id, idea=idea, tier=tier, contact=contact[:200],
                                amount=price, status="pending_payment" if payments.configured() else "new")
         s.add(order); s.commit(); s.refresh(order)
-        order_id = order.id
+        order_id, order_link = order.id, _report_link(order)
     if not payments.configured():
         if _notify_owner_order(request, what=f"отчёт «{REPORT_PRICES[tier]['label']}»",
                                order_id=order_id, idea=idea, contact=contact,
-                               amount=price, paid=False,
-                               link=f"/report/{data.check_id}" if data.check_id else ""):
+                               amount=price, paid=False, link=order_link):
             _mark_notified(ReportPurchase, order_id)
+        if _notify_buyer_order(request, kind="report", order_id=order_id, idea=idea,
+                               contact=contact, amount=price, paid=False, tier=tier,
+                               link=order_link):
+            _mark_notified(ReportPurchase, order_id, field="buyer_notified")
         return {"ok": True, "paid": False,
                 "message": "Заявка принята. Мы соберём отчёт вручную и пришлём в течение дня."}
     try:
         base = str(request.base_url).rstrip("/")
+        # Токен в адресе возврата -- это и есть ключ покупателя от своего
+        # отчёта: вернувшись с оплаты, он открывает страницу сразу, ещё не
+        # заходя в кабинет.
+        sep = "&" if "?" in order_link else "?"
         pid, url = await payments.create_payment(
             order_id, REPORT_PRICES[tier]["price"], f"Создатель · отчёт по идее (заказ {order_id})",
-            f"{base}/report/{data.check_id}?paid=1", kind="report", contact=contact)
+            f"{base}{order_link}{sep}paid=1", kind="report", contact=contact)
         with Session(engine) as s:
             order = s.get(ReportPurchase, order_id)
             order.payment_id = pid; s.add(order); s.commit()
@@ -717,14 +855,76 @@ def _notify_owner_order(request: Request, *, what: str, order_id: int, idea: str
     return mailer.notify_owner(f"Создатель: {head} — {what}", body)
 
 
-def _mark_notified(model, order_id: int) -> None:
-    """Флаг «владельцу уже написали» отдельной короткой транзакцией: вебхук
-    ЮКассы может прийти повторно, а страницу заказа можно перезагрузить."""
+def _notify_buyer_order(request: Request, *, kind: str, order_id: int, idea: str,
+                        contact: str, amount: int, paid: bool, tier: str = "",
+                        link: str = "") -> bool:
+    """Письмо ПОКУПАТЕЛЮ о его собственном заказе.
+
+    До этого при оплате письмо уходило владельцу, а человеку, отдавшему
+    990-2990 ₽, -- ничего: только фискальный чек от ЮКассы, то есть чек, а не
+    ссылка на продукт (A10 в PRODUCT_ROADMAP). Между тем отчёт собирается по
+    разделам минутами, и единственным следом покупки была вкладка в браузере.
+
+    Письмо отвечает ровно на три вопроса, которые возникают сразу после
+    оплаты: что именно куплено, где это лежит и что делать, если ссылка
+    потерялась. Никогда не бросает -- см. mailer.notify_buyer.
+    """
+    base = str(request.base_url).rstrip("/")
+    idea_line = f"Идея: {(idea or '—')[:200]}\n"
+    if kind == "report":
+        label = REPORT_PRICES.get(tier, {}).get("label", "отчёт")
+        subject = (f"Создатель: {label.lower()} по вашей идее — "
+                   + ("оплата принята" if paid else "заявка принята"))
+        if paid:
+            body = (f"Оплата принята, спасибо.\n\n"
+                    f"Что оплачено: {label}, {amount} ₽ (заказ №{order_id})\n"
+                    f"{idea_line}\n"
+                    f"Ваш разбор здесь:\n{base}{link}\n\n"
+                    "Он собирается по разделам и занимает несколько минут. "
+                    "Страницу можно закрыть: собранное сохраняется, при следующем "
+                    "открытии сборка продолжится сама.\n\n")
+        else:
+            body = (f"Заявка принята.\n\n"
+                    f"Что заказано: {label} (заказ №{order_id})\n"
+                    f"{idea_line}\n"
+                    "Мы соберём разбор и пришлём его в течение дня.\n\n")
+    else:
+        subject = ("Создатель: тест на реальных людях — "
+                   + ("оплата принята" if paid else "заявка принята"))
+        head = (f"Оплата принята, спасибо.\n\nЧто оплачено: тест на реальных людях, "
+                f"{amount} ₽ (заказ №{order_id})\n" if paid
+                else f"Заявка принята.\n\nЧто заказано: тест на реальных людях "
+                     f"(заказ №{order_id})\n")
+        body = (head + f"{idea_line}\n"
+                "Мы собираем проверочную страницу под вашу идею. Готовая страница и "
+                "пошаговая инструкция по запуску рекламы появятся в личном кабинете.\n\n"
+                # Про отдельный бюджет человек узнавал уже после оплаты -- ровно то,
+                # что чинила A7. Письмо -- последнее место, где об этом можно
+                # промолчать, поэтому не молчим.
+                f"Напоминаем: рекламный бюджет ({AD_BUDGET_HINT}) вы платите напрямую "
+                "Яндексу, в стоимость теста он не входит.\n\n")
+    # «даже если ссылка выше потеряется» имеет смысл только там, где ссылка
+    # выше есть: в письме про живой тест её нет, страницу мы ещё собираем.
+    tail = ("Все ваши заказы будут там, даже если ссылка выше потеряется.\n\n"
+            if link else "Все ваши заказы и проекты будут там.\n\n")
+    body += (f"Личный кабинет: {base}/account\n"
+             "Вход без пароля — укажите эту же почту, и мы пришлём ссылку. "
+             + tail +
+             "Если что-то пошло не так — просто ответьте на это письмо.\n")
+    return mailer.notify_buyer(contact, subject, body)
+
+
+def _mark_notified(model, order_id: int, *, field: str = "paid_notified") -> None:
+    """Флаг «письмо уже ушло» отдельной короткой транзакцией: вебхук
+    ЮКассы может прийти повторно, а страницу заказа можно перезагрузить.
+
+    field разделяет владельческое и покупательское письмо: успех одного не
+    имеет права погасить второе (тот же урок, что fail_notified в A2)."""
     try:
         with Session(engine) as s:
             row = s.get(model, order_id)
             if row is not None:
-                row.paid_notified = True
+                setattr(row, field, True)
                 s.add(row); s.commit()
     except Exception:
         logging.getLogger(__name__).warning("mark notified failed", exc_info=True)
@@ -785,6 +985,69 @@ def _example_purchase(s: Session):
         ReportPurchase.is_example == True)).first()          # noqa: E712
 
 
+def _tier_summary_html() -> str:
+    """Что входит в каждый тариф — там, где человек решает платить.
+
+    Раньше на `/r/` стояло только «от 990 ₽», а состав тарифов открывался
+    лишь на следующем экране. Для пришедшего с /social-contract это прямая
+    ловушка: он идёт за обоснованием сметы, а секции «Финансовая модель» в
+    дешёвом тарифе нет вовсе (C2 в PRODUCT_ROADMAP).
+
+    Состав собирается из ALL_SECTIONS/QUICK_KEYS, а не пишется руками:
+    вторая копия списка разъехалась бы с движком, как уже разъезжались цены.
+
+    Разделов в полном тарифе стало 21 вместо восьми (E5), и перечисление
+    через запятую превратилось в строчную простыню из шестнадцати фрагментов:
+    блок, созданный помогать решению, решению мешал (B7). Дешёвый тариф
+    так и перечисляем — пять пунктов читаются, — а полный разложен по
+    группам `SECTION_GROUPS`: имя группы держит взгляд, а «Финансовая
+    модель» находится в «Деньгах», а не тонет в середине списка. Для
+    соцконтракта это ровно та строка, ради которой человек и платит.
+    """
+    # Заголовок «План запуска — по этапам» внутри перечисления через запятую
+    # читается двусмысленно из-за тире: берём часть до него.
+    def short(title: str) -> str:
+        return title.split(" — ")[0].strip()
+
+    titles = dict(ALL_SECTIONS)
+    quick = [short(t) for k, t in ALL_SECTIONS if k in QUICK_KEYS]
+    extra_keys = [k for k, _ in ALL_SECTIONS if k not in QUICK_KEYS]
+
+    group_html = ""
+    for name, keys in SECTION_GROUPS:
+        mine = [short(titles[k]).lower() for k in keys if k in extra_keys]
+        if mine:
+            group_html += (f'<li><b>{html.escape(name)}:</b> '
+                           f'{html.escape(", ".join(mine))}</li>')
+    # Секция, которой нет ни в одной группе, обязана всё равно попасть на
+    # витрину: молча пропасть — это ровно тот разъезд движка и витрины,
+    # против которого вся эта функция и написана (принцип 3).
+    covered = {k for _, keys in SECTION_GROUPS for k in keys}
+    loose = [short(titles[k]).lower() for k in extra_keys if k not in covered]
+    if loose:
+        group_html += f'<li>{html.escape(", ".join(loose))}</li>'
+
+    quick_label = REPORT_PRICES["quick"]["label"]
+    # Число разделов считаем, а не пишем: набор секций уже менялся.
+    lead = (f'Всё из тарифа «{quick_label}» и ещё '
+            f'{len(extra_keys)} {_plural(len(extra_keys), "раздел", "раздела", "разделов")}:')
+
+    return (
+        '<div class="tier-what-block">'
+        f'<div class="tier-row">'
+        f'<span class="tier-name">{html.escape(quick_label)} — '
+        f'<b>{REPORT_PRICES["quick"]["price"]} ₽</b></span>'
+        f'<span class="tier-what">{html.escape(", ".join(quick))}.</span>'
+        f'</div>'
+        f'<div class="tier-row">'
+        f'<span class="tier-name">{html.escape(REPORT_PRICES["full"]["label"])} — '
+        f'<b>{REPORT_PRICES["full"]["price"]} ₽</b></span>'
+        f'<span class="tier-what">{html.escape(lead)}</span>'
+        f'<ul class="tier-groups">{group_html}</ul>'
+        f'</div>'
+        '</div>')
+
+
 def _example_link(text: str) -> str:
     """Ссылка на пример — только когда пример реально существует.
 
@@ -816,6 +1079,22 @@ def _owner_preview(check_id: int, tier: str) -> None:
         s.commit()
 
 
+def _sections_meta(purpose: str) -> list[dict]:
+    """Состав отчёта для страницы: заголовок, группа и ВОПРОС раздела.
+
+    Вопрос показывается на запертом разделе вместо общей фразы «полный разбор
+    в отчёте»: «Сколько остаётся с одной продажи после всех расходов на неё?»
+    продаёт лучше любого описания, потому что человек хочет знать ответ.
+    """
+    from app.report_engine import SECTION_SPECS, _spec
+    out = []
+    for s in SECTION_SPECS:
+        merged = _spec(s["key"], purpose)
+        out.append({"key": s["key"], "title": merged["title"],
+                    "group": s["group"], "ask": merged["ask"]})
+    return out
+
+
 def _chosen_offer(rec: "DemandCheck") -> dict | None:
     """Заострение, выбранное на /r/. Битый JSON не имеет права уронить
     платный отчёт -- лучше собрать разбор по исходной идее, чем не собрать."""
@@ -826,6 +1105,66 @@ def _chosen_offer(rec: "DemandCheck") -> dict | None:
     except ValueError:
         return None
     return offer if isinstance(offer, dict) else None
+
+
+@app.post("/api/report/{rid}/section")
+async def report_section(rid: int, request: Request, key: str):
+    """Собрать ОДИН раздел отчёта и дописать его в уже сохранённый разбор.
+
+    Разделов больше двух десятков, и каждый — свой вызов модели со своим
+    бюджетом токенов (иначе объёма не будет, см. докстринг report_engine).
+    Страница просит их по одному и показывает по мере готовности, вместо
+    того чтобы держать человека на пустом экране, пока соберётся всё.
+    """
+    owner = _is_owner(request)
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec or not rec.result_json:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+        purchase = _best_report_purchase(s, rid, include_preview=owner)
+        if not purchase:
+            return JSONResponse({"ok": False, "error": "Раздел доступен после оплаты."},
+                                status_code=403)
+        # Проверяем доступ ДО генерации: иначе посторонний, набравший чужой
+        # номер проверки, не просто читал бы чужой отчёт, а оплачивал бы нам
+        # вызовы модели по чужой покупке.
+        if not _report_access_ok(request, purchase):
+            return JSONResponse({"ok": False, "error": "Этот отчёт открывается по вашей ссылке "
+                                                       "или из личного кабинета."},
+                                status_code=403)
+        if key not in section_keys(purchase.tier):
+            return JSONResponse({"ok": False, "error": "Такого раздела нет в вашем тарифе."},
+                                status_code=404)
+        stored = json.loads(purchase.report_json) if purchase.report_json else {"sections": []}
+        for sec in stored.get("sections", []):
+            if sec.get("key") == key:
+                return {"ok": True, "section": sec, "cached": True}
+        idea, tier, purpose = rec.idea, purchase.tier, rec.purpose
+        chosen, purchase_id = _chosen_offer(rec), purchase.id
+        demand_data = json.loads(rec.result_json)
+
+    try:
+        section = await generate_section(key, idea, demand_data, tier,
+                                         chosen_offer=chosen, purpose=purpose)
+    except ReportEngineError as e:
+        # Сбой одного раздела не должен выглядеть как сбой всего отчёта:
+        # остальные уже собраны и читаются.
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+
+    with Session(engine) as s:
+        fresh = s.get(ReportPurchase, purchase_id)
+        data = json.loads(fresh.report_json) if fresh.report_json else {"sections": []}
+        sections = data.get("sections") or []
+        # Перечитываем перед записью: две вкладки могли попросить разные
+        # разделы одновременно, и терять чужой результат нельзя.
+        if not any(x.get("key") == key for x in sections):
+            sections.append(section)
+            order = section_keys(fresh.tier)
+            sections.sort(key=lambda x: order.index(x["key"]) if x["key"] in order else 99)
+            data["sections"] = sections
+            fresh.report_json = json.dumps(data, ensure_ascii=False)
+            s.add(fresh); s.commit()
+    return {"ok": True, "section": section}
 
 
 @app.post("/api/example/publish")
@@ -875,19 +1214,29 @@ def example_page(request: Request):
     note = (f'<div class="example-note">Это настоящий отчёт, собранный сервисом — '
             f'тариф «{html.escape(REPORT_PRICES.get(tier, {}).get("label", tier))}», '
             f'открыт целиком. Ваш будет по вашей идее и вашим цифрам спроса.</div>')
+    _purpose = rec.purpose if rec else PURPOSE_DEFAULT
+    # Только те разделы, что реально опубликованы. Полный список тарифа
+    # заставил бы страницу дозаказывать недостающее -- то есть жечь вызовы
+    # модели по чужой покупке на каждого посетителя примера, а с закрытым
+    # доступом (_report_access_ok) он бы ещё и упирался в 403.
+    _tier_keys = [s["key"] for s in (report_full.get("sections") or []) if s.get("key")]
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(ex.check_id or 0))
+        .replace("__ACCESS_NOTE__", "")
         .replace("__OWNER_BAR__", note)
         .replace("__CHOSEN_BLOCK__", "")
         .replace("__IDEA__", html.escape(idea))
         .replace("__PREVIEW_JSON__", json.dumps(_report_preview(demand_data), ensure_ascii=False))
+        .replace("__SAMPLE_JSON__", "null")
         .replace("__REPORT_JSON__", json.dumps(report_full, ensure_ascii=False))
         .replace("__UNLOCKED_TIER__", json.dumps(tier))
         .replace("__ORDER_STATUS__", json.dumps("paid"))
         .replace("__GEN_ERROR__", json.dumps(""))
         .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
-        .replace("__SECTIONS_JSON__", json.dumps([{"key": k, "title": t} for k, t in ALL_SECTIONS], ensure_ascii=False))
+        .replace("__SECTIONS_JSON__", json.dumps(_sections_meta(_purpose), ensure_ascii=False))
+        .replace("__TIER_KEYS_JSON__", json.dumps(_tier_keys, ensure_ascii=False))
+        .replace("__PURPOSE_JSON__", json.dumps(_purpose, ensure_ascii=False))
         .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out))
 
@@ -911,25 +1260,68 @@ async def report_page(rid: int, request: Request):
             return HTMLResponse(_static("index.html"), status_code=404)
         purchase = _best_report_purchase(s, rid, include_preview=owner)
 
+    # Покупка есть, но открывает её посторонний -- показываем тизер и
+    # объясняем, как попасть в свой отчёт. Не 403: человек мог просто
+    # открыть свою же ссылку без токена в другом браузере, и глухая ошибка
+    # ему ничего не объяснит (принцип 7).
+    access_note = ""
+    locked_other = bool(purchase) and not _report_access_ok(request, purchase)
+    if locked_other:
+        access_note = (
+            '<div class="status-note no-print" id="access-note">Этот отчёт уже оплачен. Откройте его '
+            'по ссылке, на которую вас вернула оплата, — или войдите в '
+            '<a href="/account">личный кабинет</a> с той же почтой, что указывали '
+            'при заказе, и отчёт будет там.</div>')
+        purchase = None
+    elif (purchase and purchase.status == "paid"
+            and request.query_params.get("paid") == "1"):
+        # Момент возврата с оплаты -- единственный, когда человек ещё не знает,
+        # что разбор собирается минутами и что вкладку можно закрыть.
+        # Про письмо говорим ТОЛЬКО если оно действительно ушло: контакт мог
+        # оказаться телефоном, а SMTP -- лечь (см. mailer.notify_buyer).
+        # Про «можно закрыть вкладку» говорит строка сборки прямо под этой
+        # плашкой -- повторять здесь незачем. Эта отвечает на другой вопрос:
+        # где разбор будет лежать, когда вкладки не станет.
+        mailed = ("Ссылку на разбор мы отправили вам письмом. "
+                  if purchase.buyer_notified else "")
+        access_note = (
+            f'<div class="status-note ok no-print" id="paid-note">Оплата принята. {mailed}'
+            'Он всегда доступен в <a href="/account">личном кабинете</a> — вход по той '
+            'же почте, что вы указали при заказе.</div>'
+            if purchase.buyer_notified else
+            '<div class="status-note ok no-print" id="paid-note">Оплата принята. '
+            'Разбор всегда доступен в <a href="/account">личном кабинете</a> — вход по '
+            'той же почте, что вы указали при заказе.</div>')
+
     demand_data = json.loads(rec.result_json)
     preview = _report_preview(demand_data)
     report_full = None
     gen_error = ""
+    # Бесплатный образец нужен только тем, кто ещё не купил: у покупателя
+    # весь разбор и так открыт, лишний вызов модели ему ни к чему. Постороннему
+    # на чужой оплаченной проверке -- тем более: образец продаёт отчёт по этой
+    # идее, а он уже продан, и платить за вызов модели тут не за что.
+    sample = None if (purchase or locked_other) else await _ensure_sample(rid)
 
     if purchase:
         if not purchase.report_json:
             try:
-                # purpose определяет оптику отчёта: для соцконтракта это
-                # обоснование сметы для комиссии, а не венчурный разбор.
-                # chosen_offer -- заострение, выбранное человеком на /r/:
-                # разбирать надо ту формулировку, которую он выбрал, а не
-                # сырую первую фразу (A6 в PRODUCT_ROADMAP).
-                report = await generate_report(rec.idea, demand_data, purchase.tier,
-                                               chosen_offer=_chosen_offer(rec),
-                                               purpose=rec.purpose)
+                # Только ЯДРО отчёта — балл, объяснение и названные риски.
+                # Разделов больше двух десятков, и каждый теперь свой вызов
+                # модели: собирать их все внутри HTTP-запроса значит держать
+                # человека на белом экране минутами. Разделы дозаказывает сама
+                # страница по одному, см. /api/report/{id}/section.
+                #
+                # purpose определяет оптику: для соцконтракта это обоснование
+                # сметы для комиссии, а не венчурный разбор. chosen_offer --
+                # заострение, выбранное человеком на /r/ (A6 в PRODUCT_ROADMAP).
+                core = await generate_core(rec.idea, demand_data, purchase.tier,
+                                           chosen_offer=_chosen_offer(rec),
+                                           purpose=rec.purpose)
                 with Session(engine) as s:
                     fresh = s.get(ReportPurchase, purchase.id)
-                    fresh.report_json = json.dumps(report, ensure_ascii=False)
+                    fresh.report_json = json.dumps({**core, "sections": []},
+                                                   ensure_ascii=False)
                     s.add(fresh); s.commit(); s.refresh(fresh)
                     purchase = fresh
             except ReportEngineError as e:
@@ -969,19 +1361,25 @@ async def report_page(rid: int, request: Request):
         owner_bar = (f'<div class="owner-bar">Владелец · {html.escape(state)}. '
                      f'Собрать без оплаты: {links}{pub}</div>')
 
+    _purpose = rec.purpose
+    _tier_keys = section_keys(purchase.tier) if purchase else []
     tpl = _static("report.html")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rid))
+        .replace("__ACCESS_NOTE__", access_note)
         .replace("__OWNER_BAR__", owner_bar)
         .replace("__CHOSEN_BLOCK__", chosen_block)
         .replace("__IDEA__", html.escape(rec.idea))
         .replace("__PREVIEW_JSON__", json.dumps(preview, ensure_ascii=False))
+        .replace("__SAMPLE_JSON__", json.dumps(sample, ensure_ascii=False) if sample else "null")
         .replace("__REPORT_JSON__", json.dumps(report_full, ensure_ascii=False) if report_full else "null")
         .replace("__UNLOCKED_TIER__", json.dumps(purchase.tier if purchase else None))
         .replace("__ORDER_STATUS__", json.dumps(purchase.status if purchase else None))
         .replace("__GEN_ERROR__", json.dumps(gen_error, ensure_ascii=False))
         .replace("__PRICES_JSON__", json.dumps(REPORT_PRICES, ensure_ascii=False))
-        .replace("__SECTIONS_JSON__", json.dumps([{"key": k, "title": t} for k, t in ALL_SECTIONS], ensure_ascii=False))
+        .replace("__SECTIONS_JSON__", json.dumps(_sections_meta(_purpose), ensure_ascii=False))
+        .replace("__TIER_KEYS_JSON__", json.dumps(_tier_keys, ensure_ascii=False))
+        .replace("__PURPOSE_JSON__", json.dumps(_purpose, ensure_ascii=False))
         .replace("__QUICK_KEYS_JSON__", json.dumps(QUICK_KEYS, ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out))
 
@@ -1011,7 +1409,7 @@ def orders_list(request: Request):
                          "amount": r.amount,
                          "delivered": bool(r.report_json),
                          "gen_error": r.gen_error,
-                         "report_url": f"/report/{r.check_id}" if r.check_id else None}
+                         "report_url": _report_link(r)}
                         for r in reversed(reports)]}
 
 
@@ -1022,6 +1420,74 @@ def public_stats():
         ideas = len(s.exec(select(DemandCheck)).all())
         events = len(s.exec(select(SmokeEvent)).all())
     return {"ideas_checked": ideas, "events": events}
+
+
+@app.get("/api/funnel")
+def owner_funnel(request: Request, days: int = 0):
+    """Воронка владельца из НАШЕЙ базы, без зависимости от Метрики.
+
+    Метрика (D1) считает поведение и нужна Директу для оптимизации, но она
+    настраивается руками, теряет людей на блокировщиках и не знает про
+    деньги. Здесь — то, что произошло на самом деле, с разбивкой по
+    аудиториям: иначе не понять, какая рекламная кампания окупается (D3).
+
+    Каждый шаг называет, что именно он считает: число без определения —
+    это приглашение сделать неверный вывод (тот же принцип, что в B3).
+    """
+    _check_owner(request)
+    since = utcnow() - timedelta(days=days) if days > 0 else None
+
+    with Session(engine) as s:
+        checks = s.exec(select(DemandCheck)).all()
+        reports = s.exec(select(ReportPurchase)).all()
+        live = s.exec(select(LiveTestOrder)).all()
+
+    if since:
+        checks = [c for c in checks if c.created_at >= since]
+        reports = [r for r in reports if r.created_at >= since]
+        live = [o for o in live if o.created_at >= since]
+
+    # Владельческие прогоны — не продажи и не заказы, им в воронке не место.
+    reports = [r for r in reports if r.status != PREVIEW_STATUS]
+    purpose_of = {c.id: (c.purpose or "business") for c in checks}
+
+    def split(items, key=lambda x: x.purpose):
+        out = {"total": len(items)}
+        for p in report_purposes:
+            out[p] = sum(1 for x in items if key(x) == p)
+        return out
+
+    by_check = lambda r: purpose_of.get(r.check_id, "business")   # noqa: E731
+
+    paid_reports = [r for r in reports if r.status == "paid"]
+    paid_live = [o for o in live if o.status == "paid"]
+
+    stages = [
+        ("Проверок спроса", "человек описал идею и получил результат",
+         split(checks)),
+        ("Заострили идею", "выбрал одну из трёх формулировок",
+         split([c for c in checks if c.chosen_offer])),
+        ("Сохранили в кабинет", "оставил почту, чтобы вернуться",
+         split([c for c in checks if c.contact])),
+        ("Дошли до витрины отчёта", "открыли страницу отчёта и увидели образец",
+         split([c for c in checks if c.sample_json])),
+        ("Заказали отчёт", "нажали «Получить отчёт», включая неоплаченные",
+         split(reports, by_check)),
+        ("Оплатили отчёт", "деньги получены",
+         split(paid_reports, by_check)),
+        ("Заказали тест на людях", "заявка на живой тест, включая неоплаченные",
+         split(live, by_check)),
+        ("Оплатили тест на людях", "деньги получены",
+         split(paid_live, by_check)),
+    ]
+
+    revenue = sum(r.amount for r in paid_reports) + sum(o.amount for o in paid_live)
+    return {
+        "days": days,
+        "purposes": list(report_purposes),
+        "stages": [{"name": n, "what": w, **counts} for n, w, counts in stages],
+        "revenue": revenue,
+    }
 
 
 @app.get("/api/diag/yandex")
@@ -1755,7 +2221,7 @@ def account_me(request: Request):
         "reports": [{"check_id": r.check_id, "idea": r.idea, "tier": r.tier,
                      "tier_label": REPORT_PRICES.get(r.tier, {}).get("label", r.tier),
                      "status": _effective_status(r.status, r.created_at),
-                     "report_url": f"/report/{r.check_id}"} for r in reports],
+                     "report_url": _report_link(r)} for r in reports],
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
                     "status": _effective_status(o.status, o.created_at),
                     "continue_url": f"/r/{o.check_id}" if o.check_id else None} for o in orders],
@@ -1852,13 +2318,44 @@ def health_db():
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=503)
 
 
+# Цели Метрики. Названия здесь — единственный источник правды: их же владелец
+# заводит в интерфейсе Метрики, и разъехавшееся имя означает молча пустой
+# отчёт по цели. Порядок соответствует пути человека.
+METRIKA_GOALS = [
+    ("demand_started", "Начал бесплатную проверку спроса"),
+    ("demand_done", "Увидел результат проверки"),
+    ("sharpen_used", "Заострил идею"),
+    ("check_saved", "Сохранил проверку в кабинете"),
+    ("report_viewed", "Открыл страницу отчёта"),
+    ("example_viewed", "Посмотрел пример отчёта"),
+    ("report_order_started", "Нажал «Получить отчёт»"),
+    ("live_test_ordered", "Заказал тест на реальных людях"),
+    ("report_paid_quick", "Оплатил быстрый разбор"),
+    ("report_paid_full", "Оплатил бизнес-план"),
+]
+
+
 def _inject_metrika(html: str) -> str:
     """Код счётчика — в одном месте, а не скопирован в каждый HTML-файл.
     /l/{id} (проверочные страницы конкретных проектов) сюда не попадают --
-    это чужой трафик по чужой рекламе, не воронка самого Создателя."""
+    это чужой трафик по чужой рекламе, не воронка самого Создателя.
+
+    Вместе со счётчиком отдаём sozGoal() -- единственный способ отправить
+    цель. Раньше каждая страница носила свою копию проверки
+    `if (window.SOZDATEL_YM_ID && typeof ym === 'function')`, и новая
+    страница просто забывала её написать. Здесь же цель получает параметр
+    purpose: без него нельзя понять, какая рекламная кампания окупается
+    (D3), потому что обе аудитории идут по одним и тем же шагам.
+    """
     if not YANDEX_METRIKA_ID or "</head>" not in html:
         return html
-    snippet = f"""<script>window.SOZDATEL_YM_ID = {YANDEX_METRIKA_ID};</script>
+    snippet = f"""<script>window.SOZDATEL_YM_ID = {YANDEX_METRIKA_ID};
+window.sozGoal = function(name, params){{
+  try {{
+    if (!window.SOZDATEL_YM_ID || typeof ym !== 'function') return;
+    ym(window.SOZDATEL_YM_ID, 'reachGoal', name, params || {{}});
+  }} catch (e) {{}}   // счётчик не имеет права ломать страницу
+}};</script>
 <script type="text/javascript">
     (function(m,e,t,r,i,k,a){{
         m[i]=m[i]||function(){{(m[i].a=m[i].a||[]).push(arguments)}};
@@ -1937,6 +2434,8 @@ def _fill_server_values(html: str) -> str:
     # пример опубликован -- считаем её лишь если слот на странице есть.
     if "__EXAMPLE_LINK__" in html:
         html = html.replace("__EXAMPLE_LINK__", _example_link("Посмотреть пример отчёта"))
+    if "__TIER_SUMMARY__" in html:
+        html = html.replace("__TIER_SUMMARY__", _tier_summary_html())
     return html
 
 

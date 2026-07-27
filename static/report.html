@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Отчёт по идее — Создатель</title>
 <meta name="robots" content="noindex">
+<!-- В адресе страницы лежит токен покупателя от его отчёта. Любая ссылка
+     наружу утащила бы его в Referer чужому серверу. -->
+<meta name="referrer" content="same-origin">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2712%27 fill=%27%23FFDE59%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-family=%27Arial,sans-serif%27 font-size=%2736%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%231B1C20%27%3EС%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/fonts/fonts.css">
 <style>
@@ -105,6 +108,19 @@
   .tier .was{font-size:14px;color:var(--muted);text-decoration:line-through;margin-left:8px}
   .tier .desc{color:var(--muted);font-size:13.5px}
   .tier button{margin-top:auto}
+  .group-title{font:600 13px "IBM Plex Sans";color:var(--muted);margin:26px 0 2px;
+    padding-top:14px;border-top:1px solid var(--line)}
+  .section.pending .pending-note{color:var(--muted);font-size:15px}
+  .nav-group{font:600 12px "IBM Plex Sans";color:var(--muted);margin:12px 0 4px}
+  .nav-group:first-child{margin-top:0}
+  .build-progress{border-left:3px solid var(--marker);padding:6px 0 6px 12px;
+    margin-top:16px;font-size:14px;color:var(--muted);max-width:46em}
+  /* Бесплатный образец: настоящий кусок платного разбора, не тизер. */
+  .sample-tag{font:600 12px "IBM Plex Sans";color:var(--muted);margin:22px 0 -6px}
+  .sample-section{border-top:0;padding-top:0}
+  .sample-foot{color:var(--muted);font-size:14px;max-width:46em;
+    border-left:3px solid var(--marker);padding:6px 0 6px 12px;margin-bottom:4px}
+  .terms-note{margin-top:14px;font-size:13px;color:var(--muted);max-width:44em}
   .contact-row{margin-top:16px}
   .contact-row input{width:100%;max-width:360px;padding:11px 12px;border:1px solid var(--line);
     border-radius:6px;background:#fff;color:var(--ink);font:inherit}
@@ -150,8 +166,11 @@
     __CHOSEN_BLOCK__
   </div>
   __OWNER_BAR__
+  __ACCESS_NOTE__
 
   <div class="preview" id="preview"></div>
+  <div class="build-progress" id="build-progress" style="display:none"></div>
+  <div id="sample"></div>
   <div id="score-section"></div>
   <div class="pricing no-print" id="pricing-top"></div>
   <div class="pdf-row no-print" id="pdf-row" style="display:none">
@@ -189,6 +208,13 @@ async function publishExample(checkId, tier){
 
 const CHECK_ID = __CHECK_ID__;
 const PREVIEW = __PREVIEW_JSON__;
+const SAMPLE = __SAMPLE_JSON__;
+const PURPOSE = __PURPOSE_JSON__;
+// Дошёл до витрины отчёта — ключевой шаг между бесплатной проверкой и
+// оплатой. Без него не видно, где именно отваливается рекламный трафик.
+if (window.sozGoal) window.sozGoal(
+  document.querySelector('.example-note') ? 'example_viewed' : 'report_viewed',
+  {purpose: PURPOSE});
 const REPORT = __REPORT_JSON__;
 const UNLOCKED_TIER = __UNLOCKED_TIER__;
 const ORDER_STATUS = __ORDER_STATUS__;
@@ -196,22 +222,14 @@ const GEN_ERROR = __GEN_ERROR__;
 const PRICES = __PRICES_JSON__;
 const SECTIONS = __SECTIONS_JSON__;
 const QUICK_KEYS = __QUICK_KEYS_JSON__;
+const TIER_KEYS = __TIER_KEYS_JSON__;
 
 function fmt(n){ return n.toLocaleString('ru-RU'); }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-const TEASER = {
-  summary: "Собранное резюме идеи, аудитории и сути предложения — в одном месте.",
-  market: "Разбор спроса и рынка на основе реальных цифр Вордстата и конкурентов из выдачи.",
-  competitors: "Кто уже отвечает на этот спрос и как от них отстроиться.",
-  verdict: "Честный вывод: запускать, дорабатывать или не запускать — с обоснованием.",
-  audience: "Кому именно продавать в первую очередь и почему.",
-  finance: "Оценка выручки, затрат и точки безубыточности.",
-  risks: "Что может пойти не так и как это снизить заранее.",
-  launch: "Пошаговый план — что делать дальше, по этапам с 1 по 8.",
-};
+// Тизер запертого раздела — ВОПРОС, на который он отвечает (приходит с сервера).
 
 // --- Бесплатный тизер -- разбор на данных бесплатной проверки спроса, без
 // новых вызовов ИИ (заметки по шкалам уже посчитаны на бесплатном шаге).
@@ -265,33 +283,140 @@ if (REPORT && typeof REPORT.viability_score === 'number') {
     </div>`;
 }
 
-// --- Секции: разблокированные из REPORT, остальные заперты с тизером ---
-const unlockedMap = {};
-(REPORT ? REPORT.sections : []).forEach(s => { unlockedMap[s.key] = s; });
+// --- Бесплатный образец ----------------------------------------------------
+// Человек не купит разбор, о качестве которого не может судить. Раньше
+// бесплатная часть была пересказом цифр со страницы спроса — ни строчки
+// анализа. Теперь отдаём настоящий кусок: балл с объяснением, названные
+// риски и один раздел целиком.
+if (!REPORT && SAMPLE) {
+  const paragraphs = String((SAMPLE.section || {}).body || '').split(/\n\n+/)
+    .filter(p => p.trim()).map(p => `<p>${escapeHtml(p)}</p>`).join('');
+  const cls = SAMPLE.viability_score >= 70 ? 'ok' : (SAMPLE.viability_score >= 40 ? 'warn' : 'bad');
+  document.getElementById('sample').innerHTML = `
+    <div class="sample-tag">Часть разбора — бесплатно</div>
+    <div class="score-card ${cls}">
+      <div class="num">${SAMPLE.viability_score}<small>/100</small></div>
+      <div class="note">${escapeHtml(SAMPLE.viability_summary || '')}</div>
+    </div>
+    <div class="risks">${(SAMPLE.top_risks || []).map(r => `
+      <div class="risk"><h4>${escapeHtml(r.title)}</h4><p>${escapeHtml(r.body)}</p></div>`).join('')}
+    </div>
+    <section class="section sample-section">
+      <h2>${escapeHtml((SAMPLE.section || {}).title || '')}</h2>
+      ${paragraphs}
+    </section>
+    <p class="sample-foot">Так написан весь разбор. Ниже — вопросы, на которые
+      отвечают остальные разделы.</p>`;
+}
+
+// --- Секции ---------------------------------------------------------------
+// Разделов больше двух десятков, и каждый собирается отдельным вызовом
+// модели. Страница отдаётся сразу с ядром отчёта, а разделы подтягиваются по
+// одному и появляются по мере готовности: ждать всё разом перед пустым
+// экраном человек не должен.
+
+const gotMap = {};
+(REPORT && REPORT.sections ? REPORT.sections : []).forEach(s => { gotMap[s.key] = s; });
+const pending = {};
 
 const nav = document.getElementById('section-nav');
 const sectionsEl = document.getElementById('sections');
-nav.innerHTML = SECTIONS.map(s => {
-  const unlocked = !!unlockedMap[s.key];
-  return `<li><a href="#sec-${s.key}" class="${unlocked ? 'unlocked' : ''}">${escapeHtml(s.title)}${unlocked ? '' : '<span class="lockmark">— в отчёте</span>'}</a></li>`;
-}).join('');
 
-sectionsEl.innerHTML = SECTIONS.map(s => {
-  const got = unlockedMap[s.key];
+function inTier(key){ return TIER_KEYS.indexOf(key) !== -1; }
+
+function sectionHtml(s){
+  const got = gotMap[s.key];
   if (got) {
-    const paragraphs = String(got.body || '').split(/\n\n+/).map(p => `<p>${escapeHtml(p)}</p>`).join('');
+    const paragraphs = String(got.body || '').split(/\n\n+/)
+      .filter(p => p.trim()).map(p => `<p>${escapeHtml(p)}</p>`).join('');
     return `<section class="section" id="sec-${s.key}"><h2>${escapeHtml(s.title)}</h2>${paragraphs}</section>`;
+  }
+  if (inTier(s.key)) {
+    return `<section class="section pending" id="sec-${s.key}">
+      <h2>${escapeHtml(s.title)}</h2>
+      <p class="pending-note" id="pending-${s.key}">Собираем раздел…</p>
+    </section>`;
   }
   return `<section class="section locked" id="sec-${s.key}">
     <h2>${escapeHtml(s.title)}</h2>
-    <div class="teaser">${escapeHtml(TEASER[s.key] || '')}</div>
-    <p>Полный разбор — в отчёте.</p>
+    <div class="teaser">${escapeHtml(s.ask || '')}</div>
+    <p>Ответ — в отчёте.</p>
   </section>`;
-}).join('');
-
-if (REPORT && REPORT.sections && REPORT.sections.length) {
-  document.getElementById('pdf-row').style.display = 'block';
 }
+
+function render(){
+  let html = '', lastGroup = null;
+  SECTIONS.forEach(s => {
+    if (s.group !== lastGroup) {
+      html += `<div class="group-title">${escapeHtml(s.group)}</div>`;
+      lastGroup = s.group;
+    }
+    html += sectionHtml(s);
+  });
+  sectionsEl.innerHTML = html;
+
+  let navHtml = '';
+  lastGroup = null;
+  SECTIONS.forEach(s => {
+    if (s.group !== lastGroup) {
+      navHtml += `<li class="nav-group">${escapeHtml(s.group)}</li>`;
+      lastGroup = s.group;
+    }
+    const got = !!gotMap[s.key];
+    const mark = got ? '' : (inTier(s.key) ? '<span class="lockmark">— собирается</span>'
+                                           : '<span class="lockmark">— в отчёте</span>');
+    navHtml += `<li><a href="#sec-${s.key}" class="${got ? 'unlocked' : ''}">${escapeHtml(s.title)}${mark}</a></li>`;
+  });
+  nav.innerHTML = navHtml;
+
+  const done = SECTIONS.filter(s => gotMap[s.key]).length;
+  if (done) document.getElementById('pdf-row').style.display = 'block';
+  const bar = document.getElementById('build-progress');
+  if (bar) {
+    const total = TIER_KEYS.length;
+    if (!total || done >= total) { bar.style.display = 'none'; }
+    else {
+      bar.style.display = 'block';
+      // Про «можно закрыть» человек не догадается сам: собранные разделы
+      // дописываются в базу сразу, но со стороны это выглядит как процесс,
+      // который оборвётся вместе с вкладкой.
+      bar.textContent = `Разбор собирается: готово ${done} из ${total}. Можно читать уже готовые разделы — остальные появятся сами. Страницу можно закрыть: собранное не пропадёт, при следующем открытии сборка продолжится.`;
+    }
+  }
+}
+
+render();
+
+// Дозаказываем недостающие разделы ПО ОДНОМУ: параллельные запросы к модели
+// ничего не ускорят, а лимиты провайдера выберут мгновенно.
+async function fillMissing(){
+  const qs = new URLSearchParams(location.search);
+  const key = qs.get('key') || '';
+  const headers = key ? {'X-Owner-Key': key} : {};
+  // Токен из адреса страницы -- тот же ключ покупателя от своего отчёта,
+  // что открыл саму страницу; без него сервер не станет собирать разделы.
+  const tok = qs.get('t') ? `&t=${encodeURIComponent(qs.get('t'))}` : '';
+  for (const k of TIER_KEYS) {
+    if (gotMap[k] || pending[k]) continue;
+    pending[k] = true;
+    try {
+      const r = await fetch(`/api/report/${CHECK_ID}/section?key=${encodeURIComponent(k)}${tok}`,
+                            {method: 'POST', headers});
+      const d = await r.json();
+      if (d.ok && d.section) { gotMap[k] = d.section; render(); }
+      else {
+        const el = document.getElementById('pending-' + k);
+        if (el) el.textContent = 'Этот раздел собрать не удалось: ' + (d.error || 'ошибка') +
+                                 ' Обновите страницу, чтобы попробовать снова.';
+      }
+    } catch (e) {
+      const el = document.getElementById('pending-' + k);
+      if (el) el.textContent = 'Связь прервалась. Обновите страницу, чтобы дособрать раздел.';
+    }
+  }
+}
+
+if (TIER_KEYS.length && SECTIONS.some(s => inTier(s.key) && !gotMap[s.key])) fillMissing();
 
 // --- Статус заказа / ошибка генерации ---
 const statusEl = document.getElementById('status-note');
@@ -320,13 +445,19 @@ function tierCard(key){
     <button class="btn" type="button" onclick="order('${key}')">Получить отчёт</button>
   </div>`;
 }
-if (UNLOCKED_TIER === 'full') {
+// Отчёт по этой идее уже куплен, просто открыт не тем (или тем, но без
+// своей ссылки). Показывать здесь кнопку оплаты нельзя: покупатель,
+// потерявший ссылку, заплатил бы за одно и то же дважды.
+if (document.getElementById('access-note')) {
+  pricing.style.display = 'none';
+} else if (UNLOCKED_TIER === 'full') {
   pricing.style.display = 'none';
 } else if (UNLOCKED_TIER === 'quick') {
   pricing.innerHTML = `<h3>Докупить <span class="hl">бизнес-план</span></h3>
     <p>У вас тариф «__QUICK_LABEL__». «__FULL_LABEL__» добавляет аудиторию, финансовую модель, риски и план запуска.</p>
     <div class="tiers">${tierCard('full')}</div>
-    <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
+    <p class="terms-note">Отчёт формируется сразу после оплаты. Если собрать его не удалось — вернём деньги полностью. <a href="/oferta">Условия и возврат</a></p>
+  <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
     <p class="err" id="order-err" role="alert"></p>`;
 } else {
   pricing.innerHTML = `<h3>Получите <span class="hl">отчёт по идее</span></h3>
@@ -347,6 +478,7 @@ async function order(tier){
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || 'Не получилось. Попробуйте ещё раз.');
+    if (window.sozGoal) window.sozGoal('report_order_started', {purpose: PURPOSE, tier: tier});
     if (data.paid && data.confirmation_url) { location.href = data.confirmation_url; return; }
     statusEl.textContent = data.message; statusEl.classList.add('ok'); statusEl.style.display = 'block';
     statusEl.scrollIntoView({behavior:'smooth', block:'center'});
@@ -363,9 +495,9 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
     // иначе каждый повторный визит/reload задвоил бы конверсию в Метрике.
     const goalKey = `sozdatel_ym_report_${CHECK_ID}_${UNLOCKED_TIER}`;
     if (!localStorage.getItem(goalKey)) {
-      if (window.SOZDATEL_YM_ID && typeof ym === 'function') {
-        ym(window.SOZDATEL_YM_ID, 'reachGoal', UNLOCKED_TIER === 'full' ? 'report_paid_full' : 'report_paid_quick');
-      }
+      if (window.sozGoal) window.sozGoal(
+        UNLOCKED_TIER === 'full' ? 'report_paid_full' : 'report_paid_quick',
+        {purpose: PURPOSE});
       localStorage.setItem(goalKey, '1');
     }
   } else {

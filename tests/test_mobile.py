@@ -102,6 +102,16 @@ with Session(engine) as s:
     for _ in range(3):
         s.add(SmokeEvent(idea="sweep1", event="lead_submitted", contact="lead@example.com"))
     s.add(MagicLinkToken(token="sweep_token", contact="sweep@example.com"))
+    # Идея, которую почти не ищут: вердикт имеет право сказать «нет», и
+    # страница обязана перестать продавать так, будто ничего не случилось.
+    weak = dict(data)
+    weak["formulations"] = [{"phrase": "подписка на носки по гороскопу", "count": 30}]
+    weak["verdict"] = {"level": "weak", "text": "В поиске эту идею почти не ищут."}
+    weak["overall"] = {"value": 1, "weakest": "Спрос", "basis": "Опущен до балла спроса."}
+    rec = DemandCheck(idea="Подписка на носки по гороскопу с доставкой", best_count=30,
+                      purpose="business", result_json=json.dumps(weak, ensure_ascii=False))
+    s.add(rec); s.commit(); s.refresh(rec)
+    out["weak"] = rec.id
     s.commit()
 print(json.dumps(out))
 '''
@@ -377,5 +387,62 @@ def test_cabinet_fits_narrow_screen_when_logged_in(site, browser):
         _goto(page, f"{site['base']}/account")
         assert page.locator("#known").is_visible(), "вход в кабинет не сработал"
         _assert_clean(page, "кабинет покупателя")
+    finally:
+        ctx.close()
+
+
+def test_weak_demand_stops_selling_in_a_real_browser(site, browser):
+    """A11. Проверять это подстроками в HTML бесполезно: разметка блока лежит
+    на странице всегда, а включает его скрипт по уровню вердикта. Отключи
+    логику — текстовые проверки останутся зелёными. Поэтому смотрим глазами
+    браузера: что видно и какими классами разведены блоки."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['weak']}")
+    try:
+        # доходим до последнего шага ленты
+        for _ in range(6):
+            btns = page.locator(".step-next .btn:visible, #skip-sharpen:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+
+        assert page.locator("#weak-lead").is_visible(), \
+            "при почти нулевом спросе бесплатный шаг обязан стать главным"
+        assert page.locator("#weak-caveat").is_visible(), \
+            "оговорка обязана стоять у кнопки живого теста"
+
+        # оба платных блока перестают быть главными
+        cls = page.evaluate("""() => ({
+            order: document.getElementById('order').className,
+            report: document.getElementById('alt-report').className})""")
+        assert cls["order"] == "alt-path", cls
+        assert cls["report"] == "alt-path", cls
+
+        # но купить по-прежнему можно: наше дело сказать правду, не решить за человека
+        assert page.locator("#order-btn").is_visible()
+        assert page.locator("#alt-report .btn").is_visible()
+
+        # и шапка больше не обещает следующий этап
+        assert "переформулировать" in page.locator("#path-next-text").inner_text()
+        _assert_clean(page, "результат со слабым спросом")
+    finally:
+        ctx.close()
+
+
+def test_good_demand_keeps_the_live_test_as_the_main_action(site, browser):
+    """Обратная сторона: предупреждение не должно всплывать там, где спрос
+    есть, иначе оно обесценится и его перестанут читать."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}")
+    try:
+        for _ in range(6):
+            btns = page.locator(".step-next .btn:visible, #skip-sharpen:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+        assert not page.locator("#weak-lead").is_visible()
+        assert not page.locator("#weak-caveat").is_visible()
+        assert page.evaluate(
+            "() => document.getElementById('order').className") == "next"
     finally:
         ctx.close()

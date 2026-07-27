@@ -55,6 +55,20 @@
     margin-top:14px;font-size:15px}
   .paid-note.show{display:block}
   .budget-note{color:var(--muted);font-size:13px;margin-top:10px;max-width:40em}
+  /* Состав тарифов у кнопки: цена крупно, что входит — строкой под ней. */
+  .tier-what-block{margin:0 0 14px}
+  .tier-row{padding:9px 0}
+  .tier-row + .tier-row{border-top:1px solid var(--line)}
+  .tier-name{display:block;font-size:14px;font-weight:600}
+  .tier-what{display:block;font-size:13px;color:var(--muted);margin-top:2px;max-width:40em}
+  /* Полный тариф разложен по группам: шестнадцать разделов через запятую
+     читались как сплошная простыня и мешали выбирать (B7). */
+  .tier-groups{list-style:none;margin:6px 0 0;max-width:40em}
+  .tier-groups li{font-size:13px;color:var(--muted);padding:2px 0 2px 10px;
+    border-left:2px solid var(--line)}
+  .tier-groups li + li{margin-top:3px}
+  .tier-groups b{color:var(--ink);font-weight:600}
+  .terms-note{margin-top:10px;font-size:13px;color:var(--muted);max-width:40em}
   .example-link{margin-top:10px;font-size:13px;color:var(--muted)}
   .example-link:empty{display:none}
 
@@ -155,6 +169,18 @@
   .alt-path{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:18px;margin-bottom:16px}
   .alt-path h4{font-size:16px;font-weight:600;margin-bottom:6px}
   .alt-path p{color:var(--muted);font-size:14px;margin-bottom:12px;max-width:38em}
+
+  /* Спроса почти нет. Продавать дальше как ни в чём не бывало — значит
+     продавать то, что по нашим же цифрам не сработает (принцип 2). */
+  .weak-lead{display:none;border:1px solid var(--line);background:var(--box);
+    border-radius:8px;padding:20px;margin:0 0 16px;border-left:3px solid var(--bad)}
+  .weak-lead.show{display:block}
+  .weak-lead h3{font-size:18px;font-weight:600;margin-bottom:6px}
+  .weak-lead p{color:var(--muted);font-size:15px;margin-bottom:14px;max-width:38em}
+  .weak-lead .btn{margin-bottom:4px}
+  .weak-caveat{display:none;color:var(--muted);font-size:13px;margin-top:10px;
+    padding-left:12px;border-left:3px solid var(--bad);max-width:38em}
+  .weak-caveat.show{display:block}
 
   /* Живой тест: финальный шаг ленты — заказ страницы + рекламы + подсчёта заявок */
   .next{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:20px;margin:0 0 40px}
@@ -287,6 +313,14 @@
   </section>
 
   <section class="step" data-step="5" id="step-5">
+    <!-- Появляется, только когда спроса почти нет. Главное действие тогда —
+         бесплатное: переформулировать и проверить заново. Платные варианты
+         остаются ниже, но перестают быть главными. -->
+    <div class="weak-lead" id="weak-lead">
+      <h3>Прежде чем платить — <span class="hl">попробуйте другую формулировку</span></h3>
+      <p id="weak-lead-p"></p>
+      <a class="btn" id="weak-lead-btn" href="/">Проверить другую формулировку — бесплатно</a>
+    </div>
     <div class="next" id="order">
       <h3 id="order-h3">Дальше — соберём страницу и <span class="hl">скажем, приносит ли идея деньги</span></h3>
       <p id="order-p">Полностью соберём проверочную страницу под вашу идею — дизайн, тексты, форма заявки. Дальше вы сами запускаете рекламу в Яндекс Директе — у нас есть <a href="/guide/direct">пошаговая инструкция</a>, которая обходит типичные ошибки новичков, а мы посчитаем цифры, которые она приведёт. Через пару недель у вас будут не догадки, а реальные цифры: сколько людей готовы оставить заявку на вашу идею.</p>
@@ -297,13 +331,23 @@
            это записано, а на деле он больше самой услуги. Узнать об этом
            после оплаты -- законный повод требовать возврат. -->
       <p class="budget-note" id="budget-note">Рекламный бюджет в цену не входит: его вы платите Яндексу напрямую, на тест обычно хватает __AD_BUDGET__. <a href="/guide/direct">Как это устроено</a></p>
+      <!-- Оговорка про нехватку спроса стоит у самой кнопки живого теста:
+           именно этот продукт наши же цифры и ставят под сомнение. -->
+      <p class="weak-caveat" id="weak-caveat"></p>
       <p class="err" id="order-err" role="alert"></p>
       <p class="okmsg" id="order-ok"></p>
     </div>
     <div class="alt-path" id="alt-report">
       <h4 id="alt-h4">Или получите <span class="hl">отчёт по идее</span> — без ожидания рекламы</h4>
-      <p id="alt-p">Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни. От __MIN_REPORT_PRICE__ ₽.</p>
+      <p id="alt-p">Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни.</p>
+      <!-- Состав тарифов — здесь, а не на следующем экране: человек решает
+           платить именно тут, и разница между 990 и 2990 для него неочевидна.
+           Особенно для соцконтракта: сметы в дешёвом тарифе нет вовсе. -->
+      __TIER_SUMMARY__
       <a class="btn" href="/report/__CHECK_ID__">Посмотреть отчёт</a>
+      <!-- Условия возврата — там же, где решают платить, а не только в оферте.
+           Для холодного рекламного трафика это и доверие, и меньше споров. -->
+      <p class="terms-note">Отчёт формируется сразу после оплаты. Если собрать его не удалось — вернём деньги полностью. <a href="/oferta">Условия</a></p>
       <!-- Ссылка появляется, только если пример реально опубликован: привести
            на пустую страницу хуже, чем не звать вовсе. -->
       <p class="example-link">__EXAMPLE_LINK__</p>
@@ -325,6 +369,9 @@ const PAY_ENABLED = __PAY_ENABLED__;
 const IDEA = __IDEA_JSON__;
 const SAVED = __SAVED__;
 const PURPOSE = __PURPOSE_JSON__;
+// Середина воронки: без этих целей между «начал проверку» и «оплатил»
+// приборов нет, и Директ оптимизируется на клики, а не на покупателей.
+if (window.sozGoal) window.sozGoal('demand_done', {purpose: PURPOSE});
 
 function fmt(n){ return n.toLocaleString('ru-RU'); }
 function escapeHtml(s){
@@ -432,6 +479,45 @@ if (IS_SOCIAL_CONTRACT) {
   order.parentNode.insertBefore(alt, order);
 
   document.getElementById('skip-sharpen').textContent = 'Пропустить — сразу к бизнес-плану';
+}
+
+// --- Спроса почти нет ---------------------------------------------------
+// Мы только что показали цифры, означающие «из поиска клиенты не придут», —
+// и до этой правки вели к той же кнопке, что и идею с хорошим спросом.
+// Живой тест здесь особенно сомнителен: он гоняет рекламу по ТЕМ ЖЕ
+// запросам, а судим мы по __CLICK_TARGET__ визитам, которых при такой
+// частотности просто неоткуда взять. Кнопки не прячем — человек вправе
+// купить, — но главным действием становится бесплатное (принцип 2).
+if (v.level === 'weak') {
+  const known = (DATA.formulations || []).filter(f => f.count !== null);
+  const top = known.length ? Math.max(...known.map(f => f.count)) : 0;
+  const freq = top ? `${top.toLocaleString('ru-RU')} раз в месяц` : 'почти не ищут';
+
+  document.getElementById('weak-lead-p').textContent =
+    'Самую популярную из ваших формулировок в Яндексе ищут ' + freq +
+    '. Чтобы судить по заявкам, нужно __CLICK_TARGET__ визитов — при такой ' +
+    'частотности набрать их из поиска будет нечем. Чаще всего дело в словах: ' +
+    'люди ищут то же самое, но называют иначе. Опишите идею по-другому — ' +
+    'проверка бесплатная и занимает пару минут.';
+  document.getElementById('weak-lead-btn').setAttribute(
+    'href', IS_SOCIAL_CONTRACT ? '/social-contract' : '/');
+  document.getElementById('weak-lead').classList.add('show');
+
+  // Шапка обещала следующий этап так, будто вердикта не было. Обещать
+  // проверочную страницу человеку, которому мы только что показали
+  // отсутствие спроса, — то же противоречие, только выше по экрану.
+  document.getElementById('path-next-text').textContent =
+    'Сначала стоит переформулировать идею — при такой частотности следующий этап рано';
+
+  const caveat = document.getElementById('weak-caveat');
+  caveat.textContent = 'Честно предупреждаем: по нашим же цифрам спроса в поиске ' +
+    'почти нет, и этот тест рискует не набрать __CLICK_TARGET__ визитов, ' +
+    'по которым мы делаем вывод. Рекламный бюджет при этом всё равно тратится.';
+  caveat.classList.add('show');
+
+  // Оба платных блока становятся альтернативами: главное здесь — бесплатный шаг.
+  document.getElementById('order').className = 'alt-path';
+  document.getElementById('alt-report').className = 'alt-path';
 }
 
 const ARRIVAL = {2: 'конкуренты', 3: 'оценка идеи', 4: 'заострим идею',
@@ -566,6 +652,7 @@ sharpenBtn.addEventListener('click', async () => {
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || 'Не получилось заострить идею. Попробуйте ещё раз.');
     renderSharpen(data.offers || []);
+    if (window.sozGoal) window.sozGoal('sharpen_used', {purpose: PURPOSE});
     sharpenBtn.style.display = 'none';
   } catch (e) {
     sharpenErr.textContent = e.message; sharpenErr.classList.add('show');
@@ -601,6 +688,7 @@ orderBtn.addEventListener('click', async () => {
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || data.detail || 'Не получилось. Попробуйте ещё раз.');
+    if (window.sozGoal) window.sozGoal('live_test_ordered', {purpose: PURPOSE});
     if (data.paid && data.confirmation_url) { location.href = data.confirmation_url; return; }
     const ok = document.getElementById('order-ok');
     ok.textContent = data.message; ok.classList.add('show');
@@ -654,6 +742,7 @@ async function trySave(contact){
       throw new Error(data.error || 'Не получилось сохранить. Попробуйте ещё раз.');
     }
     markSaved(data.message);
+    if (window.sozGoal) window.sozGoal('check_saved', {purpose: PURPOSE});
   } catch (e) {
     saveErr.textContent = e.message; saveErr.classList.add('show');
     saveBtn.textContent = label; saveBtn.disabled = false;

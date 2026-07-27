@@ -67,6 +67,43 @@ def notify_owner(subject: str, body: str, *, _send=None) -> bool:
         return False
 
 
+def looks_like_email(contact: str) -> bool:
+    """Письмо можно отправить только на почту. Контакт для чека 54-ФЗ
+    разрешает и телефон (см. payments.valid_receipt_contact), поэтому
+    отправитель обязан спросить, а не пытаться и падать."""
+    c = (contact or "").strip()
+    if "@" not in c or c.startswith("@") or " " in c:
+        return False
+    local, _, domain = c.partition("@")
+    return bool(local) and "." in domain and not domain.startswith(".") \
+        and not domain.endswith(".")
+
+
+def notify_buyer(to: str, subject: str, body: str, *, _send=None) -> bool:
+    """Письмо ПОКУПАТЕЛЮ о его собственном заказе.
+
+    Отдельно от notify_owner: адрес приходит параметром, а не из окружения,
+    и контакт может оказаться телефоном -- тогда письма просто нет.
+
+    Как и владельческое, НИКОГДА не бросает: человек уже заплатил, и сбой
+    SMTP не имеет права превратиться в ошибку на его экране (принцип
+    «деградация вместо ошибки»). Возвращает True, если письмо ушло --
+    вызывающая сторона по этому флагу решает, помечать ли заказ.
+    """
+    if not looks_like_email(to):
+        logger.info("notify_buyer: контакт не похож на почту, пропускаем")
+        return False
+    if not configured() and _send is None:
+        logger.info("notify_buyer: SMTP не настроен, пропускаем")
+        return False
+    try:
+        send(to, subject, body, _send=_send)
+        return True
+    except Exception:
+        logger.warning("notify_buyer failed", exc_info=True)
+        return False
+
+
 def send(to: str, subject: str, body: str, *, _send=None) -> None:
     """Отправляет одно текстовое письмо.
 
