@@ -61,6 +61,7 @@
   .tier-row + .tier-row{border-top:1px solid var(--line)}
   .tier-name{display:block;font-size:14px;font-weight:600}
   .tier-what{display:block;font-size:13px;color:var(--muted);margin-top:2px;max-width:40em}
+  .terms-note{margin-top:10px;font-size:13px;color:var(--muted);max-width:40em}
   .example-link{margin-top:10px;font-size:13px;color:var(--muted)}
   .example-link:empty{display:none}
 
@@ -314,6 +315,9 @@
            Особенно для соцконтракта: сметы в дешёвом тарифе нет вовсе. -->
       __TIER_SUMMARY__
       <a class="btn" href="/report/__CHECK_ID__">Посмотреть отчёт</a>
+      <!-- Условия возврата — там же, где решают платить, а не только в оферте.
+           Для холодного рекламного трафика это и доверие, и меньше споров. -->
+      <p class="terms-note">Отчёт формируется сразу после оплаты. Если собрать его не удалось — вернём деньги полностью. <a href="/oferta">Условия</a></p>
       <!-- Ссылка появляется, только если пример реально опубликован: привести
            на пустую страницу хуже, чем не звать вовсе. -->
       <p class="example-link">__EXAMPLE_LINK__</p>

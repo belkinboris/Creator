@@ -105,6 +105,7 @@
   .tier .was{font-size:14px;color:var(--muted);text-decoration:line-through;margin-left:8px}
   .tier .desc{color:var(--muted);font-size:13.5px}
   .tier button{margin-top:auto}
+  .terms-note{margin-top:14px;font-size:13px;color:var(--muted);max-width:44em}
   .contact-row{margin-top:16px}
   .contact-row input{width:100%;max-width:360px;padding:11px 12px;border:1px solid var(--line);
     border-radius:6px;background:#fff;color:var(--ink);font:inherit}
@@ -326,7 +327,8 @@ if (UNLOCKED_TIER === 'full') {
   pricing.innerHTML = `<h3>Докупить <span class="hl">бизнес-план</span></h3>
     <p>У вас тариф «__QUICK_LABEL__». «__FULL_LABEL__» добавляет аудиторию, финансовую модель, риски и план запуска.</p>
     <div class="tiers">${tierCard('full')}</div>
-    <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
+    <p class="terms-note">Отчёт формируется сразу после оплаты. Если собрать его не удалось — вернём деньги полностью. <a href="/oferta">Условия и возврат</a></p>
+  <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
     <p class="err" id="order-err" role="alert"></p>`;
 } else {
   pricing.innerHTML = `<h3>Получите <span class="hl">отчёт по идее</span></h3>

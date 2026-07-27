@@ -3546,6 +3546,12 @@ class TestWeOnlyPromiseWhatWeDo:
         assert 'href="/account"' in text
 
 
+def _flatten_digit_groups(text: str) -> str:
+    """«1 490 ₽» -> «1490 ₽»: убирает пробел-разделитель разрядов между цифрами.
+    Нужен и стражу цен, и его собственному тесту."""
+    return re.sub(r"(?<=\d)[  ](?=\d)", "", text)
+
+
 class TestNoHardcodedServerValuesInStatic:
     """B5: значение, у которого в коде есть единственный источник, не должно
     лежать второй копией в HTML. Это уже трижды оборачивалось враньём:
@@ -3567,10 +3573,14 @@ class TestNoHardcodedServerValuesInStatic:
             amounts |= {str(tier["price"]), str(tier["was"])}
         bad = []
         for name, text in self._sources():
+            # Сначала схлопываем разделители разрядов: «1 490 ₽» -> «1490 ₽».
+            # Без этого сторож пропускал цену в оферте, записанную по-человечески.
+            flat = _flatten_digit_groups(text)
             for amount in amounts:
                 # «990 ₽» -- денежная запись, случайных совпадений не даёт,
-                # в отличие от голого числа.
-                if re.search(rf"(?<!\d){amount}\s*₽", text):
+                # в отличие от голого числа. Проверка (?<!\d) не даёт поймать
+                # «990» внутри «2990».
+                if re.search(rf"(?<!\d){amount}\s*₽", flat):
                     bad.append(f"{name}: {amount} ₽")
         assert not bad, ("суммы зашиты в статику вместо подстановки из "
                          "REPORT_PRICES/LIVE_TEST_PRICE: " + ", ".join(bad))
@@ -4010,3 +4020,79 @@ class TestTierDifferenceAtTheDecisionPoint:
         src = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
         assert "990 ₽" not in src and "2990 ₽" not in src
         assert "__TIER_SUMMARY__" in src
+
+
+class TestOfferCoversWhatWeSell:
+    """C3: политика возврата не сформулирована. При разборе выяснилось, что
+    дело шире: вся оферта описывала ТОЛЬКО живой тест за 1490 ₽. Отчёт за
+    990/2990 ₽ — тот самый продукт под рекламу на соцконтракт — в договоре
+    отсутствовал целиком: ни предмета, ни цены, ни сроков, ни возврата."""
+
+    def _oferta(self):
+        return client.get("/oferta").text
+
+    def test_offer_names_every_paid_service(self):
+        text = self._oferta()
+        assert "Живой тест идеи" in text
+        assert "Отчёт по идее" in text
+
+    def test_offer_lists_every_price_we_charge(self):
+        """Цена в договоре обязана совпадать с той, что списывается."""
+        import app.main as m
+        text = self._oferta()
+        for price in (m.LIVE_TEST_PRICE, *(t["price"] for t in m.REPORT_PRICES.values())):
+            assert f"{price} ₽" in text, f"цены {price} ₽ нет в оферте"
+        for tier in m.REPORT_PRICES.values():
+            assert tier["label"] in text
+
+    def test_offer_prices_are_not_a_hardcoded_copy(self):
+        """«1 490 ₽» лежало в договоре зашитой копией, и сторож B5 её
+        пропускал: разряды разделены пробелом."""
+        src = (main_module.BASE_DIR.parent / "static" / "oferta.html").read_text()
+        assert "1 490" not in src and "1490" not in src
+        assert "__LIVE_TEST_PRICE__" in src and "__FULL_PRICE__" in src
+
+    def test_guard_now_catches_prices_with_spaced_thousands(self):
+        """Регрессия на сам сторож: без этого он снова пропустит «1 490 ₽»."""
+        import app.main as m
+        pat = rf"(?<!\d){m.LIVE_TEST_PRICE}\s*₽"
+        assert re.search(pat, _flatten_digit_groups("цена 1 490 ₽"))   # с пробелом
+        assert re.search(pat, _flatten_digit_groups("цена 1490 ₽"))    # и без него
+        assert not re.search(pat, _flatten_digit_groups("цена 21490 ₽"))  # не хвост числа
+        # и «990» не ловится внутри «2 990»
+        assert not re.search(r"(?<!\d)990\s*₽", _flatten_digit_groups("цена 2 990 ₽"))
+
+    def test_offer_states_refund_for_the_report(self):
+        text = self._oferta()
+        assert "отчёт не был сформирован" in text
+        assert "возвращается полностью" in text
+        assert "26.1" in text
+
+    def test_offer_states_when_the_report_appears(self):
+        assert "формируется автоматически при первом открытии" in self._oferta()
+
+    def test_offer_disclaims_guarantees_for_the_social_contract_audience(self):
+        """Лендинг обещает цифры, которые «выдержат вопросы комиссии» —
+        одобрение выплаты мы гарантировать не можем и не должны."""
+        text = self._oferta()
+        assert "не является гарантией дохода" in text
+        assert "социальной защиты" in text
+
+    def test_refund_terms_are_visible_where_people_pay(self):
+        """В оферту по своей воле не заходят: условия должны стоять у кнопки."""
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "п", "count": 10}], "best_phrase": "п",
+                    "verdict": {"level": "niche", "text": "т"}, "competitors": {"found": 1, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        for url in (f"/r/{rid}", f"/report/{rid}"):
+            text = client.get(url).text
+            assert "вернём деньги полностью" in text, url
+            assert 'href="/oferta"' in text, url
