@@ -55,6 +55,8 @@
     margin-top:14px;font-size:15px}
   .paid-note.show{display:block}
   .budget-note{color:var(--muted);font-size:13px;margin-top:10px;max-width:40em}
+  .example-link{margin-top:10px;font-size:13px;color:var(--muted)}
+  .example-link:empty{display:none}
 
   /* Лента: один активный фокус, пройденные шаги сжимаются в одну строку итога.
      Шаг без .active и без .done не отрисован вовсе -- нет данных, нет блока. */
@@ -302,6 +304,9 @@
       <h4 id="alt-h4">Или получите <span class="hl">отчёт по идее</span> — без ожидания рекламы</h4>
       <p id="alt-p">Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни. От __MIN_REPORT_PRICE__ ₽.</p>
       <a class="btn" href="/report/__CHECK_ID__">Посмотреть отчёт</a>
+      <!-- Ссылка появляется, только если пример реально опубликован: привести
+           на пустую страницу хуже, чем не звать вовсе. -->
+      <p class="example-link">__EXAMPLE_LINK__</p>
     </div>
   </section>
 </main>

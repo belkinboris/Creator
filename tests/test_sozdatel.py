@@ -3825,3 +3825,116 @@ class TestFontsAreServedFromOurOwnHost:
         """Файлы неизменяемые: имя меняется вместе с содержимым."""
         r = client.get("/fonts/fonts.css")
         assert "immutable" in r.headers.get("cache-control", "")
+
+
+class TestPublicReportExample:
+    """C1: примера отчёта не существовало нигде. Кастдев-находка владельца —
+    «без этого доверия не будет»: человек платит 990–2990 ₽, не видя ни
+    строчки того, что получит."""
+
+    def _check(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            return client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+        finally:
+            m.check_demand = orig
+
+    def _built_report(self, monkeypatch, body="Смета расходов построчно."):
+        import app.main as m
+        async def fake_generate(idea, demand_data, tier, chosen_offer=None, purpose="business"):
+            return {"sections": [{"key": "summary", "title": "Резюме проекта", "body": body}]}
+        monkeypatch.setattr(m, "generate_report", fake_generate)
+        rid = self._check()
+        client.get(f"/report/{rid}?preview=full", headers=OWNER)   # собрали владельческим прогоном
+        return rid
+
+    def _clear_examples(self):
+        from app.main import ReportPurchase, Session, engine, select
+        with Session(engine) as s:
+            for row in s.exec(select(ReportPurchase).where(ReportPurchase.is_example == True)).all():  # noqa: E712
+                row.is_example = False; s.add(row)
+            s.commit()
+
+    def test_example_page_is_absent_until_published(self):
+        """Пустая витрина лучше, чем ссылка в никуда."""
+        self._clear_examples()
+        assert client.get("/example").status_code == 404
+
+    def test_showcases_do_not_promise_an_example_that_does_not_exist(self):
+        self._clear_examples()
+        rid = self._check()
+        for url in (f"/r/{rid}", "/social-contract"):
+            text = client.get(url).text
+            assert "Посмотреть пример отчёта" not in text, url
+            assert "__EXAMPLE_LINK__" not in text, url
+
+    def test_published_example_is_open_in_full(self, monkeypatch):
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        r = client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        assert r.status_code == 200 and r.json()["url"] == "/example"
+        page = client.get("/example")
+        assert page.status_code == 200
+        assert "Смета расходов построчно." in page.text          # текст виден без оплаты
+        assert "Это настоящий отчёт, собранный сервисом" in page.text
+
+    def test_showcases_link_the_example_once_it_exists(self, monkeypatch):
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        other = self._check()
+        for url in (f"/r/{other}", "/social-contract"):
+            text = client.get(url).text
+            assert 'href="/example"' in text, url
+
+    def test_only_the_owner_can_publish(self, monkeypatch):
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        assert client.post(f"/api/example/publish?check_id={rid}&tier=full").status_code == 401
+        assert client.get("/example").status_code == 404
+
+    def test_cannot_publish_a_report_that_was_never_built(self):
+        """Иначе на витрину уедет пустая страница."""
+        self._clear_examples()
+        rid = self._check()
+        r = client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        assert r.status_code == 404
+        assert client.get("/example").status_code == 404
+
+    def test_example_is_exactly_one(self, monkeypatch):
+        """Два «примера» разъехались бы так же, как разъезжались копии цен."""
+        from app.main import ReportPurchase, Session, engine, select
+        self._clear_examples()
+        first = self._built_report(monkeypatch, "Первый разбор.")
+        client.post(f"/api/example/publish?check_id={first}&tier=full", headers=OWNER)
+        second = self._built_report(monkeypatch, "Второй разбор.")
+        client.post(f"/api/example/publish?check_id={second}&tier=full", headers=OWNER)
+        with Session(engine) as s:
+            marked = s.exec(select(ReportPurchase).where(ReportPurchase.is_example == True)).all()  # noqa: E712
+        assert len(marked) == 1
+        assert "Второй разбор." in client.get("/example").text
+
+    def test_example_says_which_tier_it_is(self, monkeypatch):
+        """Иначе человек решит, что за 990 ₽ получит то же самое."""
+        import app.main as m
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        assert m.REPORT_PRICES["full"]["label"] in client.get("/example").text
+
+    def test_example_page_leaks_no_owner_controls(self, monkeypatch):
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        text = client.get("/example").text
+        assert 'class="owner-bar"' not in text
+        assert "preview=full" not in text

@@ -88,6 +88,7 @@ with Session(engine) as s:
         out[purpose] = rec.id
     s.add(ReportPurchase(check_id=out["business"], idea=idea, tier="full",
                          contact="sweep@example.com", status="paid", amount=2990,
+                         is_example=True,
                          report_json=json.dumps({"sections": [
                              {"key": "summary", "title": "Резюме проекта",
                               "body": "Спрос подтверждён цифрами Вордстата: " + "текст разбора. " * 40}]},
@@ -309,6 +310,7 @@ def test_public_pages_fit_narrow_screen(site, browser):
         ("результат проверки", f"/r/{ids['business']}"),
         ("результат проверки, соцконтракт", f"/r/{ids['social_contract']}"),
         ("отчёт", f"/report/{ids['business']}"),
+        ("публичный пример отчёта", "/example"),
         ("кабинет до входа", "/account"),
         ("оферта", "/oferta"),
         ("соглашение", "/agreement"),
