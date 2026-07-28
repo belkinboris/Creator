@@ -481,7 +481,7 @@ async def offers(data: IdeaIn, request: Request):
     _check_owner(request)
     try:
         result = await sharpen_idea(data.idea)
-        return {"ok": True, **result}
+        return {"ok": True, **_polish_offers(result)}
     except OfferEngineError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
@@ -533,6 +533,29 @@ async def demand_check(data: IdeaIn, request: Request):
     return {"ok": True, "id": check_id, "public_id": public_id, **result}
 
 
+def _polish_offers(result: dict) -> dict:
+    """Приводит объяснение боли к виду предложения перед выдачей карточек.
+
+    Модель пишет `p` как придётся -- «Обещают три недели, шьют полтора месяца»
+    без точки рядом с вариантом, где точка есть. В карточке эти строки стоят
+    друг под другом, и разнобой читается как небрежность (B9). Название боли
+    (`h2`) не трогаем: это заголовок, точка ему не нужна.
+    """
+    offers = result.get("offers")
+    if not isinstance(offers, list):
+        return result
+    fixed = []
+    for o in offers:
+        pains = o.get("pains") if isinstance(o, dict) else None
+        if not isinstance(pains, list):
+            fixed.append(o)
+            continue
+        fixed.append({**o, "pains": [
+            {**pn, "p": _as_sentence(pn.get("p", ""))} if isinstance(pn, dict) else pn
+            for pn in pains]})
+    return {**result, "offers": fixed}
+
+
 @app.post("/api/sharpen")
 async def sharpen(data: IdeaIn, request: Request):
     """Бесплатное заострение идеи в 3 варианта позиционирования — по кнопке
@@ -543,7 +566,7 @@ async def sharpen(data: IdeaIn, request: Request):
         raise HTTPException(429, "слишком часто")
     try:
         result = await sharpen_idea(data.idea)
-        return {"ok": True, **result}
+        return {"ok": True, **_polish_offers(result)}
     except OfferEngineError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 

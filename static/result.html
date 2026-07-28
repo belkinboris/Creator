@@ -159,6 +159,11 @@
   .sharp-meta-tag{display:block;font:600 11px "IBM Plex Sans";color:var(--muted);
     text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px}
   .sharp-meta-row{font-size:14px;color:var(--ink)}
+  /* Название боли и её объяснение -- два поля движка, а не одно предложение.
+     Раньше их склеивали через « — », и объяснение приносило свою заглавную
+     букву: «Ателье срывают сроки — Обещают три недели». Так склеилась бы
+     любая пара, это шаблон, а не опечатка модели (B9). */
+  .sharp-pain{display:block;font-weight:600}
   .sharp-pick{appearance:none;cursor:pointer;border-radius:6px;margin-top:auto;align-self:flex-start;
     background:transparent;border:1px solid var(--line);color:var(--ink);
     font:500 14px "IBM Plex Sans";padding:9px 14px}
@@ -660,7 +665,7 @@ function renderSharpen(offers){
       <p>${escapeHtml(o.sub || '')}</p>
       ${(o.eyebrow || (o.pains && o.pains[0])) ? `<div class="sharp-meta">
         ${o.eyebrow ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Для кого:</span>${escapeHtml(o.eyebrow)}</div>` : ''}
-        ${o.pains && o.pains[0] ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Боль:</span>${escapeHtml(o.pains[0].h2 || '')} — ${escapeHtml(o.pains[0].p || '')}</div>` : ''}
+        ${o.pains && o.pains[0] ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Боль:</span><span class="sharp-pain">${escapeHtml(o.pains[0].h2 || '')}</span>${escapeHtml(o.pains[0].p || '')}</div>` : ''}
       </div>` : ''}
       <button class="sharp-pick" type="button">Выбрать этот вариант</button>
     </div>`).join('');

@@ -6453,3 +6453,75 @@ class TestScaleCaptionsLookAlike:
         prev = m._report_preview(data)
         for key in ("competition_note", "timing_note", "execution_note"):
             assert prev[key].endswith("."), (key, prev[key])
+
+
+class TestSharpenCardDoesNotGlueTwoFields:
+    """B9 (шаг 3): карточка заострения склеивала два поля в кривое предложение.
+
+    Найдено кастдев-проходом за фаундера 2026-07-28. Шаг заострения в прежних
+    проходах всегда пропускался кнопкой «Пропустить», поэтому дефект дожил.
+
+    Движок отдаёт боль двумя полями: `h2` — название боли, `p` — объяснение,
+    каждое самостоятельное предложение (на посадочной `/l/` они и рисуются
+    отдельными элементами). Карточка же склеивала их через « — » в одну
+    строку, и объяснение приносило с собой свою заглавную букву:
+
+        Ателье срывают сроки — Обещают три недели, шьют полтора месяца
+
+    Заглавная после тире посреди строки — не опечатка модели, а наш шаблон:
+    так склеит ЛЮБУЮ пару. Плюс точка в конце то есть, то нет — модель пишет
+    как придётся. Это последний бесплатный экран перед решением платить.
+
+    Лечится тем, что поля перестают притворяться одним предложением: название
+    боли и объяснение — разными строками, как «Для кого» рядом. Пунктуацию
+    приводит к виду сервер, там же, где живёт остальная нормализация (B9 шаг 2).
+    """
+
+    def _script(self):
+        return _read_static("result.html")
+
+    def test_card_does_not_join_pain_fields_with_a_dash(self):
+        t = self._script()
+        assert "pains[0].h2 || '')} — ${" not in t
+        assert "sharp-pain" in t, "название боли и объяснение должны быть разными узлами"
+
+    def test_explanation_is_normalised_to_a_sentence_on_the_server(self, monkeypatch):
+        """Точку дописывает сервер, а не шаблон: правило уже живёт в Python
+        (_as_sentence), второй копии в JS быть не должно."""
+        import app.main as m
+        offers = [dict(VALID_OFFER, pains=[{"h2": "Ателье срывают сроки",
+                                            "p": "Обещают три недели, шьют полтора месяца"}])]
+
+        async def fake_sharpen(idea, *a, **kw):
+            return {"sharpened_note": "", "warning": "", "offers": offers}
+
+        monkeypatch.setattr(m, "sharpen_idea", fake_sharpen)
+        r = client.post("/api/sharpen", json={"idea": "Идея достаточной длины для проверки"})
+        assert r.status_code == 200, r.text
+        pain = r.json()["offers"][0]["pains"][0]
+        assert pain["p"].endswith("."), pain
+        assert pain["h2"] == "Ателье срывают сроки", pain     # название боли не трогаем
+
+    def test_normalisation_does_not_double_existing_punctuation(self, monkeypatch):
+        import app.main as m
+        offers = [dict(VALID_OFFER, pains=[{"h2": "Срывают сроки", "p": "Шьют полтора месяца."}])]
+
+        async def fake_sharpen(idea, *a, **kw):
+            return {"sharpened_note": "", "warning": "", "offers": offers}
+
+        monkeypatch.setattr(m, "sharpen_idea", fake_sharpen)
+        r = client.post("/api/sharpen", json={"idea": "Идея достаточной длины для проверки"})
+        assert r.json()["offers"][0]["pains"][0]["p"] == "Шьют полтора месяца."
+
+    def test_offer_without_pains_still_passes_through(self, monkeypatch):
+        """Нормализация не должна ронять вариант с пустым или битым полем."""
+        import app.main as m
+        offers = [dict(VALID_OFFER, pains=[]), dict(VALID_OFFER, pains=[{"h2": "х"}])]
+
+        async def fake_sharpen(idea, *a, **kw):
+            return {"sharpened_note": "", "warning": "", "offers": offers}
+
+        monkeypatch.setattr(m, "sharpen_idea", fake_sharpen)
+        r = client.post("/api/sharpen", json={"idea": "Идея достаточной длины для проверки"})
+        assert r.status_code == 200
+        assert len(r.json()["offers"]) == 2

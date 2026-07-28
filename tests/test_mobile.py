@@ -752,3 +752,59 @@ def test_card_grids_stay_even(site, browser, width):
         finally:
             ctx.close()
     assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("width", [1000, NARROW])
+def test_sharpen_card_reads_as_two_fields_not_one_broken_sentence(site, browser, width):
+    """B9. Карточку рисует скрипт, поэтому проверять подстрокой в шаблоне
+    бесполезно — смотрим, что человек реально читает.
+
+    Ответ `/api/sharpen` подменяем прямо в браузере: в dev нет ключей LLM, а
+    проверяем мы отрисовку, а не движок. Боль намеренно приходит так, как её
+    пишет модель, — объяснение отдельным предложением с заглавной буквы.
+    Раньше шаблон склеивал его с названием боли через « — », и получалось
+    «Ателье срывают сроки — Обещают три недели»: заглавная посреди строки.
+    """
+    offer = {
+        "angle": "Для тех, кто делает ремонт", "idea_id": "x1", "product_name": "П",
+        "eyebrow": "Семьи 30–45 лет", "h1": "Шторы за неделю", "sub": "Шьём за 7 дней",
+        "pains": [{"h2": "Ателье срывают сроки",
+                   "p": "Обещают три недели, шьют полтора месяца."}],
+        "demo_left_label": "л", "demo_left_text": "л", "demo_right_text": "п",
+        "direct_queries": ["а"] * 6,
+    }
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}", width=width)
+    try:
+        page.route("**/api/sharpen", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"ok": True, "sharpened_note": "", "warning": "",
+                             "offers": [offer]}, ensure_ascii=False)))
+        for _ in range(3):
+            btns = page.locator(".step-next .btn:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+        page.click("#sharpen-btn")
+        page.wait_for_selector(".sharp-pain", timeout=15000)
+        page.wait_for_timeout(300)
+
+        pain = page.locator(".sharp-pain").first
+        assert pain.inner_text().strip() == "Ателье срывают сроки", pain.inner_text()
+
+        row = page.locator(".sharp-meta-row").nth(1).inner_text()
+        assert "сроки — Обещают" not in row, row
+        assert "Обещают три недели, шьют полтора месяца." in row, row
+        # объяснение стоит ПОД названием, а не в одну строку с ним
+        nb = pain.bounding_box()
+        expl = page.evaluate("""() => {
+            const r = document.querySelectorAll('.sharp-meta-row')[1];
+            const t = document.createRange();
+            t.setStartAfter(r.querySelector('.sharp-pain'));
+            t.setEndAfter(r.lastChild);
+            return t.getBoundingClientRect().top;
+        }""")
+        assert expl >= nb["y"] + nb["height"] - 1, (expl, nb)
+        _assert_clean(page, "карточки заострения", width)
+    finally:
+        ctx.close()
