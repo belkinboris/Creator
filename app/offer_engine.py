@@ -83,26 +83,39 @@ SYSTEM = """Ты — продуктовый стратег Создателя, �
 
 
 class OfferEngineError(Exception):
-    pass
+    """Текст исключения уходит ПРЯМО на экран человека: `/api/sharpen`
+    отдаёт `str(e)`, а `result.html` показывает его как есть. Значит он
+    обязан быть человеческим. Техническая причина живёт отдельно, в `.tech`,
+    и уходит в лог — чинить по ней нам, а не посетителю (A19).
+    """
+
+    def __init__(self, message: str, *, tech: str = ""):
+        super().__init__(message)
+        self.tech = tech
+
+
+# Одна фраза на все структурные осечки модели: человеку незачем знать, какое
+# поле недосчитала проверка, ему нужно понять, что делать дальше.
+_MALFORMED = "ИИ вернул неполный ответ. Попробуйте ещё раз — обычно со второго раза получается."
 
 
 def _validate(data: dict) -> dict:
     if not isinstance(data, dict) or "offers" not in data:
-        raise OfferEngineError("нет поля offers")
+        raise OfferEngineError(_MALFORMED, tech="нет поля offers")
     offers = data["offers"]
     if not isinstance(offers, list) or len(offers) != 3:
-        raise OfferEngineError("нужно ровно 3 оффера")
+        raise OfferEngineError(_MALFORMED, tech=f"ожидали 3 варианта, пришло {len(offers) if isinstance(offers, list) else type(offers).__name__}")
     required = ["angle", "idea_id", "product_name", "eyebrow", "h1", "sub",
                 "pains", "demo_left_label", "demo_left_text",
                 "demo_right_text", "direct_queries"]
     for o in offers:
         for key in required:
             if not o.get(key):
-                raise OfferEngineError(f"в оффере нет поля {key}")
+                raise OfferEngineError(_MALFORMED, tech=f"в варианте нет поля {key}")
         if len(o["pains"]) != 3:
-            raise OfferEngineError("pains должен содержать 3 блока")
+            raise OfferEngineError(_MALFORMED, tech="pains: нужно 3 блока")
         if not (5 <= len(o["direct_queries"]) <= 12):
-            raise OfferEngineError("direct_queries: 5-12 фраз")
+            raise OfferEngineError(_MALFORMED, tech="direct_queries: нужно 5-12 фраз")
         o.setdefault("demo_left_badge", "")
         o.setdefault("demo_left_meta", "")
         o.setdefault("demo_right_tag", "результат · черновик готов")
@@ -136,7 +149,11 @@ async def sharpen_idea(idea: str, *, _post=None, _attempt: int = 1) -> dict:
         )
         text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         return _validate(json.loads(text))
-    except OfferEngineError:
+    except OfferEngineError as exc:
+        if exc.tech:
+            logger.warning("offer engine: %s (attempt %s)", exc.tech, _attempt)
+            if _attempt == 1:
+                return await sharpen_idea(idea, _post=_post, _attempt=2)
         raise
     except llm_adapter.LLMAdapterError as exc:
         raise OfferEngineError(str(exc))

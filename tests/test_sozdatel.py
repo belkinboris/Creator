@@ -3713,8 +3713,20 @@ class TestNoHardcodedServerValuesInStatic:
     STATIC = main_module.BASE_DIR.parent / "static"
 
     def _sources(self):
+        """Все шаблоны, которые видит человек, — включая те, что лежат НЕ в
+        `static/`.
+
+        Проверочная страница собирается из `app/landing_template.html`, и
+        именно этот файл трижды подряд проваливался мимо сторожей, которые
+        смотрели только `static/`: слово «лендинг» (A14), запрещённые слова в
+        строке следующего шага (A17, тот же слепой угол в `app/main.py`) и
+        рендер-блокирующий запрос шрифтов на чужой домен (A18) — последнее на
+        единственной странице, куда идёт платный трафик.
+        """
         for p in sorted(self.STATIC.glob("*.html")):
             yield p.name, p.read_text()
+        landing = main_module.BASE_DIR / "landing_template.html"
+        yield landing.name, landing.read_text(encoding="utf-8")
 
     def test_prices_are_not_hardcoded(self):
         """Цена на витрине обязана совпадать с той, что спишется."""
@@ -6759,3 +6771,124 @@ class TestLandingDoesNotWaitForGoogle:
         assert VALID_OFFER["h1"] in html_out
         assert VALID_OFFER["pains"][0]["h2"] in html_out
         assert 'href="/legal"' in html_out
+
+
+class TestEngineErrorsAreHumanReadable:
+    """A19: технические сообщения движков доезжали прямо до человека.
+
+    Найдено 2026-07-28 сплошным просмотром строк в `app/*.py` — там, куда
+    сторожа по `static/` никогда не заглядывали. Четвёртый дефект из того же
+    слепого угла (A14, A17, A18).
+
+    Обе ошибки движков попадают на экран дословно: `/api/sharpen` отдаёт
+    `str(e)`, а `result.html` показывает `data.error`; у отчёта тот же путь
+    через `__GEN_ERROR__`. Докстринг `sharpen_idea` прямо обещает «бросает
+    OfferEngineError с человеческим текстом» — но проверки структуры бросали
+    сырьё:
+
+      · «нужно ровно 3 **оффера**» — запрещённое слово (принцип 5) на
+        бесплатном шаге, прямо перед решением платить;
+      · «в **оффере** нет поля demo_left_label», «pains должен содержать
+        3 блока», «direct_queries: 5-12 фраз» — имена полей из нашего JSON;
+      · у отчёта — «недостаточно top_risks», «нет корректного
+        viability_score», «пустой раздел finance». Это читает человек,
+        который уже заплатил 990–2990 ₽.
+
+    Техническая причина нужна нам, а не посетителю: она уходит в лог
+    (`.tech`), а на экран идёт одна человеческая фраза. Заодно неполный ответ
+    модели стал поводом ПОВТОРИТЬ запрос — ровно как испорченный JSON и
+    таймаут, которые движок уже переспрашивает: пропущенное поле такая же
+    случайная осечка, а человек до этой правки упирался в тупик с первого раза.
+    """
+
+    def _sharpen_error(self, body):
+        """Форма ответа — та же, что у настоящего провайдера по умолчанию
+        (`_yandex_response`). С анthropic-образной заглушкой движок падал в
+        ветку «битый JSON» и до проверок структуры вообще не доходил: тест
+        зеленел, ничего не проверив."""
+        import asyncio, json as _json
+        from app.offer_engine import sharpen_idea, OfferEngineError
+
+        async def fake_post(provider, payload):
+            return _yandex_response(_json.dumps(body, ensure_ascii=False))
+        try:
+            asyncio.run(sharpen_idea("Идея достаточно длинная для проверки", _post=fake_post))
+        except OfferEngineError as e:
+            return e
+        raise AssertionError("движок не пожаловался, хотя ответ битый")
+
+    def test_missing_field_does_not_leak_json_names(self):
+        broken = dict(VALID_OFFER); broken.pop("h1")
+        e = self._sharpen_error({"offers": [broken, dict(VALID_OFFER), dict(VALID_OFFER)]})
+        assert "оффер" not in str(e).lower(), str(e)
+        assert "h1" not in str(e), str(e)
+
+    def test_wrong_offer_count_does_not_say_offer(self):
+        e = self._sharpen_error({"offers": [dict(VALID_OFFER)]})
+        assert "оффер" not in str(e).lower(), str(e)
+
+    def test_message_tells_the_person_what_to_do(self):
+        e = self._sharpen_error({"offers": [dict(VALID_OFFER)]})
+        assert "ещё раз" in str(e).lower(), str(e)
+
+    def test_technical_reason_survives_for_the_log(self):
+        """Человеческий текст не должен стоить нам возможности починить."""
+        broken = dict(VALID_OFFER); broken.pop("h1")
+        e = self._sharpen_error({"offers": [broken, dict(VALID_OFFER), dict(VALID_OFFER)]})
+        assert "h1" in getattr(e, "tech", ""), getattr(e, "tech", None)
+
+    def test_broken_structure_is_retried_like_broken_json(self):
+        """Пропущенное поле — такая же случайная осечка модели, как испорченный
+        JSON, который движок уже переспрашивает."""
+        import asyncio, json as _json
+        from app.offer_engine import sharpen_idea
+        calls = {"n": 0}
+
+        async def fake_post(provider, payload):
+            calls["n"] += 1
+            body = ({"offers": [dict(VALID_OFFER)]} if calls["n"] == 1
+                    else {"offers": [dict(VALID_OFFER) for _ in range(3)]})
+            return _yandex_response(_json.dumps(body, ensure_ascii=False))
+
+        out = asyncio.run(sharpen_idea("Идея достаточно длинная для проверки", _post=fake_post))
+        assert calls["n"] == 2, calls
+        assert len(out["offers"]) == 3
+
+    def test_report_engine_hides_its_field_names_too(self):
+        """Эти строки читает человек, который уже заплатил."""
+        import asyncio, json as _json
+        from app.report_engine import generate_core, ReportEngineError
+
+        async def fake_post(provider, payload):
+            body = {"viability_score": 55, "viability_summary": "с", "top_risks": []}
+            return _yandex_response(_json.dumps(body, ensure_ascii=False))
+        try:
+            asyncio.run(generate_core("Груминг собак с выездом на дом клиента",
+                                      DEMAND_DATA_FIXTURE, "full", _post=fake_post))
+        except ReportEngineError as e:
+            assert "top_risks" not in str(e), str(e)
+            assert "top_risks" in getattr(e, "tech", ""), getattr(e, "tech", None)
+            # У отчёта своё действие: страница пересобирает разделы по перезагрузке,
+            # поэтому зовём обновить, а не «попробовать ещё раз» как на /r/.
+            assert "обновите" in str(e).lower(), str(e)
+        else:
+            raise AssertionError("движок не пожаловался на пустые риски")
+
+    def test_no_engine_message_carries_a_forbidden_word(self):
+        """Сплошной сторож: ни одна строка, которая может доехать до экрана,
+        не содержит запрещённых слов."""
+        import ast, pathlib
+        bad = []
+        for name in ("offer_engine.py", "report_engine.py"):
+            f = pathlib.Path(main_module.BASE_DIR) / name
+            for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id.endswith("EngineError")):
+                    continue
+                for arg in node.args:
+                    txt = ast.unparse(arg)
+                    for w in ("оффер", "лендинг", "top_risks", "viability_",
+                              "direct_queries", "pains", "offers"):
+                        if w in txt:
+                            bad.append(f"{name}:{node.lineno} → {txt}")
+        assert not bad, "\n".join(bad)

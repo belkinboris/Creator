@@ -328,7 +328,20 @@ _HOW_TO_WRITE = """Как писать:
 
 
 class ReportEngineError(Exception):
-    """Человекочитаемая ошибка — показывается пользователю как есть."""
+    """Текст доезжает до человека, который УЖЕ ЗАПЛАТИЛ: страница отчёта
+    показывает его через `__GEN_ERROR__`, а дозаказ раздела — через
+    `{"error": str(e)}`. Значит имена наших полей тут недопустимы;
+    техническая причина живёт в `.tech` и уходит в лог (A19)."""
+
+    def __init__(self, message: str, *, tech: str = ""):
+        super().__init__(message)
+        self.tech = tech
+
+
+# Одна фраза на все структурные осечки модели: человеку незачем знать, какого
+# поля недосчиталась проверка.
+_MALFORMED = ("Модель вернула неполный разбор. Обновите страницу — "
+              "обычно со второго раза собирается.")
 
 
 def _core_prompt(tier: str, purpose: str = PURPOSE_BUSINESS) -> str:
@@ -433,21 +446,21 @@ async def generate_core(idea: str, demand_data: dict, tier: str = "full",
 
     score = data.get("viability_score")
     if not isinstance(score, (int, float)) or not (1 <= score <= 100):
-        raise ReportEngineError("нет корректного viability_score")
+        raise ReportEngineError(_MALFORMED, tech="нет корректного viability_score")
     summary = str(data.get("viability_summary") or "").strip()
     if not summary:
-        raise ReportEngineError("нет viability_summary")
+        raise ReportEngineError(_MALFORMED, tech="нет viability_summary")
 
     expected = _risk_count(tier)
     raw = data.get("top_risks")
     if not isinstance(raw, list) or len(raw) < expected:
-        raise ReportEngineError("недостаточно top_risks")
+        raise ReportEngineError(_MALFORMED, tech="недостаточно top_risks")
     risks = []
     for r in raw[:expected]:
         title = str((r or {}).get("title") or "").strip()
         body = str((r or {}).get("body") or "").strip()
         if not title or not body:
-            raise ReportEngineError("риск без title/body")
+            raise ReportEngineError(_MALFORMED, tech="риск без title/body")
         risks.append({"title": title, "body": body})
 
     return {"viability_score": int(score), "viability_summary": summary, "top_risks": risks}
@@ -478,7 +491,7 @@ async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "
 
     body = str(data.get("body") or "").strip()
     if not body:
-        raise ReportEngineError(f"пустой раздел {key}")
+        raise ReportEngineError(_MALFORMED, tech=f"пустой раздел {key}")
     return {"key": key, "title": section_title(key, purpose), "body": body}
 
 
