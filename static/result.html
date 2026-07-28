@@ -705,7 +705,10 @@ sharpenBtn.addEventListener('click', async () => {
   try {
     const r = await fetch('/api/sharpen', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({idea: IDEA})
+      // Без purpose заострение всегда писалось "за фаундера" -- соцконтракт
+      // и студент получали венчурную рамку на этом бесплатном шаге, хотя
+      // остальной сервис давно разводит три аудитории (F1-F3).
+      body: JSON.stringify({idea: IDEA, purpose: PURPOSE})
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || 'Не получилось заострить идею. Попробуйте ещё раз.');

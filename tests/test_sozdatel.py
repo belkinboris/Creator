@@ -81,10 +81,30 @@ class TestOfferEngine:
             return _yandex_response(json.dumps(body, ensure_ascii=False))
         out = asyncio.run(sharpen_idea("Сервис отвечает на отзывы за селлеров маркетплейсов", _post=fake_post))
         assert len(out["offers"]) == 3
-        assert "Идея фаундера" in payload_capture["input"]
+        assert payload_capture["input"].startswith("Идея:")
         assert "РАЗНЫХ оффера" in payload_capture["instructions"]
+        assert "Проверяю идею для своего дела" in payload_capture["instructions"]   # дефолт business
         # DeepSeek/не-Claude жёстко просим не класть markdown внутрь JSON-полей
         assert "markdown" in payload_capture["instructions"]
+
+    def test_purpose_changes_who_the_model_thinks_it_is_writing_for(self):
+        """Заострение раньше всегда писалось "за фаундера" -- system-промпт
+        не менялся, даже когда идею принесли с /social-contract или /students.
+        Один и тот же бесплатный шаг обязан понимать, кто перед ним, как и
+        платный отчёт (F1-F3)."""
+        for purpose, phrase in (
+            ("social_contract", "Готовлю обоснование для соцзащиты"),
+            ("student", "Делаю студенческий проект"),
+        ):
+            payload_capture = {}
+            async def fake_post(provider, payload):
+                payload_capture.update(payload)
+                body = {"offers": [dict(VALID_OFFER, idea_id=f"i{i}") for i in range(3)]}
+                return _yandex_response(json.dumps(body, ensure_ascii=False))
+            asyncio.run(sharpen_idea("Идея достаточно длинная для проверки аудитории",
+                                     purpose=purpose, _post=fake_post))
+            assert phrase in payload_capture["instructions"], purpose
+            assert "Фаундер" not in payload_capture["instructions"], purpose
 
     def test_thinking_budget_added_to_max_tokens(self):
         """DeepSeek thinking всегда включён -- max_output_tokens должен быть
@@ -120,7 +140,7 @@ class TestOfferEngine:
         monkeypatch.setattr(llm_adapter, "LLM_PROVIDER", "anthropic")
         async def fake_post(provider, payload):
             assert provider == "anthropic"
-            assert payload["messages"][0]["content"].startswith("Идея фаундера")
+            assert payload["messages"][0]["content"].startswith("Идея:")
             body = {"offers": [dict(VALID_OFFER, idea_id=f"a{i}") for i in range(3)]}
             return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}]}
         out = asyncio.run(sharpen_idea("Идея достаточно длинная для проверки отката", _post=fake_post))
@@ -1675,7 +1695,7 @@ class TestSharpenPublic:
 
     def test_sharpen_public_no_owner_key_required(self):
         import app.main as m
-        async def fake_sharpen(idea):
+        async def fake_sharpen(idea, *a, **kw):
             return {"sharpened_note": "сместил акценты", "warning": "",
                     "offers": [dict(VALID_OFFER, idea_id=f"pub{i}") for i in range(3)]}
         orig = m.sharpen_idea
@@ -1688,9 +1708,28 @@ class TestSharpenPublic:
         finally:
             m.sharpen_idea = orig
 
+    def test_sharpen_passes_purpose_through(self):
+        """Раньше заострение всегда писалось "за фаундера" -- purpose с
+        витрины/страницы результата не доезжал до движка вовсе."""
+        import app.main as m
+        captured = {}
+        async def fake_sharpen(idea, *a, purpose="business", **kw):
+            captured["purpose"] = purpose
+            return {"sharpened_note": "", "warning": "",
+                    "offers": [dict(VALID_OFFER, idea_id=f"pub{i}") for i in range(3)]}
+        orig = m.sharpen_idea
+        m.sharpen_idea = fake_sharpen
+        try:
+            r = client.post("/api/sharpen", json={"idea": "Идея достаточно длинная для заострения",
+                                                  "purpose": "student"})
+            assert r.status_code == 200
+            assert captured["purpose"] == "student"
+        finally:
+            m.sharpen_idea = orig
+
     def test_sharpen_llm_failure_returns_400(self):
         import app.main as m
-        async def failing(idea):
+        async def failing(idea, *a, **kw):
             raise OfferEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
         orig = m.sharpen_idea
         m.sharpen_idea = failing

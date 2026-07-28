@@ -501,7 +501,7 @@ class IdeaIn(BaseModel):
 async def offers(data: IdeaIn, request: Request):
     _check_owner(request)
     try:
-        result = await sharpen_idea(data.idea)
+        result = await sharpen_idea(data.idea, purpose=data.purpose)
         return {"ok": True, **_polish_offers(result)}
     except OfferEngineError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -586,7 +586,7 @@ async def sharpen(data: IdeaIn, request: Request):
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
     try:
-        result = await sharpen_idea(data.idea)
+        result = await sharpen_idea(data.idea, purpose=data.purpose)
         return {"ok": True, **_polish_offers(result)}
     except OfferEngineError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
