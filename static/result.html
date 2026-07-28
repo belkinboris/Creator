@@ -457,12 +457,12 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
 // --- Лента: один активный фокус, шаги без данных пропускаются целиком ---
 
 // --- Финальный шаг разворачиваем под ту аудиторию, которая пришла ---
-// Человек с /social-contract пришёл за бизнес-планом для комиссии: рекламный
-// платный рекламный тест ему не нужен, а именно он стоял главной кнопкой, пока
-// бизнес-план прятался в «Или...». Для фаундера с главной порядок прежний.
-const IS_SOCIAL_CONTRACT = PURPOSE === 'social_contract';
+// Чем эта аудитория отличается — приходит с сервера, а не вычисляется здесь:
+// ветка `PURPOSE === 'social_contract'` означала «аудиторий ровно две», а их
+// уже три (F3). Реестр — app/audiences.py.
+const AUDIENCE = __AUDIENCE_JSON__;
 
-if (IS_SOCIAL_CONTRACT) {
+if (AUDIENCE.plan_first) {
   document.getElementById('path-next-text').textContent =
     'Этап 3 — соберём бизнес-план с расчётами: смета, план доходов, окупаемость';
 
@@ -512,7 +512,7 @@ if (v.level === 'unknown') {
     'измерили. Попробуйте запустить проверку ещё раз через несколько минут.';
   const again = document.getElementById('weak-lead-btn');
   again.textContent = 'Проверить ещё раз — бесплатно';
-  again.setAttribute('href', IS_SOCIAL_CONTRACT ? '/social-contract' : '/');
+  again.setAttribute('href', AUDIENCE.home);
   document.getElementById('weak-lead').classList.add('show');
 
   const cav = document.getElementById('weak-caveat');
@@ -541,10 +541,12 @@ if (v.level === 'weak') {
     'Самую частую из проверенных формулировок в Яндексе ищут ' + freq +
     '. Чтобы судить по заявкам, нужно __CLICK_TARGET__ визитов — при такой ' +
     'частотности набрать их из поиска будет нечем. Чаще всего дело в словах: ' +
-    'люди ищут то же самое, но называют иначе. Опишите идею по-другому — ' +
-    'проверка бесплатная и занимает пару минут.';
+    // Что делать дальше — у каждой аудитории своё (правило A4: вердикт
+    // сообщает находку и не предписывает шаг). Студенту ноль в поиске — тоже
+    // материал для работы, фаундеру — повод не тратить бюджет (F3).
+    'люди ищут то же самое, но называют иначе. ' + AUDIENCE.weak_demand;
   document.getElementById('weak-lead-btn').setAttribute(
-    'href', IS_SOCIAL_CONTRACT ? '/social-contract' : '/');
+    'href', AUDIENCE.home);
   document.getElementById('weak-lead').classList.add('show');
 
   // Шапка обещала следующий этап так, будто вердикта не было. Обещать
@@ -565,7 +567,7 @@ if (v.level === 'weak') {
 }
 
 const ARRIVAL = {2: 'конкуренты', 3: 'оценка идеи', 4: 'заострим идею',
-                 5: IS_SOCIAL_CONTRACT ? 'бизнес-план' : 'живой тест'};
+                 5: AUDIENCE.plan_first ? 'бизнес-план' : 'живой тест'};
 const STEP_ORDER = [1, hasComp ? 2 : null, hasScores ? 3 : null, 4, 5].filter(Boolean);
 
 function nextLabel(afterStep){
@@ -711,7 +713,7 @@ const orderBtn = document.getElementById('order-btn');
 // оно ничего не говорит, поэтому там кнопка описывает действие словами.
 orderBtn.textContent = PAY_ENABLED
   ? `Оплатить и запустить — ${fmt(PRICE)} ₽`
-  : (IS_SOCIAL_CONTRACT ? 'Оставить заявку на проверку идеи'
+  : (AUDIENCE.plan_first ? 'Оставить заявку на проверку идеи'
                         : 'Оставить заявку на живой тест');
 // Чек 54-ФЗ уходит только при реальной оплате -- без кассы это просто
 // заявка для связи, обещать чек в её плейсхолдере было бы неточно.

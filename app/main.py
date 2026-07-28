@@ -611,7 +611,9 @@ def result_page(rid: str, request: Request):
         # Человек с /social-contract пришёл за бизнес-планом для комиссии, а
         # не за рекламным тестом -- страница результата разворачивает финальный
         # шаг под него, см. PURPOSE в result.html.
-        .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False)))
+        .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False))
+        .replace("__AUDIENCE_JSON__",
+                 json.dumps(audiences.for_page(rec.purpose), ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out))
 
 
@@ -2685,6 +2687,53 @@ def guide_direct():
     return HTMLResponse(_with_server_values("guide-direct.html"))
 
 
+def _audience_landing(key: str) -> str:
+    """Витрина аудитории: одна вёрстка, тексты из реестра.
+
+    Третья копия HTML разъехалась бы ровно так же, как разъезжались цены (B5)
+    и названия тарифов (B7) — а витрин теперь три. Позиционирование главной
+    при этом не меняется: она общая и о конкретных аудиториях с порога не
+    говорит, ссылки живут в переключателе (F2).
+    """
+    a = audiences.get(key)
+    c = a.copy
+    promises = "".join(
+        f'<div class="point"><span class="mark"></span><div>'
+        f"<h3>{h3}</h3><p>{html.escape(txt)}</p></div></div>"
+        for h3, txt in c.get("promises", []))
+    faq = "".join(f'<div class="faq"><h3>{html.escape(q)}</h3>'
+                  f"<p>{html.escape(ans)}</p></div>"
+                  for q, ans in c.get("faq", []))
+    page = (_static("audience-landing.html")
+            .replace("__PAGE_TITLE__", html.escape(c.get("title", "Создатель")))
+            .replace("__META__", html.escape(c.get("meta", "")))
+            .replace("__H1__", c.get("h1", ""))
+            .replace("__SUB__", html.escape(c.get("sub", "")))
+            .replace("__FIELD_LABEL__", html.escape(c.get("field_label", "Опишите идею")))
+            .replace("__PLACEHOLDER__", html.escape(c.get("placeholder", "")))
+            .replace("__PROMISE_TITLE__", html.escape(c.get("promise_title", "")))
+            .replace("__PROMISE_SUB__", html.escape(c.get("promise_sub", "")))
+            .replace("__PROMISES__", promises)
+            .replace("__QUICK_NOTE__", c.get("quick_note", ""))
+            .replace("__FULL_NOTE__", c.get("full_note", ""))
+            .replace("__FAQ__", faq)
+            .replace("__AUDIENCE_SWITCH__", _audience_switch_html(a.key))
+            .replace("__AUDIENCE_KEY__", a.key))
+    return _fill_server_values(page)
+
+
+@app.get("/students", response_class=HTMLResponse)
+def students_page():
+    """Витрина под студенческие проекты: курсовая, диплом, конкурс, грант.
+
+    Цены те же, что у всех (решение владельца: разные цены обидят тех, кто не
+    попал в льготную группу). Отличается оптика разбора и то, что мы обещаем:
+    студенту сильнее бизнес-плана работает тест на реальных людях — на защите
+    он говорит не «я придумал», а «я проверил, вот цифры».
+    """
+    return HTMLResponse(_audience_landing("student"))
+
+
 @app.get("/social-contract", response_class=HTMLResponse)
 def social_contract_page():
     """Витрина под аудиторию социального контракта: те же цены и тот же
@@ -2698,8 +2747,7 @@ def social_contract_page():
     не понимал, что мы и про него тоже. Теперь на обеих витринах есть
     переключатель.
     """
-    return HTMLResponse(_with_server_values("social-contract.html",
-                                            audience="social_contract"))
+    return HTMLResponse(_audience_landing("social_contract"))
 
 
 @app.get("/oferta", response_class=HTMLResponse)

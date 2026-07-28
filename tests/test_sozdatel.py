@@ -1980,8 +1980,8 @@ class TestSocialContractPurpose:
             m.check_demand = orig
 
     def test_landing_sends_social_contract_purpose(self):
-        text = (main_module.BASE_DIR.parent / "static" / "social-contract.html").read_text()
-        assert "purpose: 'social_contract'" in text
+        text = client.get("/social-contract").text
+        assert 'AUDIENCE = "social_contract"' in text and "purpose: AUDIENCE" in text
 
     def test_landing_does_not_promise_smeta_in_tier_without_finance(self):
         """Главное обещание лендинга -- обоснование сметы, но секции finance
@@ -2036,7 +2036,8 @@ class TestSocialContractPurpose:
         прятался в «Или...». Для рекламной кампании на эту аудиторию это прямая
         потеря конверсии: платим за клик и сразу продаём не то."""
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
-        assert "IS_SOCIAL_CONTRACT" in text
+        # Ветка по аудитории переехала в данные с сервера (F3).
+        assert "AUDIENCE.plan_first" in text
         # бизнес-план поднимается в главный блок, рекламный тест опускается
         assert "alt.className = 'next'" in text
         assert "order.className = 'alt-path'" in text
@@ -2302,7 +2303,7 @@ class TestYandexMetrika:
 
     def test_demand_started_goal_wired_in_public_entry_points(self):
         static_dir = main_module.BASE_DIR.parent / "static"
-        for name in ("index.html", "social-contract.html"):
+        for name in ("index.html", "audience-landing.html"):
             text = (static_dir / name).read_text()
             assert "sozGoal('demand_started'" in text, f"нет цели demand_started в {name}"
 
@@ -3817,6 +3818,12 @@ class TestNoHardcodedServerValuesInStatic:
             "__PUBLIC_ID__",
             "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
+            # витрина аудитории -- заполняет _audience_landing
+            "__PAGE_TITLE__", "__META__", "__FIELD_LABEL__", "__PLACEHOLDER__",
+            "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
+            "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
+            # страница результата -- audiences.for_page
+            "__AUDIENCE_JSON__",
             # страница подтверждения входа -- заполняет _verify_page
             "__HEADING__", "__LEAD__", "__WHO__", "__ACTION__", "__FINE__",
             # заголовок и выходные данные листа -- _doc_title_and_meta
@@ -5390,7 +5397,7 @@ class TestWeakDemandStopsSelling:
         фаундеров (принцип 4)."""
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
         block = text.split("v.level === 'weak'")[1][:2000]
-        assert "IS_SOCIAL_CONTRACT ? '/social-contract' : '/'" in block
+        assert "AUDIENCE.home" in block
 
     def test_good_demand_is_untouched(self):
         """Предупреждение не должно всплывать там, где спрос есть: иначе оно
@@ -5890,7 +5897,7 @@ class TestIdeaIsNotReadableByGuessing:
         assert client.get(f"/r/{d['public_id']}").status_code == 200
 
     def test_showcases_send_people_to_the_public_address(self):
-        for name in ("index.html", "social-contract.html"):
+        for name in ("index.html", "audience-landing.html"):
             src = (main_module.BASE_DIR.parent / "static" / name).read_text()
             assert "data.public_id" in src, name
 
@@ -6125,7 +6132,7 @@ class TestUnmeasuredDemandIsNotSoldAsMeasured:
         """Получателя соцконтракта нельзя возвращать на витрину фаундеров."""
         text = client.get(f"/r/{self._check()}").text
         block = text.split("v.level === 'unknown'")[1][:2200]
-        assert "IS_SOCIAL_CONTRACT ? '/social-contract' : '/'" in block
+        assert "AUDIENCE.home" in block
 
 
 class TestLandingPromisesNothingOnTheOwnersBehalf:
@@ -7038,7 +7045,7 @@ class TestAudienceLivesInOnePlace:
 
     def test_registry_lists_the_audiences_we_actually_have(self):
         from app.audiences import AUDIENCES
-        assert set(AUDIENCES) == {"business", "social_contract"}
+        assert set(AUDIENCES) == {"business", "social_contract", "student"}
 
     def test_every_audience_is_described_completely(self):
         """Полупустая запись — это молчаливый откат к оптике фаундера."""
@@ -7079,8 +7086,9 @@ class TestAudienceLivesInOnePlace:
         from app.report_engine import SECTION_SPECS
         for s in SECTION_SPECS:
             assert "social" not in s, f"{s['key']}: переопределения не по ключу аудитории"
+            from app.audiences import AUDIENCES
             for aud in (s.get("by_audience") or {}):
-                assert aud in {"business", "social_contract"}, f"{s['key']}: {aud}"
+                assert aud in AUDIENCES, f"{s['key']}: {aud}"
 
     def test_section_titles_still_differ_where_they_did(self):
         """Переезд не должен потерять то, ради чего оптика заводилась."""
@@ -7158,7 +7166,7 @@ class TestVisitorCanFindHisOwnEntrance:
 
     def test_switch_is_built_in_one_place(self):
         """Разметка переключателя не должна лежать копией в витринах."""
-        for name in ("index.html", "social-contract.html"):
+        for name in ("index.html", "audience-landing.html"):
             t = _read_static(name)
             assert "__AUDIENCE_SWITCH__" in t, name
             assert 'class="aud-switch"' not in t, name
@@ -7194,3 +7202,98 @@ class TestVisitorCanFindHisOwnEntrance:
     def test_switching_to_an_unknown_audience_is_refused(self):
         assert client.post("/api/demand/999999/purpose",
                            json={"purpose": "нет такой"}).status_code in (400, 404)
+
+
+class TestStudentAudience:
+    """F3: третья аудитория — студенты, и общий шаблон витрины.
+
+    Владелец: «я помню, как у меня в студенчестве идеи генерировались
+    фонтаном», и ему самому не хватало способа идею верифицировать. Для
+    защиты студенту сильнее бизнес-плана работает **тест на реальных людях**:
+    на защите он говорит не «я придумал», а «я проверил, вот цифры».
+    Бизнес-план ему продаём другими словами — не венчурный разбор, а «как это
+    запустить и обо что ты споткнёшься». Цены единые для всех аудиторий —
+    решение владельца.
+
+    **Нулевой поисковый спрос — главный вопрос этой аудитории.** У курсовой
+    идеи спроса в Яндексе может не быть вовсе, а воронка на слабом спросе
+    намеренно перестаёт продавать (A11/A12). Прятать вердикт нельзя — принцип
+    1 не обсуждается, и принцип 2 тоже: вердикт имеет право сказать «нет».
+    Но A4 уже установила правило: **вердикт сообщает находку и НЕ предписывает
+    следующий шаг — шаг у аудиторий разный**. Фаундеру при нулевом спросе
+    честно сказать «не тратьте деньги»; студенту тот же ноль — законный
+    материал для работы, и следующий шаг у него другой. Поэтому реакция на
+    слабый спрос переехала в реестр, а не осталась одна на всех.
+    """
+
+    def test_student_is_in_the_registry_with_its_own_optics(self):
+        from app.audiences import AUDIENCES, get
+        assert "student" in AUDIENCES
+        a = get("student")
+        assert a.slug == "students"
+        for field in ("label", "reader", "persona", "viability", "switch_label"):
+            assert getattr(a, field), field
+        assert a.persona != get("business").persona
+        assert a.viability != get("business").viability
+
+    def test_student_optics_are_not_venture(self):
+        """Мерить курсовую венчурной линейкой — тот же вред, что мерить ею
+        соцконтракт (принцип 4)."""
+        from app.audiences import get
+        low = get("student").persona.lower()
+        # Слово «венчур» в персоне допустимо — она им как раз ОТКАЗЫВАЕТСЯ
+        # мерить. Проверяем позицию, а не наличие слова.
+        assert "не главное" in low or "не применяй" in low, low
+        assert "защит" in low, low
+        assert "масштабируемость" in low
+
+    def test_the_page_opens_and_carries_the_switch(self):
+        r = client.get("/students")
+        assert r.status_code == 200
+        assert 'class="aud-switch"' in r.text
+        assert 'href="/social-contract"' in r.text and 'href="/"' in r.text
+        assert 'href="/students"' not in r.text.split("</nav>")[0]
+
+    def test_the_page_sends_its_own_audience_with_the_check(self):
+        t = client.get("/students").text
+        assert 'AUDIENCE = "student"' in t, "витрина не знает свою аудиторию"
+        assert "purpose: AUDIENCE" in t, "проверка уходит без аудитории"
+
+    def test_both_audience_pages_come_from_one_template(self):
+        """Третья копия витрины разъехалась бы, как разъезжались цены (B5)."""
+        import pathlib
+        static = pathlib.Path(main_module.BASE_DIR).parent / "static"
+        assert (static / "audience-landing.html").exists()
+        assert not (static / "students.html").exists()
+        assert not (static / "social-contract.html").exists()
+
+    def test_prices_are_the_same_for_everyone(self):
+        """Решение владельца: разные цены обидят тех, кто не попал в льготную
+        группу. Витрины обязаны называть одни и те же суммы."""
+        import re
+        nums = [set(re.findall(r"(\d{3,4}) ₽", client.get(p).text))
+                for p in ("/social-contract", "/students")]
+        assert nums[0] == nums[1], nums
+
+    def test_weak_demand_answer_differs_by_audience(self):
+        from app.audiences import get
+        founder, student = get("business").weak_demand, get("student").weak_demand
+        assert founder and student and founder != student
+        # фаундеру — не тратить деньги; студенту ноль тоже материал для работы
+        assert "переформул" in founder.lower() or "не тратить" in founder.lower()
+        assert "работ" in student.lower() or "защит" in student.lower()
+
+    def test_result_page_takes_the_weak_answer_from_the_server(self):
+        """Ветка `IS_SOCIAL_CONTRACT` в скрипте — это «аудиторий ровно две»."""
+        t = _read_static("result.html")
+        assert "IS_SOCIAL_CONTRACT" not in t
+        assert "AUDIENCE.plan_first" in t
+        assert "AUDIENCE.weak_demand" in t, "ответ на слабый спрос всё ещё один на всех"
+
+    def test_social_contract_page_did_not_change_its_promise(self):
+        """Переезд на общий шаблон — не повод потерять то, ради чего витрина
+        заводилась."""
+        t = client.get("/social-contract").text
+        assert "комисси" in t.lower()
+        assert "смет" in t.lower()
+        assert 'id="idea"' in t and "/api/demand" in t
