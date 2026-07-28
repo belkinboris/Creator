@@ -1388,6 +1388,32 @@ def example_page(request: Request):
     return HTMLResponse(_fill_server_values(html_out))
 
 
+_MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+               "августа", "сентября", "октября", "ноября", "декабря")
+
+
+def _doc_title_and_meta(purchase) -> tuple[str, str]:
+    """Заголовок листа и строка с датой — для распечатки, а не для экрана.
+
+    Разбор для соцконтракта человек несёт в комиссию НА БУМАГЕ, и лист был
+    озаглавлен «Отчёт по идее» независимо от того, что куплено, — включая
+    тариф, который мы сами называем «Бизнес-план» и под этим именем продаём.
+    Комиссия получала документ, чьё название не совпадает ни с чеком, ни с
+    тем, зачем его принесли. Названия берём из REPORT_PRICES: третья копия
+    разъехалась бы, как уже разъезжались цены (B5).
+
+    Дата — день оплаты. Документ без даты для комиссии не документ, а
+    выдумывать её неоткуда: она есть готовая.
+    """
+    if not purchase or purchase.status != "paid":
+        return "Отчёт по идее", ""
+    label = REPORT_PRICES.get(purchase.tier, {}).get("label", "Отчёт по идее")
+    d = purchase.created_at
+    made = f"{d.day} {_MONTHS_GEN[d.month - 1]} {d.year} г."
+    return label, (f'<p class="doc-meta">{html.escape(label)} по идее · подготовлен '
+                   f'{made} · projectsozdatel.ru</p>')
+
+
 @app.get("/report/{rid}", response_class=HTMLResponse)
 async def report_page(rid: str, request: Request):
     """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
@@ -1523,8 +1549,11 @@ async def report_page(rid: str, request: Request):
 
     _purpose = rec.purpose
     _tier_keys = section_keys(purchase.tier) if purchase else []
+    doc_title, doc_meta = _doc_title_and_meta(purchase)
     tpl = _static("report.html")
     html_out = (tpl
+        .replace("__DOC_TITLE__", html.escape(doc_title))
+        .replace("__DOC_META__", doc_meta)
         .replace("__CHECK_ID__", str(rid))
         .replace("__ACCESS_NOTE__", access_note)
         .replace("__OWNER_BAR__", owner_bar)

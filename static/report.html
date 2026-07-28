@@ -147,7 +147,11 @@
   footer a{color:var(--muted)}
   footer a:hover{color:var(--ink)}
 
+  /* Строка выходных данных нужна только на листе: на экране и так видно,
+     что отчёт открыт, а комиссии нужен документ с датой (C5). */
+  .doc-meta{display:none}
   @media print{
+    .doc-meta{display:block;color:#6F6A5C;font-size:12px;margin-top:6px}
     header, .report-nav, .pricing, footer, .no-print{display:none !important}
     body{background:#fff}
     .report-layout{grid-template-columns:1fr;margin-top:0}
@@ -166,7 +170,8 @@
 
 <main class="wrap">
   <div class="head">
-    <h1>Отчёт по идее</h1>
+    <h1>__DOC_TITLE__</h1>
+    __DOC_META__
     <p class="idea" id="idea">__IDEA__</p>
     __CHOSEN_BLOCK__
   </div>

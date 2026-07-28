@@ -3788,6 +3788,8 @@ class TestNoHardcodedServerValuesInStatic:
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
             # страница подтверждения входа -- заполняет _verify_page
             "__HEADING__", "__LEAD__", "__WHO__", "__ACTION__", "__FINE__",
+            # заголовок и выходные данные листа -- _doc_title_and_meta
+            "__DOC_TITLE__", "__DOC_META__",
         }
         filled = set(re.findall(r'\("(__[A-Z0-9_]+__)"',
                                 inspect.getsource(m._fill_server_values)))
@@ -6597,3 +6599,103 @@ class TestNextStepSpeaksToTheBuyer:
     def test_cabinet_renders_the_link_not_the_path(self):
         assert "next_link" in _read_static("account.html")
         assert "next_link" in _read_static("desk.html")
+
+
+class TestPrintedPlanLooksLikeADocument:
+    """C5: распечатанный бизнес-план не выглядел документом.
+
+    Найдено кастдев-проходом 2026-07-28 по пути соцконтракта: человек несёт
+    разбор в соцзащиту, и комиссии он нужен НА БУМАГЕ — кнопка «Скачать PDF»
+    для этой аудитории не украшение, а способ доставки.
+
+    Печать сама по себе работает (`@media print` прячет шапку, оглавление и
+    витрину тарифов, все разделы уходят на лист). Но лист был озаглавлен
+    **«Отчёт по идее»** независимо от того, что человек купил, — включая тариф,
+    который мы сами называем «Бизнес-план» и под этим именем продаём. Комиссия
+    получала документ, название которого не совпадает ни с чеком, ни с тем,
+    зачем его принесли.
+
+    И на листе **не было даты**. Документ без даты для комиссии — не документ;
+    дата у нас есть готовая, это день оплаты разбора.
+    """
+
+    def _buy(self, purpose="social_contract", tier="full"):
+        import app.main as m
+        from app.main import DemandCheck, ReportPurchase, Session, engine
+        data = {"formulations": [{"phrase": "ф", "count": 480}],
+                "verdict": {"level": "niche", "text": "т"},
+                "competitors": {"found": 9, "top": []},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": ""}],
+                "overall": {"value": 4, "weakest": "Спрос"}}
+        with Session(engine) as s:
+            c = DemandCheck(idea="Груминг с выездом", purpose=purpose,
+                            result_json=json.dumps(data, ensure_ascii=False))
+            s.add(c); s.commit(); s.refresh(c)
+            p = ReportPurchase(check_id=c.id, idea=c.idea, tier=tier, status="paid",
+                               contact="m@example.com", amount=2990,
+                               report_json=json.dumps({"viability_score": 60,
+                                                       "viability_summary": "с",
+                                                       "top_risks": [], "sections": []},
+                                                      ensure_ascii=False))
+            s.add(p); s.commit(); s.refresh(p)
+            return c.public_id, p.access_token, p.created_at
+
+    def test_full_tier_is_titled_as_the_business_plan_that_was_bought(self):
+        pid, tok, _ = self._buy(tier="full")
+        t = client.get(f"/report/{pid}?t={tok}").text
+        assert "<h1>Бизнес-план</h1>" in t, t[t.find("<h1"):t.find("<h1") + 120]
+
+    def test_quick_tier_keeps_its_own_name(self):
+        pid, tok, _ = self._buy(tier="quick")
+        t = client.get(f"/report/{pid}?t={tok}").text
+        assert "<h1>Быстрый разбор</h1>" in t
+
+    def test_names_come_from_the_price_list_not_from_the_template(self):
+        """Третья копия названий тарифов разъехалась бы, как уже разъезжались
+        цены (B5): заголовок берётся из REPORT_PRICES."""
+        import app.main as m
+        for tier, cfg in m.REPORT_PRICES.items():
+            pid, tok, _ = self._buy(tier=tier)
+            assert f"<h1>{cfg['label']}</h1>" in client.get(f"/report/{pid}?t={tok}").text
+
+    def test_unpaid_teaser_is_not_called_a_business_plan(self):
+        """До оплаты человек видит тизер — называть его купленным тарифом
+        значит обещать то, чего он ещё не получил (принцип 3)."""
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            c = DemandCheck(idea="Идея без покупки",
+                            result_json=json.dumps({"formulations": [], "verdict": {},
+                                                    "competitors": {}, "scores": [],
+                                                    "overall": {}}, ensure_ascii=False))
+            s.add(c); s.commit(); s.refresh(c)
+            pid = c.public_id
+        t = client.get(f"/r/{pid}").text and client.get(f"/report/{pid}").text
+        assert "<h1>Бизнес-план</h1>" not in t
+        assert "<h1>Отчёт по идее</h1>" in t
+
+    def test_printed_page_carries_the_date_it_was_bought(self):
+        pid, tok, made = self._buy()
+        t = client.get(f"/report/{pid}?t={tok}").text
+        assert "doc-meta" in t, "на листе нет строки с датой"
+        assert f"{made.day} " in t or f"{made.day:02d}" in t, made
+
+    def test_date_line_is_hidden_on_screen_and_shown_in_print(self):
+        """На экране дата лишняя — там и так видно, что отчёт открыт. Нужна
+        она ровно на листе, который уходит в комиссию."""
+        t = _read_static("report.html")
+        assert ".doc-meta{display:none}" in t.replace(" ", "")
+        assert ".doc-meta" in t.split("@media print")[1]
+
+    def test_unpaid_teaser_has_no_date_line(self):
+        """Тизер не документ, и датировать его нечем."""
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            c = DemandCheck(idea="Ещё идея без покупки",
+                            result_json=json.dumps({"formulations": [], "verdict": {},
+                                                    "competitors": {}, "scores": [],
+                                                    "overall": {}}, ensure_ascii=False))
+            s.add(c); s.commit(); s.refresh(c)
+            pid = c.public_id
+        assert 'class="doc-meta"' not in client.get(f"/report/{pid}").text
