@@ -88,6 +88,8 @@
   .bar{height:6px;background:var(--line);border-radius:99px;overflow:hidden}
   .bar i{display:block;height:100%;background:var(--marker);border-radius:99px}
   .verdict{font:600 13px "IBM Plex Mono",monospace}
+  .stale{border-left:3px solid var(--warn);padding:2px 0 2px 12px;margin:0 0 10px;
+    font-size:13px;color:var(--muted)}
   .next{border-left:3px solid var(--marker);padding:2px 0 2px 12px;font-size:14px}
   .next span{display:block;font:600 10px "IBM Plex Mono",monospace;
     text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px}
@@ -445,9 +447,13 @@ async function load(){
       <div class="verdict">${s.verdict}</div>
       <div class="next"><span>следующий шаг</span>${s.next_step}${s.next_link
         ? ` <a href="${s.next_link.href}">${s.next_link.text} →</a>` : ''}</div>
+      ${s.landing_stale ? `<div class="stale">Страница собрана по старому шаблону —
+        правки движка на неё не попали. Пересборка меняет то, что видят люди,
+        поэтому решаете вы.</div>` : ''}
       <div class="acts">
         <button class="btn" onclick="location.href='${s.project_url}?key='+encodeURIComponent(KEY)">Открыть проект</button>
-        <button class="btn ghost" onclick="window.open('${s.landing_url}','_blank')">Лендинг</button>
+        <button class="btn ghost" onclick="window.open('${s.landing_url}','_blank')">Проверочная страница</button>
+        ${s.landing_stale ? `<button class="btn ghost" onclick="refreshLanding('${s.idea_id}')">Пересобрать страницу</button>` : ''}
         <button class="btn ghost" onclick="del('${s.idea_id}')">Удалить</button>
       </div>`;
     g.appendChild(el);
@@ -512,6 +518,15 @@ async function load(){
 
   loadOrders();
 }
+async function refreshLanding(id){
+  if (!confirm('Пересобрать проверочную страницу по текущему шаблону? '
+             + 'Если по ней уже идёт реклама, люди увидят обновлённую версию.')) return;
+  const r = await fetch(`/api/projects/${id}/refresh`, {method:'POST', headers:{'X-Owner-Key':KEY}});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.ok) { alert(d.detail || d.error || 'Не получилось пересобрать'); return; }
+  load();
+}
+
 async function del(id){
   if(!confirm(`Удалить проверку «${id}» вместе с событиями?`)) return;
   await fetch(`/api/projects/${id}`,{method:"DELETE",headers:{"X-Owner-Key":KEY}}); load();

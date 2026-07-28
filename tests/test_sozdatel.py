@@ -6892,3 +6892,105 @@ class TestEngineErrorsAreHumanReadable:
                         if w in txt:
                             bad.append(f"{name}:{node.lineno} → {txt}")
         assert not bad, "\n".join(bad)
+
+
+class TestOwnerCanSeeAndFixStaleLandings:
+    """A20: правка шаблона не доходила до уже запущенных страниц, и владелец
+    об этом не знал.
+
+    `landing_html` рендерится и кладётся в БД **в момент запуска** проекта.
+    Значит любая правка шаблона действует только на будущие запуски, а живые
+    страницы остаются какими были. Само по себе это защитимо: менять страницу
+    под работающей рекламой значит менять то, что измеряешь, — плейбук прямо
+    просит ничего не трогать во время проверки.
+
+    Не защитимо другое: **владелец не мог ни узнать, что страница устарела, ни
+    обновить её**. Перезапуск требовал вручную собрать POST `/api/launch` с
+    полным JSON варианта.
+
+    Цена вопроса не теоретическая. A18 убрала со страницы рендер-блокирующий
+    запрос шрифтов на чужой домен: замер показал 8,07 с белого экрана, когда
+    хост молчит. Исправление лежит в шаблоне — и **не доходит** до тех, за
+    чей трафик уже платят. То же с пилюлей-бейджем (C4) и любой будущей
+    правкой.
+
+    Теперь у проекта хранится отпечаток шаблона, из которого он собран,
+    `/api/cabinet` показывает `landing_stale`, а `POST
+    /api/projects/{id}/refresh` пересобирает страницу из сохранённого варианта.
+    Обновление — ДЕЙСТВИЕ ВЛАДЕЛЬЦА, а не тихий автопересбор: он должен видеть,
+    что вмешивается в идущую проверку.
+    """
+
+    def _launch(self, idea_id="stale1"):
+        r = client.post("/api/launch", headers=OWNER, json={
+            "idea_text": "Идея для проверки устаревания",
+            "offer": dict(VALID_OFFER, idea_id=idea_id)})
+        assert r.status_code == 200, r.text
+        return idea_id
+
+    def _make_stale(self, idea_id):
+        """Так выглядит страница, собранная до правки шаблона."""
+        from app.main import SmokeProject, Session, engine, select
+        with Session(engine) as s:
+            proj = s.exec(select(SmokeProject).where(
+                SmokeProject.idea_id == idea_id)).first()
+            proj.landing_html = proj.landing_html.replace(
+                '<link rel="stylesheet" href="/fonts/fonts.css">',
+                '<link href="https://fonts.googleapis.com/css2?family=Manrope" rel="stylesheet">')
+            proj.template_hash = "старый-отпечаток"
+            s.add(proj); s.commit()
+
+    def _card(self, idea_id):
+        cab = client.get("/api/cabinet", headers=OWNER).json()
+        return [x for x in cab["smoke"] if x["idea_id"] == idea_id][0]
+
+    def test_fresh_launch_is_not_marked_stale(self):
+        assert self._card(self._launch("stale_fresh"))["landing_stale"] is False
+
+    def test_page_built_before_the_fix_is_marked_stale(self):
+        idea_id = self._launch("stale_old")
+        self._make_stale(idea_id)
+        assert self._card(idea_id)["landing_stale"] is True
+
+    def test_projects_launched_before_this_feature_count_as_stale(self):
+        """У старых записей отпечатка нет вовсе — молчать о них нельзя."""
+        from app.main import SmokeProject, Session, engine, select
+        idea_id = self._launch("stale_nohash")
+        with Session(engine) as s:
+            proj = s.exec(select(SmokeProject).where(
+                SmokeProject.idea_id == idea_id)).first()
+            proj.template_hash = ""
+            s.add(proj); s.commit()
+        assert self._card(idea_id)["landing_stale"] is True
+
+    def test_refresh_rebuilds_the_page_from_the_saved_offer(self):
+        idea_id = self._launch("stale_fix")
+        self._make_stale(idea_id)
+        assert "fonts.googleapis.com" in client.get(f"/l/{idea_id}").text
+        r = client.post(f"/api/projects/{idea_id}/refresh", headers=OWNER)
+        assert r.status_code == 200, r.text
+        page = client.get(f"/l/{idea_id}").text
+        assert "fonts.googleapis.com" not in page
+        assert "/fonts/fonts.css" in page
+        assert self._card(idea_id)["landing_stale"] is False
+
+    def test_refresh_keeps_the_owners_own_name(self):
+        """Переименование живёт на проекте, а не в варианте — пересбор не
+        должен возвращать машинное имя."""
+        idea_id = self._launch("stale_named")
+        client.patch(f"/api/projects/{idea_id}", headers=OWNER, json={"name": "ОтзоВик"})
+        self._make_stale(idea_id)
+        client.post(f"/api/projects/{idea_id}/refresh", headers=OWNER)
+        assert "<title>ОтзоВик</title>" in client.get(f"/l/{idea_id}").text
+
+    def test_refresh_is_owner_only(self):
+        idea_id = self._launch("stale_guard")
+        assert client.post(f"/api/projects/{idea_id}/refresh").status_code == 401
+
+    def test_refresh_of_unknown_project_is_404(self):
+        assert client.post("/api/projects/no-such/refresh", headers=OWNER).status_code == 404
+
+    def test_desk_shows_the_warning_and_the_button(self):
+        text = _read_static("desk.html")
+        assert "landing_stale" in text
+        assert "refresh" in text

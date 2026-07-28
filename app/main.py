@@ -20,6 +20,7 @@ ANTHROPIC_API_KEY), DATABASE_URL (по умолчанию sqlite).
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
@@ -129,6 +130,11 @@ class SmokeProject(SQLModel, table=True):
     idea_text: str
     offer_json: str          # выбранный оффер целиком (для повторных генераций)
     landing_html: str        # захощенный лендинг
+    # Отпечаток шаблона, из которого страница собрана. Правка шаблона живые
+    # страницы НЕ трогает (и не должна: менять страницу под работающей
+    # рекламой значит менять то, что измеряешь). Но владелец обязан видеть,
+    # что страница отстала, и уметь пересобрать её сам -- A20.
+    template_hash: str = ""
     click_target: int = CLICK_TARGET
     lead_rate_signal: float = SIGNAL_RATE
     lead_rate_dead: float = DEAD_RATE
@@ -308,6 +314,7 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS public_id VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS template_hash VARCHAR DEFAULT ''"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -1711,11 +1718,16 @@ def diag_mail(request: Request, to: str = ""):
 _landing_tpl: Optional[str] = None
 
 
-def render_landing(offer: dict) -> str:
+def _landing_template() -> str:
+    """Шаблон проверочной страницы -- один раз за жизнь процесса, как _static()."""
     global _landing_tpl
-    if _landing_tpl is None:  # читаем с диска один раз за жизнь процесса, как и _static()
-        _landing_tpl = (BASE_DIR / "landing_template.html").read_text()
-    tpl = _landing_tpl
+    if _landing_tpl is None:
+        _landing_tpl = (BASE_DIR / "landing_template.html").read_text(encoding="utf-8")
+    return _landing_tpl
+
+
+def render_landing(offer: dict) -> str:
+    tpl = _landing_template()
     pains_html = "".join(
         f"<div><h2>{p['h2']}</h2><p>{p['p']}</p></div>" for p in offer["pains"]
     )
@@ -1746,6 +1758,16 @@ LAUNCH_REQUIRED_FIELDS = ("idea_id", "product_name", "h1", "sub", "pains",
                           "demo_left_label", "demo_left_text", "demo_right_text", "eyebrow")
 
 
+def _template_hash() -> str:
+    """Отпечаток текущего шаблона проверочной страницы.
+
+    Сравнение с сохранённым отвечает на вопрос «эта живая страница собрана до
+    правки или после». Читаем через `_static`, то есть из того же кеша, что и
+    рендер -- иначе отпечаток и страница разъехались бы (A20).
+    """
+    return hashlib.sha256(_landing_template().encode("utf-8")).hexdigest()[:16]
+
+
 def _launch_offer(s: Session, offer: dict, idea_text: str, contact: str = "") -> SmokeProject:
     """Общая логика запуска проекта -- вызывающая сторона уже проверила
     LAUNCH_REQUIRED_FIELDS. contact, если передан, привязывает проект к
@@ -1754,6 +1776,7 @@ def _launch_offer(s: Session, offer: dict, idea_text: str, contact: str = "") ->
     existing = s.exec(select(SmokeProject).where(SmokeProject.idea_id == offer["idea_id"])).first()
     if existing:
         existing.landing_html = html
+        existing.template_hash = _template_hash()
         existing.offer_json = json.dumps(offer, ensure_ascii=False)
         if contact:
             existing.contact = contact
@@ -1764,6 +1787,7 @@ def _launch_offer(s: Session, offer: dict, idea_text: str, contact: str = "") ->
         idea_text=idea_text[:2000],
         offer_json=json.dumps(offer, ensure_ascii=False),
         landing_html=html,
+        template_hash=_template_hash(),
         click_target=int(offer.get("click_target", 40)),
         lead_rate_signal=float(offer.get("lead_rate_signal", 0.08)),
         lead_rate_dead=float(offer.get("lead_rate_dead", 0.04)),
@@ -1942,6 +1966,10 @@ def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
             "next_step": next_step,
             "next_link": next_link,
             "progress": min(100, round(views / p.click_target * 100)) if p.click_target else 0,
+            # Страница собрана из устаревшего шаблона. Показываем ТОЛЬКО
+            # владельцу (см. /api/cabinet): покупателю это ни о чём не говорит,
+            # а чинит всё равно владелец кнопкой (A20).
+            "landing_stale": p.template_hash != _template_hash(),
             "landing_url": f"/l/{p.idea_id}",
             "project_url": f"/p/{p.idea_id}"}
 
@@ -2046,6 +2074,38 @@ def rename_project(idea_id: str, data: RenameIn, request: Request):
             f"<title>{old_name}</title>", f"<title>{name}</title>")
         s.add(proj); s.commit()
     return {"ok": True, "name": name}
+
+
+@app.post("/api/projects/{idea_id}/refresh")
+def refresh_landing(idea_id: str, request: Request):
+    """Пересобрать проверочную страницу из сохранённого варианта.
+
+    Правка шаблона не догоняет уже запущенные страницы: `landing_html` пишется
+    в БД в момент запуска. Молча пересобирать нельзя -- страница может стоять
+    под работающей рекламой, а менять её во время проверки значит менять то,
+    что измеряешь (об этом же плейбук просит и самого покупателя). Поэтому
+    решение принимает владелец, а мы лишь показываем, что страница отстала.
+
+    Имя проекта живёт на самом проекте, а не в варианте: владелец мог
+    переименовать его после запуска (PATCH /api/projects/{id}), и пересбор не
+    должен возвращать машинное название.
+    """
+    _check_owner(request)
+    with Session(engine) as s:
+        proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
+        if proj is None:
+            raise HTTPException(404, "проект не найден")
+        try:
+            offer = json.loads(proj.offer_json)
+        except ValueError:
+            raise HTTPException(400, "у проекта не сохранён вариант, из которого он собран")
+        if not isinstance(offer, dict) or not all(offer.get(k) for k in LAUNCH_REQUIRED_FIELDS):
+            raise HTTPException(400, "у проекта не сохранён вариант, из которого он собран")
+        offer = {**offer, "product_name": proj.product_name}
+        proj.landing_html = render_landing(offer)
+        proj.template_hash = _template_hash()
+        s.add(proj); s.commit()
+    return {"ok": True, "landing_url": f"/l/{idea_id}"}
 
 
 class ProjectContactIn(BaseModel):
