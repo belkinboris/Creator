@@ -123,8 +123,24 @@ with Session(engine) as s:
                              {"key": "summary", "title": "Резюме проекта",
                               "body": "Спрос подтверждён цифрами Вордстата: " + "текст разбора. " * 40}]},
                              ensure_ascii=False)))
+    # Проверочную страницу собираем НАСТОЯЩИМ рендером, а не заглушкой
+    # «<h1>тест</h1>»: с заглушкой сторожа по /l/ проверяли пустоту и зеленели,
+    # ничего не увидев (тот же урок, что в A13 и A19).
+    from app.main import render_landing
+    OFFER = {"angle": "Для тех, кто делает ремонт", "idea_id": "sweep1",
+             "product_name": "Шторы за неделю, а не за месяц",
+             "eyebrow": "Семьи 30-45 лет, ремонт в квартире",
+             "h1": "Шторы <em>за неделю</em>, а не за месяц",
+             "sub": "Приезжаем с образцами, снимаем мерки дома, шьём за 7 дней",
+             "pains": [{"h2": "Ателье срывают сроки", "p": "Обещают три недели, шьют полтора месяца."},
+                       {"h2": "Не тот оттенок", "p": "На экране один цвет, в комнате другой."},
+                       {"h2": "Непонятна цена", "p": "Смету называют уже после замера."}],
+             "demo_left_label": "Ваше окно", "demo_left_text": "Ширина 180, высота 260, тюль",
+             "demo_right_text": "Смета: ткань 6 400 руб, пошив 3 200 руб, срок 7 дней",
+             "direct_queries": ["пошив штор на заказ"] * 6}
     p = SmokeProject(idea_id="sweep1", product_name="Шторы за неделю, а не за месяц",
-                     idea_text=idea, offer_json="{}", landing_html="<h1>тест</h1>",
+                     idea_text=idea, offer_json=json.dumps(OFFER, ensure_ascii=False),
+                     landing_html=render_landing(OFFER),
                      contact="sweep@example.com")
     s.add(p); s.commit()
     for _ in range(52):
@@ -879,6 +895,67 @@ def test_mono_font_is_only_for_numbers(site, browser):
         _goto(page, site["base"] + "/account")
         page.wait_for_timeout(900)
         problems += _mono_problems(page, "кабинет")
+    finally:
+        ctx.close()
+    assert not problems, "\n".join(problems)
+
+
+# Пилюля-бейдж запрещена дизайн-системой (CLAUDE.md): скруглённый по высоте
+# прямоугольник с цветной заливкой или рамкой и текстом внутри. Ищем по
+# отрисованной странице — в CSS это три разных свойства в разных правилах.
+_PILL_PROBE = """() => {
+  const out = [];
+  for (const el of document.querySelectorAll('*')) {
+    const st = getComputedStyle(el);
+    const box = el.getBoundingClientRect();
+    if (!box.height || box.height > 60) continue;
+    const radius = parseFloat(st.borderTopLeftRadius) || 0;
+    const bw = parseFloat(st.borderTopWidth) || 0;
+    const bg = st.backgroundColor;
+    const painted = (bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') || bw > 0;
+    const txt = (el.innerText || '').trim();
+    if (radius >= box.height / 2 && painted && txt && txt.length < 60)
+      out.push({cls: String(el.className || el.tagName), text: txt.slice(0, 40)});
+  }
+  return out;
+}"""
+
+
+def test_no_pill_badges_anywhere(site, browser):
+    """Пилюли-бейджи запрещены дизайн-системой, но жили на проверочной
+    странице — единственной, которую видят посторонние люди и на которую
+    заказчик тратит рекламный бюджет. Шаблон лежит в `app/`, поэтому под
+    сторожа по `static/` не попадал (тот же слепой угол, что A14/A17/A18/A19).
+    """
+    ids = site["ids"]
+    pages = [
+        ("главная", "/"),
+        ("соцконтракт", "/social-contract"),
+        ("результат проверки", f"/r/{ids['business']}"),
+        ("отчёт", f"/report/{ids['business']}?key={OWNER_KEY}"),
+        ("плейбук Директа", "/guide/direct"),
+        ("проверочная страница", "/l/sweep1"),
+    ]
+    problems = []
+    for label, path in pages:
+        ctx, page = _open(browser, site["base"] + path, width=1000)
+        try:
+            page.wait_for_timeout(800)
+            for x in page.evaluate(_PILL_PROBE):
+                problems.append(f"{label}: пилюля-бейдж [{x['cls']}] «{x['text']}»")
+        finally:
+            ctx.close()
+    assert not problems, "\n".join(problems)
+
+
+def test_landing_keeps_mono_for_numbers_only(site, browser):
+    """Проверочная страница живёт по тем же правилам шрифта, что и остальные:
+    моно только для чисел. Под общий сторож она не попадала, потому что
+    собирается не из `static/`, а из шаблона в `app/`."""
+    ctx, page = _open(browser, site["base"] + "/l/sweep1", width=1000)
+    try:
+        page.wait_for_timeout(800)
+        problems = _mono_problems(page, "проверочная страница")
     finally:
         ctx.close()
     assert not problems, "\n".join(problems)

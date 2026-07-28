@@ -37,7 +37,7 @@
   body{background:var(--paper);color:var(--ink);font:400 17px/1.55 "IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
   .wrap{max-width:640px;margin:0 auto;padding:0 20px}
   header{padding:48px 0 8px}
-  .eyebrow{font:500 13px/1 "IBM Plex Mono",monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .eyebrow{font:600 13px/1 "IBM Plex Sans";letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
   h1{font:700 clamp(28px,6.4vw,40px)/1.15 "IBM Plex Sans",sans-serif;margin:14px 0 12px}
   h1 em{font-style:normal;color:var(--star)}
   .sub{color:var(--muted);font-size:18px;max-width:34em}
@@ -54,13 +54,17 @@
 
   /* Signature: живая карточка «отзыв → ответ» */
   .demo{margin:44px 0;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 8px 28px rgba(20,24,31,.06)}
-  .demo-head{padding:10px 16px;border-bottom:1px solid var(--line);font:500 12px/1 "IBM Plex Mono",monospace;color:var(--muted);display:flex;justify-content:space-between}
+  .demo-head{padding:10px 16px;border-bottom:1px solid var(--line);font:600 12px/1 "IBM Plex Sans";color:var(--muted);display:flex;justify-content:space-between}
   .review,.reply{padding:16px}
   .stars{color:var(--star);letter-spacing:2px;font-size:15px}
   .review p{margin-top:6px}
   .who{font-size:13px;color:var(--muted);margin-top:6px}
   .reply{border-top:1px dashed var(--line);background:#FBFDFC}
-  .reply .tag{display:inline-block;font:500 11px/1 "IBM Plex Mono",monospace;color:var(--reply);border:1px solid currentColor;border-radius:99px;padding:4px 9px;margin-bottom:8px}
+  /* Была пилюля-бейдж — скруглённый по высоте прямоугольник с цветной
+     рамкой. Дизайн-система запрещает их прямым текстом; осталась обычная
+     подпись: смысл тот же, «сайта от ИИ» меньше (C4). */
+  .reply .tag{display:block;font:600 11px/1 "IBM Plex Sans";letter-spacing:.06em;
+    text-transform:uppercase;color:var(--reply);margin-bottom:8px}
   .reply p{color:#243b30;min-height:4.6em}
   .caret{display:inline-block;width:2px;height:1em;background:var(--reply);vertical-align:-2px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
