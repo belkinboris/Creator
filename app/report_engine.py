@@ -411,7 +411,7 @@ async def generate_core(idea: str, demand_data: dict, tier: str = "full",
             return await generate_core(idea, demand_data, tier, chosen_offer, purpose,
                                        _post=_post, _attempt=2)
         raise ReportEngineError("Модель вернула неразборчивый ответ. Попробуйте ещё раз.")
-    except (httpx.HTTPError, httpx.TimeoutException) as e:
+    except (httpx.HTTPError, httpx.TimeoutException, llm_adapter.LLMAdapterError) as e:
         if _attempt == 1:
             return await generate_core(idea, demand_data, tier, chosen_offer, purpose,
                                        _post=_post, _attempt=2)
@@ -456,7 +456,7 @@ async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "
             return await generate_section(key, idea, demand_data, tier, chosen_offer,
                                           purpose, _post=_post, _attempt=2)
         raise ReportEngineError("Модель вернула неразборчивый ответ. Попробуйте ещё раз.")
-    except (httpx.HTTPError, httpx.TimeoutException) as e:
+    except (httpx.HTTPError, httpx.TimeoutException, llm_adapter.LLMAdapterError) as e:
         if _attempt == 1:
             return await generate_section(key, idea, demand_data, tier, chosen_offer,
                                           purpose, _post=_post, _attempt=2)

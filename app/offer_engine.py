@@ -76,7 +76,7 @@ SYSTEM = """Ты — продуктовый стратег Создателя, �
      "demo_right_tag": "...", "demo_right_text": "...",
      "demo_head_right": "...",
      "direct_queries": ["...", "..."],
-     "lead_rate_signal": 0.08, "lead_rate_dead": 0.04, "click_target": 40
+     "lead_rate_signal": 0.04, "lead_rate_dead": 0.02, "click_target": 40
    }, ... ровно 3 оффера ...
  ]
 }"""
@@ -120,8 +120,8 @@ def _validate(data: dict) -> dict:
         o.setdefault("demo_left_meta", "")
         o.setdefault("demo_right_tag", "результат · черновик готов")
         o.setdefault("demo_head_right", "готово за секунды")
-        o.setdefault("lead_rate_signal", 0.08)
-        o.setdefault("lead_rate_dead", 0.04)
+        o.setdefault("lead_rate_signal", 0.04)
+        o.setdefault("lead_rate_dead", 0.02)
         o.setdefault("click_target", 40)
     data.setdefault("sharpened_note", "")
     data.setdefault("warning", "")

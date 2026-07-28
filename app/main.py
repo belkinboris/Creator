@@ -93,8 +93,11 @@ PURPOSE_DEFAULT = "business"
 AD_BUDGET_HINT = "3–5 тысяч ₽"
 
 CLICK_TARGET = 40       # раньше этого числа визитов цифры -- шум, не результат
-SIGNAL_RATE = 0.08      # заявок/визитов, с которых интерес считается настоящим
-DEAD_RATE = 0.04        # и ниже -- интереса нет
+# A8: 8%/4% были ориентиром на тёплый трафик, для холодного Директа завышены --
+# владелец решил снизить перед началом рекламы (2026-07-28). Серая зона
+# сохранена той же относительной ширины (была 4-8%, стала 2-4%).
+SIGNAL_RATE = 0.04      # заявок/визитов, с которых интерес считается настоящим
+DEAD_RATE = 0.02        # и ниже -- интереса нет
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -1796,8 +1799,8 @@ def _launch_offer(s: Session, offer: dict, idea_text: str, contact: str = "") ->
         landing_html=html,
         template_hash=_template_hash(),
         click_target=int(offer.get("click_target", 40)),
-        lead_rate_signal=float(offer.get("lead_rate_signal", 0.08)),
-        lead_rate_dead=float(offer.get("lead_rate_dead", 0.04)),
+        lead_rate_signal=float(offer.get("lead_rate_signal", SIGNAL_RATE)),
+        lead_rate_dead=float(offer.get("lead_rate_dead", DEAD_RATE)),
         contact=contact,
     )
     s.add(proj); s.commit(); s.refresh(proj)
@@ -2254,7 +2257,7 @@ PRESET_OFFERS = [
         "direct_queries": ["ответы на отзывы вайлдберриз", "как отвечать на отзывы озон",
             "шаблоны ответов на отзывы покупателей", "ответ на негативный отзыв wildberries",
             "автоответ на отзывы маркетплейс", "сервис ответов на отзывы", "работа с отзывами wb"],
-        "lead_rate_signal": 0.08, "lead_rate_dead": 0.04, "click_target": 40,
+        "lead_rate_signal": 0.04, "lead_rate_dead": 0.02, "click_target": 40,
     },
     {
         "angle": "работа без договора = работа под честное слово",
@@ -2277,7 +2280,7 @@ PRESET_OFFERS = [
         "direct_queries": ["договор для самозанятого образец", "договор оказания услуг самозанятый",
             "договор с самозанятым шаблон", "как составить договор на услуги",
             "договор фрилансера с заказчиком", "договор подряда для самозанятых"],
-        "lead_rate_signal": 0.07, "lead_rate_dead": 0.035, "click_target": 40,
+        "lead_rate_signal": 0.035, "lead_rate_dead": 0.0175, "click_target": 40,
     },
 ]
 

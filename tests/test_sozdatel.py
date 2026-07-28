@@ -3542,7 +3542,7 @@ class TestNumbersExplainThemselves:
         assert _pct(SIGNAL_RATE) in signal["detail"]
         dead = compute_verdict(50, 1, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
         assert _pct(DEAD_RATE) in dead["detail"]
-        gray = compute_verdict(50, 3, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
+        gray = compute_verdict(100, 3, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
         assert _pct(DEAD_RATE) in gray["detail"] and _pct(SIGNAL_RATE) in gray["detail"]
 
     def test_verdict_has_no_forbidden_words_or_owner_language(self):
