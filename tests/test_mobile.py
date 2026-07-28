@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -135,6 +136,7 @@ with Session(engine) as s:
     s.add(MagicLinkToken(token="sweep_token", contact="sweep@example.com"))
     s.add(MagicLinkToken(token="sweep_token2", contact="sweep@example.com"))
     s.add(MagicLinkToken(token="sweep_token3", contact="sweep@example.com"))
+    s.add(MagicLinkToken(token="sweep_mono", contact="sweep@example.com"))
     # Ещё две проверки того же человека — чтобы в кабинете было что сравнивать
     # между собой (E4): порядок строк и есть ответ «какая идея сильнее».
     for name, sc, cnt in (("Слабая идея для сравнения", 2, 40),
@@ -808,3 +810,75 @@ def test_sharpen_card_reads_as_two_fields_not_one_broken_sentence(site, browser,
         _assert_clean(page, "карточки заострения", width)
     finally:
         ctx.close()
+
+
+# Моно-шрифт по дизайн-системе (CLAUDE.md): только числа, метка этапа и код.
+# Всё остальное моно-шрифтом -- та самая «каша шрифтов» на плотных страницах.
+_MONO_PROBE = """() => {
+  const out = [];
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while (n = walk.nextNode()) {
+    const t = (n.textContent || '').trim();
+    if (!t) continue;
+    const el = n.parentElement;
+    if (!el || !el.getBoundingClientRect().width) continue;
+    if (el.closest('code, pre, .code, .copy-box')) continue;   // код -- ему моно и положено
+    if (!/Mono/i.test(getComputedStyle(el).fontFamily || '')) continue;
+    out.push({text: t.slice(0, 70), cls: String(el.className || el.tagName)});
+  }
+  return out;
+}"""
+
+# Числа, деньги, проценты, диапазоны, дроби — и метка этапа как единственная
+# именованная роль, которой моно разрешён словами (см. CLAUDE.md).
+_MONO_OK = re.compile(r"^(?:Этап\s+\d+\s+из\s+\d+|[\d\s.,%/×—–\-₽]*)$")
+
+
+def _mono_problems(page, label):
+    return [f"{label}: моно-шрифтом набран текст [{x['cls']}] «{x['text']}»"
+            for x in page.evaluate(_MONO_PROBE) if not _MONO_OK.match(x["text"])]
+
+
+def test_mono_font_is_only_for_numbers(site, browser):
+    """Моно-шрифт вылезал далеко за числа: целая страница `/contacts` была
+    набрана им, вместе с именем ИП и названиями документов.
+
+    Правило дизайн-системы простое — моно только для чисел и метки «Этап N
+    из 7». Проверять его глазами бесполезно: шрифт задаётся в CSS, а видно
+    его только на отрисованной странице, поэтому смотрим вычисленный
+    font-family у каждого текстового узла.
+    """
+    ids = site["ids"]
+    pages = [
+        ("главная", "/"),
+        ("соцконтракт", "/social-contract"),
+        ("результат проверки", f"/r/{ids['business']}"),
+        ("отчёт", f"/report/{ids['business']}?key={OWNER_KEY}"),
+        ("плейбук Директа", "/guide/direct"),
+        ("страница проекта", f"/p/sweep1?key={OWNER_KEY}"),
+        ("реквизиты", "/contacts"),
+        ("оферта", "/oferta"),
+        ("соглашение", "/agreement"),
+        ("конфиденциальность", "/privacy"),
+    ]
+    problems = []
+    for label, path in pages:
+        ctx, page = _open(browser, site["base"] + path, width=1000)
+        try:
+            page.wait_for_timeout(900)
+            problems += _mono_problems(page, label)
+        finally:
+            ctx.close()
+
+    # Кабинет отдельно: он за входом, а нарушения там свои — подписи под
+    # числами и название этапа рядом с меткой.
+    ctx, page = _open(browser, site["base"] + "/", width=1000)
+    try:
+        _login(page, site["base"], "sweep_mono")
+        _goto(page, site["base"] + "/account")
+        page.wait_for_timeout(900)
+        problems += _mono_problems(page, "кабинет")
+    finally:
+        ctx.close()
+    assert not problems, "\n".join(problems)

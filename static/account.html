@@ -50,15 +50,18 @@
   .p{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:18px;margin-bottom:12px}
   .p h2{font-size:18px;font-weight:600;letter-spacing:-.01em;margin-bottom:10px}
   .stage-line{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
-  .stage-txt{font:600 12px "IBM Plex Mono",monospace;color:var(--muted)}
+  /* Моно — только самой метке «Этап N из 7»: название этапа это текст,
+     и моно-шрифтом оно превращало строку в кашу (B9). */
+  .stage-txt{font:600 12px "IBM Plex Sans";color:var(--muted)}
+  .stage-txt .stage-num{font-family:"IBM Plex Mono",monospace}
   .stage-bar{display:flex;gap:3px}
   .stage-bar i{flex:1;height:4px;border-radius:99px;background:var(--line);font-style:normal}
   .stage-bar i.done{background:var(--ink)}
   .nums{display:flex;gap:22px;margin-bottom:10px}
   .n .v{font:600 22px/1 "IBM Plex Mono",monospace}
-  .n .l{font:500 11px "IBM Plex Mono",monospace;text-transform:uppercase;
+  .n .l{font:500 11px "IBM Plex Sans";text-transform:uppercase;
     letter-spacing:.08em;color:var(--muted);margin-top:4px}
-  .verdict{font:600 13px "IBM Plex Mono",monospace;margin-bottom:8px}
+  .verdict{font:600 13px "IBM Plex Sans";margin-bottom:8px}
   .next{border-left:3px solid var(--marker);padding:2px 0 2px 12px;font-size:14px;color:var(--muted);margin-bottom:14px}
   .p .acts{display:flex;gap:8px;flex-wrap:wrap}
 
@@ -163,7 +166,7 @@ function stageBadge(stageIdx, name){
   // Кабинет покупателя показывает только проекты Создателя (SmokeProject) --
   // шкала всегда 7 шагов, в отличие от /desk, где смешаны ещё и внешние.
   const segs = Array.from({length:7}, (_,i)=> `<i class="${i<=stageIdx?'done':''}"></i>`).join('');
-  return `<div class="stage-line"><span class="stage-txt">Этап ${stageIdx+1} из 7 — ${escapeHtml(name)}</span><div class="stage-bar">${segs}</div></div>`;
+  return `<div class="stage-line"><span class="stage-txt"><span class="stage-num">Этап ${stageIdx+1} из 7</span> — ${escapeHtml(name)}</span><div class="stage-bar">${segs}</div></div>`;
 }
 
 (async function(){

@@ -45,9 +45,12 @@
   .big{font:600 clamp(40px,9vw,64px)/1.05 "IBM Plex Mono",monospace;margin:8px 0 2px}
   .big #views{background:linear-gradient(transparent 42%, var(--marker) 42%);padding:0 4px}
   .big small{font-size:.4em;color:var(--muted);font-weight:500}
+  /* Число цели набрано моно, слово при нём — обычный текст: моно только
+     для чисел, иначе плотный экран превращается в кашу шрифтов (B9). */
+  .big .unit{font-family:"IBM Plex Sans",system-ui,sans-serif}
   .card .next{margin-top:10px;color:var(--muted);font-size:15px}
   .verdict-line{display:inline-block;margin-top:12px;padding-left:10px;border-left:3px solid var(--line);
-    font:600 13px "IBM Plex Mono",monospace;letter-spacing:.02em;color:var(--muted)}
+    font:600 13px "IBM Plex Sans";letter-spacing:.02em;color:var(--muted)}
   .verdict-line.ok{border-color:var(--ok);color:var(--ok)}
   .verdict-line.bad{border-color:var(--bad);color:var(--bad)}
   .verdict-line.warn{border-color:var(--warn);color:var(--warn)}
@@ -108,7 +111,7 @@
 
   <div class="card">
     <div class="label">Цель этапа</div>
-    <div class="big"><span id="views">—</span><small> / <span id="target">—</span> визитов</small></div>
+    <div class="big"><span id="views">—</span><small> / <span id="target">—</span><span class="unit"> визитов</span></small></div>
     <div class="next" id="nextline">Что должно произойти для перехода: набрать визиты из Директа —
       и вердикт вынесется автоматически.</div>
     <div><span class="verdict-line" id="verdict">ЗАГРУЗКА…</span></div>

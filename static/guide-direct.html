@@ -25,7 +25,8 @@
   .head{padding:34px 0 8px}
   h1{font-size:clamp(23px,4.2vw,30px);font-weight:600;letter-spacing:-.015em;max-width:22em}
   .sub{color:var(--muted);font-size:16px;max-width:38em;margin-top:10px}
-  .crumbs{font:600 13px "IBM Plex Mono",monospace;color:var(--muted);padding-top:16px}
+  .crumbs{font:600 13px "IBM Plex Sans";color:var(--muted);padding-top:16px}
+  .crumbs .stage-num{font-family:"IBM Plex Mono",monospace}
   .crumbs .cur{color:var(--ink);background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
 
   .danger{border:1px solid var(--line);border-left:4px solid var(--bad);background:var(--box);
@@ -39,7 +40,7 @@
   .step p{color:var(--muted);font-size:15px;max-width:42em;margin-top:4px}
   .step .do{color:var(--ink);font-size:15px;max-width:42em}
   .step .do b{font-weight:600;background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
-  .kv{font:600 11px "IBM Plex Mono",monospace;letter-spacing:.08em;text-transform:uppercase;
+  .kv{font:600 11px "IBM Plex Sans";letter-spacing:.08em;text-transform:uppercase;
     color:var(--muted);display:block;margin:10px 0 2px}
   ul{margin:6px 0 0 18px;color:var(--muted);font-size:15px}
   li{margin:3px 0}
@@ -63,7 +64,7 @@
 </header>
 
 <main class="wrap">
-  <div class="crumbs"><span class="cur">Этап 3 из 7 — Тест на реальных людях</span></div>
+  <div class="crumbs"><span class="cur"><span class="stage-num">Этап 3 из 7</span> — Тест на реальных людях</span></div>
   <div class="head">
     <h1>Запускаем Яндекс Директ на проверочную страницу — <span class="hl">без лишних ошибок</span></h1>
     <p class="sub">Одна кампания, только Поиск, ключевые фразы из вашей проверки спроса. На каждом шаге — что нажать, что увидите и что дальше. Интерфейс Яндекса иногда меняет названия кнопок — ориентируйтесь на смысл шага.</p>
