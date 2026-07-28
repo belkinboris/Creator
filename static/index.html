@@ -40,6 +40,15 @@
   .nav a.link{color:var(--muted);text-decoration:none;font-size:14px}
   .nav a.link:hover{color:var(--ink);text-decoration:underline}
 
+  /* Переключатель витрин: собирается сервером из реестра аудиторий (F2).
+     Не пилюли и не вкладки-табы — простая строка ссылок, чтобы человек
+     сразу увидел, что мы и про него тоже. */
+  .aud-switch{max-width:760px;margin:0 auto;padding:14px 22px 0;
+    display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;font-size:14px}
+  .aud-tag{color:var(--muted);font-size:13px}
+  .aud-switch a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line)}
+  .aud-switch a:hover{color:var(--ink);border-color:var(--ink)}
+  .aud-cur{font-weight:600}
   .hero{padding-top:46px;padding-bottom:34px}
   /* Записка на 404: человек шёл по ссылке на чужую проверку и попал сюда.
      Подставляется сервером только на этом пути, на обычной главной её нет. */
@@ -160,6 +169,7 @@
 </header>
 
 <main>
+  __AUDIENCE_SWITCH__
   <section class="hero wrap">
     __LOST_NOTE__
     <h1>От идеи — до денег. Начнём с <span class="hl">проверки спроса</span>.</h1>

@@ -2512,6 +2512,34 @@ class ChosenOfferIn(BaseModel):
     offer: dict
 
 
+class PurposeIn(BaseModel):
+    purpose: str
+
+
+@app.post("/api/demand/{rid}/purpose")
+def demand_purpose(rid: int, data: PurposeIn):
+    """Сменить оптику разбора на уже посчитанной проверке.
+
+    Человек мог прийти не с той витрины — это обычное дело, если он нашёл нас
+    поиском, а не по объявлению. Гонять его через проверку заново незачем:
+    спрос уже посчитан, меняется только то, чьими глазами читать результат
+    (см. app/audiences.py). Ограничения доступа тут нет намеренно: адрес
+    проверки и так неугадываемый (E6), а сменить оптику — не то же, что
+    прочитать чужую идею; ничего нового смена не открывает.
+    """
+    if data.purpose not in audiences.keys():
+        return JSONResponse({"ok": False, "error": "Неизвестная аудитория."},
+                            status_code=400)
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."},
+                                status_code=404)
+        rec.purpose = data.purpose
+        s.add(rec); s.commit()
+    return {"ok": True, "purpose": data.purpose}
+
+
 @app.post("/api/demand/{rid}/chosen")
 def demand_chosen(rid: int, data: ChosenOfferIn, request: Request):
     """Запомнить, какой из трёх заострённых вариантов человек выбрал на /r/.
@@ -2659,12 +2687,19 @@ def guide_direct():
 
 @app.get("/social-contract", response_class=HTMLResponse)
 def social_contract_page():
-    """Отдельная посадочная страница под рекламу на аудиторию социального
-    контракта -- специально НЕ часть общего позиционирования сайта (см.
-    CLAUDE.md), чтобы не отпугивать массового пользователя упоминанием
-    грантов/соцконтракта. Ведёт в тот же бесплатный /api/demand -> /r/{id},
-    что и главная страница."""
-    return HTMLResponse(_with_server_values("social-contract.html"))
+    """Витрина под аудиторию социального контракта: те же цены и тот же
+    бесплатный /api/demand -> /r/{id}, что и на главной, но своя оптика
+    разбора (см. app/audiences.py).
+
+    Главная страница по-прежнему не говорит о соцконтракте с порога — незачем
+    сужать себя перед массовым посетителем. Но раньше эта витрина была
+    доступна ТОЛЬКО по ссылке из объявления, и это отдельный дефект (F2):
+    человек, которому нужно обоснование для комиссии, приходил на главную и
+    не понимал, что мы и про него тоже. Теперь на обеих витринах есть
+    переключатель.
+    """
+    return HTMLResponse(_with_server_values("social-contract.html",
+                                            audience="social_contract"))
 
 
 @app.get("/oferta", response_class=HTMLResponse)
@@ -2816,6 +2851,31 @@ def project_page(idea_id: str):
                            .replace("{{PRODUCT_NAME}}", proj.product_name))
 
 
+def _audience_switch_html(current: str) -> str:
+    """Переключатель витрин — собирается из реестра, а не пишется в каждой.
+
+    До этого `/social-contract` был доступен только по ссылке из объявления:
+    с сайта на него не попасть, а пришедший по объявлению не мог уйти обратно,
+    если ошибся витриной. Единственной ссылкой был логотип, который молча
+    уводил на «другой» сайт.
+
+    Витрин будет больше двух (студенты), поэтому разметка живёт здесь одна:
+    копия в каждой странице разъехалась бы так же, как разъезжались цены (B5)
+    и названия тарифов (B7). Текущая аудитория не ссылка — вести человека на
+    страницу, где он уже стоит, значит тратить его клик.
+    """
+    items = []
+    for a in audiences.AUDIENCES.values():
+        text = html.escape(a.switch_label)
+        if a.key == current:
+            items.append(f'<span class="aud-cur" aria-current="page">{text}</span>')
+        else:
+            href = f"/{a.slug}" if a.slug else "/"
+            items.append(f'<a href="{href}">{text}</a>')
+    return ('<nav class="aud-switch" aria-label="Кому это нужно">'
+            '<span class="aud-tag">Вы к нам зачем:</span>' + "".join(items) + "</nav>")
+
+
 def _fill_server_values(html: str) -> str:
     """Подставляет в статику всё, чему в коде есть единственный источник:
     цены, названия тарифов, пороги вердикта, рекламный бюджет.
@@ -2829,6 +2889,9 @@ def _fill_server_values(html: str) -> str:
     for slot, value in (
         # По умолчанию записки нет: её подставляет только _lost_page().
         ("__LOST_NOTE__", ""),
+        # Витрина, отданная не своим обработчиком (404-страница, пример),
+        # всё равно получает переключатель — с аудиторией по умолчанию.
+        ("__AUDIENCE_SWITCH__", _audience_switch_html(audiences.DEFAULT.key)),
         ("__CLICK_TARGET__", str(CLICK_TARGET)),
         ("__SIGNAL_PCT__", _pct(SIGNAL_RATE)),
         ("__DEAD_PCT__", _pct(DEAD_RATE)),
@@ -2852,8 +2915,9 @@ def _fill_server_values(html: str) -> str:
     return html
 
 
-def _with_server_values(name: str) -> str:
-    return _fill_server_values(_static(name))
+def _with_server_values(name: str, audience: str = "business") -> str:
+    return _fill_server_values(
+        _static(name).replace("__AUDIENCE_SWITCH__", _audience_switch_html(audience)))
 
 
 def _lost_page() -> HTMLResponse:

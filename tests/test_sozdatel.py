@@ -2184,11 +2184,30 @@ class TestSocialContractPage:
         assert "/api/demand" in text
         assert 'id="idea"' in text
 
-    def test_not_linked_from_homepage(self):
-        """Страница не часть общего позиционирования -- не должна светиться
-        в навигации главной, чтобы не отпугивать массового пользователя
-        упоминанием соцконтракта/грантов."""
-        assert "/social-contract" not in client.get("/").text
+    def test_homepage_positioning_does_not_start_with_social_contract(self):
+        """**Прежнее решение отменено 2026-07-28, и вот почему.**
+
+        Раньше здесь стояло «страница не должна светиться на главной вовсе» —
+        чтобы не сужать себя перед массовым посетителем упоминанием
+        соцконтракта. Опасение верное, но запрет оказался слишком широким:
+        человек, которому нужно обоснование для комиссии, приходил на главную,
+        читал про венчурную проверку идеи и уходил, не узнав, что мы и про
+        него (F2). Витрина была доступна ТОЛЬКО по ссылке из объявления.
+
+        Решение владельца: витрины публичны, но позиционирование главной не
+        меняется. Поэтому проверяем не «ссылки нет», а «ссылка есть только в
+        переключателе»: заголовок, подзаголовок и описание пути на главной
+        по-прежнему не говорят о соцконтракте.
+        """
+        import re
+        page = client.get("/").text
+        body = page[page.index("<main>"):]
+        switch = re.search(r'<nav class="aud-switch".*?</nav>', body, re.S)
+        assert switch, "переключателя аудитории нет"
+        without_switch = body.replace(switch.group(), "")
+        assert "/social-contract" not in without_switch
+        for word in ("соцконтракт", "социальн", "соцзащит", "комисси"):
+            assert word not in without_switch.lower(), word
 
     def test_uses_light_design_system(self):
         text = client.get("/social-contract").text
@@ -7078,3 +7097,100 @@ class TestAudienceLivesInOnePlace:
         labels = r.json()["audience_labels"]
         assert labels["business"] and labels["social_contract"]
         assert labels["social_contract"] != labels["business"]
+
+
+class TestVisitorCanFindHisOwnEntrance:
+    """F2: `/social-contract` был доступен только по ссылке из объявления.
+
+    С самого сайта на него не попасть: ни с главной, ни из подвала, ни из
+    результата проверки. Человек, которому нужно обоснование для комиссии
+    соцзащиты, приходит на главную и читает про венчурную проверку идеи —
+    и не понимает, что это про него тоже.
+
+    Обратное так же верно: пришедший по объявлению соцконтрактник не может
+    уйти на витрину фаундера, если ошибся. Единственная ссылка — логотип,
+    который молча уводит на «другой» сайт.
+
+    Витрин будет больше двух (F3, студенты), поэтому переключатель собирается
+    из реестра аудиторий на сервере и вставляется в страницы одним слотом.
+    Копия в каждой витрине разъехалась бы ровно так же, как разъезжались цены
+    (B5) и названия тарифов (B7).
+    """
+
+    def _switch(self, path):
+        import re
+        t = client.get(path).text
+        m = re.search(r'<nav class="aud-switch".*?</nav>', t, re.S)
+        assert m, f"на {path} нет переключателя аудитории"
+        return m.group()
+
+    def test_home_offers_the_other_entrances(self):
+        block = self._switch("/")
+        assert 'href="/social-contract"' in block
+
+    def test_social_contract_page_offers_the_way_back(self):
+        block = self._switch("/social-contract")
+        assert 'href="/"' in block
+
+    def test_current_audience_is_shown_but_not_a_link(self):
+        """Ссылка на страницу, где человек уже стоит, — шум и лишний клик."""
+        import re
+        block = self._switch("/social-contract")
+        assert 'href="/social-contract"' not in block
+        assert re.search(r'aria-current="page"', block), block
+
+    def test_every_audience_from_the_registry_is_offered(self):
+        """Новая аудитория обязана появиться в переключателе сама."""
+        from app.audiences import AUDIENCES
+        block = self._switch("/")
+        for a in AUDIENCES.values():
+            assert a.switch_label in block, a.key
+
+    def test_labels_speak_from_the_visitors_side(self):
+        """«business» и «social_contract» — наши слова. Человек про себя
+        говорит иначе (принцип 5)."""
+        from app.audiences import AUDIENCES
+        for a in AUDIENCES.values():
+            low = a.switch_label.lower()
+            assert a.key not in low
+            for bad in ("оффер", "лендинг", "аудитория", "purpose"):
+                assert bad not in low, (a.key, a.switch_label)
+
+    def test_switch_is_built_in_one_place(self):
+        """Разметка переключателя не должна лежать копией в витринах."""
+        for name in ("index.html", "social-contract.html"):
+            t = _read_static(name)
+            assert "__AUDIENCE_SWITCH__" in t, name
+            assert 'class="aud-switch"' not in t, name
+
+    def test_result_page_lets_you_switch_optics_without_rechecking(self):
+        """Спрос уже посчитан — гонять человека через проверку заново, чтобы
+        сменить оптику разбора, незачем."""
+        import app.main as m
+        rid = None
+
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "ф", "count": 480}], "best_phrase": "ф",
+                    "verdict": {"level": "niche", "text": "т"},
+                    "competitors": {"found": 9, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": ""}],
+                    "overall": {"value": 4, "weakest": "Спрос", "basis": "б"}}
+
+        import app.main
+        old = app.main.check_demand
+        app.main.check_demand = fake_check
+        try:
+            r = client.post("/api/demand", json={"idea": "Груминг с выездом на дом",
+                                                 "purpose": "business"})
+            rid = r.json()["id"]
+        finally:
+            app.main.check_demand = old
+        r = client.post(f"/api/demand/{rid}/purpose", json={"purpose": "social_contract"})
+        assert r.status_code == 200, r.text
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            assert s.get(DemandCheck, rid).purpose == "social_contract"
+
+    def test_switching_to_an_unknown_audience_is_refused(self):
+        assert client.post("/api/demand/999999/purpose",
+                           json={"purpose": "нет такой"}).status_code in (400, 404)

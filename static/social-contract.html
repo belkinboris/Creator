@@ -32,6 +32,15 @@
     padding-top:14px;padding-bottom:14px}
   .logo{font-weight:700;font-size:17px;color:var(--ink);text-decoration:none;letter-spacing:-.01em}
 
+  /* Переключатель витрин: собирается сервером из реестра аудиторий (F2).
+     Не пилюли и не вкладки-табы — простая строка ссылок, чтобы человек
+     сразу увидел, что мы и про него тоже. */
+  .aud-switch{max-width:760px;margin:0 auto;padding:14px 22px 0;
+    display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;font-size:14px}
+  .aud-tag{color:var(--muted);font-size:13px}
+  .aud-switch a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line)}
+  .aud-switch a:hover{color:var(--ink);border-color:var(--ink)}
+  .aud-cur{font-weight:600}
   .hero{padding-top:40px;padding-bottom:30px}
   h1{font-size:clamp(26px,4.6vw,34px);line-height:1.28;font-weight:600;letter-spacing:-.015em;max-width:19em}
   .sub{color:var(--muted);font-size:17px;max-width:38em;margin:14px 0 24px}
@@ -98,6 +107,7 @@
 </header>
 
 <main>
+  __AUDIENCE_SWITCH__
   <section class="hero wrap">
     <h1>Бизнес-план для социального контракта — с цифрами, которые <span class="hl">выдержат вопросы комиссии</span></h1>
     <p class="sub">Опишите идею — бесплатно покажем реальный спрос по данным Яндекса и список конкурентов. Эти цифры, а не общие фразы «рынок большой», лягут в основу расчётов вашего бизнес-плана.</p>
