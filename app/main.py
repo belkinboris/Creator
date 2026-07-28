@@ -562,7 +562,10 @@ def result_page(rid: str, request: Request):
     if redirect:
         return RedirectResponse(f"/r/{rec.public_id}", status_code=307)
     tpl = _static("result.html")
-    safe_json = rec.result_json.replace("</", "<\\/")
+    # Подписи шкал приводим к одному виду на выдаче: так чинятся и проверки,
+    # сохранённые до этой правки (B9).
+    polished = json.dumps(_polish_scores(json.loads(rec.result_json)), ensure_ascii=False)
+    safe_json = polished.replace("</", "<\\/")
     idea_json = json.dumps(rec.idea, ensure_ascii=False).replace("</", "<\\/")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rec.id))
@@ -723,6 +726,68 @@ REPORT_PRICES = {
 }
 
 
+_SENTENCE_END = ".!?…:"
+
+
+def _as_caption(text: str) -> str:
+    """Подпись под числом, а не предложение: без точки в конце.
+
+    Заметки к шкалам пишет модель, и пишет как придётся -- «Рынок растёт.» с
+    точкой рядом с «Начать можно одной» без. В сетке из четырёх ячеек это
+    читается как небрежность (B9). Восклицательный и вопросительный знаки не
+    трогаем: если они там есть, это часть смысла, а не пунктуационная случайность.
+    """
+    return str(text or "").strip().rstrip(".").strip()
+
+
+def _as_sentence(text: str) -> str:
+    """Тот же фрагмент, но отдельным абзацем -- там точка обязательна, иначе
+    абзац выглядит оборванным (тизер отчёта)."""
+    t = str(text or "").strip()
+    return t if not t or t[-1] in _SENTENCE_END else t + "."
+
+
+def _demand_caption(demand_data: dict) -> str:
+    """Подпись к шкале спроса -- из её же частотности, без участия модели.
+
+    `check_demand` кладёт сюда пустую строку: три остальные шкалы объясняет
+    модель, а спрос считается по данным, и объяснять его было некому. В
+    результате из четырёх ячеек одна стояла голой -- причём самая важная:
+    спрос единственный посчитан по реальным цифрам Яндекса и он же потолок
+    общего балла. Числа берём готовые, ничего не выдумываем (принцип 1).
+    """
+    known = [f["count"] for f in (demand_data.get("formulations") or [])
+             if f.get("count") is not None]
+    if not known:
+        return "Частотность недоступна"
+    return f"{max(known):,}".replace(",", "\u00a0") + " запросов в месяц"
+
+
+def _polish_scores(demand_data: dict) -> dict:
+    """Приводит подписи шкал к одному виду ПЕРЕД выдачей страницы.
+
+    Именно на выдаче, а не при записи: так чинятся и уже сохранённые проверки,
+    и правило живёт в одном месте на одном языке, а не копией в шаблоне.
+    """
+    scores = demand_data.get("scores")
+    if not isinstance(scores, list):
+        return demand_data
+    out = dict(demand_data)
+    fixed = []
+    for sc in scores:
+        if not isinstance(sc, dict):
+            fixed.append(sc)
+            continue
+        row = dict(sc)
+        note = _as_caption(row.get("note", ""))
+        if not note and row.get("key") == "demand":
+            note = _demand_caption(demand_data)
+        row["note"] = note
+        fixed.append(row)
+    out["scores"] = fixed
+    return out
+
+
 def _report_preview(demand_data: dict) -> dict:
     """Бесплатный тизер отчёта — из уже посчитанных данных проверки спроса,
     без новых вызовов LLM (заметки по шкалам уже сгенерированы бесплатным
@@ -736,7 +801,10 @@ def _report_preview(demand_data: dict) -> dict:
     top = max(known) if known else None
     comp = demand_data.get("competitors") or {}
     top_names = [c.get("domain") or c.get("title") or "" for c in (comp.get("top") or [])[:3]]
-    notes = {s["key"]: s.get("note", "") for s in (demand_data.get("scores") or [])}
+    # В тизере заметки идут отдельными абзацами -- там нужна точка, в отличие
+    # от подписи под числом на /r/ (см. _as_caption/_as_sentence).
+    notes = {s["key"]: _as_sentence(s.get("note", ""))
+             for s in (demand_data.get("scores") or [])}
     return {
         "best_count": top,
         "verdict_text": v.get("text", ""),

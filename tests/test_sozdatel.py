@@ -6357,3 +6357,99 @@ class TestFrequencyIsAttributedWithoutPointing:
         формулировкой»."""
         t = self._script()
         assert "Самую популярную из ваших формулировок" not in t
+
+
+class TestScaleCaptionsLookAlike:
+    """B9 (шаг 2): подписи под шкалами оценки выглядели набором обрывков.
+
+    Найдено на живой форме данных 2026-07-28, после жалобы владельца «сделай,
+    чтобы всё было единообразно». Два дефекта в одном месте:
+
+      · **«Спрос» — единственная из четырёх ячеек без подписи вообще.**
+        `check_demand` кладёт ей `note: ""` (три остальные пишет модель), и
+        человек видит три объяснённых числа и одно голое. Причём голым
+        оказывается самое важное: спрос — единственная шкала на реальных
+        данных Яндекса и одновременно потолок общего балла.
+        Фикстуры это прятали — в них у «Спроса» подпись была, чего реальный
+        движок не делает (тот же урок, что в A13: заглушка обязана совпадать
+        с настоящим поведением).
+      · **пунктуация вразнобой.** Модель пишет фрагменты как придётся:
+        «Рынок растёт.» с точкой, «Начать можно одной» без. Рядом в сетке это
+        читается как небрежность.
+
+    Правится на выдаче, а не при записи: тогда чинятся и уже сохранённые
+    проверки, и правило живёт в одном месте на одном языке. В ячейке подпись
+    работает как caption — точка в конце не нужна; в тизере отчёта те же
+    заметки идут отдельными абзацами, и там точка обязательна.
+    """
+
+    def _served(self, rec_id):
+        html_out = client.get(f"/r/{pub(rec_id)}").text
+        raw = html_out.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+        return json.loads(raw)
+
+    def _make(self, notes, count=480):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        data = {
+            "formulations": [{"phrase": "груминг с выездом", "count": count}],
+            "best_phrase": "груминг с выездом",
+            "verdict": {"level": "niche", "text": "Спрос небольшой."},
+            "competitors": {"found": 900, "top": [{"title": "Г", "domain": "g.ru"}]},
+            "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": notes[0]},
+                       {"key": "competition", "label": "Конкуренция", "value": 5, "note": notes[1]},
+                       {"key": "timing", "label": "Своевременность", "value": 8, "note": notes[2]},
+                       {"key": "execution", "label": "Реализуемость", "value": 8, "note": notes[3]}],
+            "overall": {"value": 4, "weakest": "Спрос", "basis": "б"},
+        }
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Груминг с выездом на дом", best_count=count,
+                              result_json=json.dumps(data, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id
+
+    def test_demand_scale_gets_a_caption_like_its_neighbours(self):
+        """Настоящий check_demand кладёт сюда пустую строку — значит подпись
+        обязан дописать тот, кто отдаёт страницу."""
+        rid = self._make(["", "Много мастеров", "Рынок растёт.", "Начать можно одной"])
+        notes = [s["note"] for s in self._served(rid)["scores"]]
+        assert all(notes), notes
+
+    def test_demand_caption_is_built_from_the_number_not_invented(self):
+        """Принцип 1: подпись к шкале спроса — это её же частотность."""
+        rid = self._make(["", "а", "б", "в"], count=2400)
+        demand = self._served(rid)["scores"][0]
+        # Неразрывный пробел -- тот же разделитель, что даёт toLocaleString('ru-RU')
+        # для частотностей выше по странице: число не должно рваться переносом.
+        assert "2\u00a0400" in demand["note"], demand["note"]
+
+    def test_missing_frequency_does_not_invent_a_caption(self):
+        """Нет данных — так и говорим, а не пишем «0 запросов»."""
+        rid = self._make(["", "а", "б", "в"], count=None)
+        demand = self._served(rid)["scores"][0]
+        assert "0" not in demand["note"]
+        assert "недоступн" in demand["note"].lower(), demand["note"]
+
+    def test_captions_do_not_end_with_a_period(self):
+        """В ячейке это подпись под числом, а не предложение: одни с точкой,
+        другие без — та самая «каша», на которую жаловался владелец."""
+        rid = self._make(["", "Много мастеров", "Рынок растёт.", "Начать можно одной"])
+        for s in self._served(rid)["scores"]:
+            assert not s["note"].endswith("."), s["note"]
+
+    def test_caption_keeps_its_meaning(self):
+        """Нормализация не должна съедать текст."""
+        rid = self._make(["", "Много частных мастеров.", "б", "в"])
+        assert self._served(rid)["scores"][1]["note"] == "Много частных мастеров"
+
+    def test_teaser_paragraphs_all_end_as_sentences(self):
+        """Те же заметки в тизере отчёта идут отдельными абзацами — там точка
+        обязательна, иначе абзац выглядит оборванным."""
+        import app.main as m
+        from app.main import Session, engine
+        rid = self._make(["", "Много мастеров", "Рынок растёт.", "Начать можно одной"])
+        with Session(engine) as s:
+            data = json.loads(s.get(m.DemandCheck, rid).result_json)
+        prev = m._report_preview(data)
+        for key in ("competition_note", "timing_note", "execution_note"):
+            assert prev[key].endswith("."), (key, prev[key])
