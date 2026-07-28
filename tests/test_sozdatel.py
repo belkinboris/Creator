@@ -6699,3 +6699,63 @@ class TestPrintedPlanLooksLikeADocument:
             s.add(c); s.commit(); s.refresh(c)
             pid = c.public_id
         assert 'class="doc-meta"' not in client.get(f"/report/{pid}").text
+
+
+class TestLandingDoesNotWaitForGoogle:
+    """A18: проверочная страница грузила шрифты с fonts.googleapis.com.
+
+    Найдено кастдев-проходом 2026-07-28. B6 убрала эту зависимость со ВСЕХ
+    страниц сайта — и промахнулась мимо одной: шаблон проверочной страницы
+    лежит в `app/`, а сторож смотрел `static/`. Ровно тот же слепой угол, что
+    в A14 («лендинг» в этом же файле) и A17 (запрещённые слова в `app/main.py`).
+    Третий раз подряд.
+
+    Промах пришёлся на единственную страницу, куда идёт ПЛАТНЫЙ трафик.
+    Замер (2026-07-28, Chromium, домен «молчит» 8 с): заголовок появляется
+    через **8,07 с**, `first-contentful-paint` не наступает вовсе — экран
+    белый всё это время. `display=swap` тут не спасает: он про подмену
+    шрифта, а рендер блокирует сам `<link rel=stylesheet>` в `<head>`.
+
+    Цена ошибки не косметическая. Человек платит нам 1490 ₽ и ещё 3–5 тысяч
+    Яндексу, посетитель уходит с белого экрана — а мы по этой конверсии
+    выносим вердикт «спроса нет» и говорим это заказчику как факт о рынке
+    (принципы 1 и 8).
+    """
+
+    def _html(self):
+        import app.main as m
+        return m.render_landing(VALID_OFFER)
+
+    def test_no_external_hosts_at_all(self):
+        html_out = self._html()
+        for bad in ("fonts.googleapis.com", "fonts.gstatic.com", "//cdn.",
+                    "https://", "http://"):
+            assert bad not in html_out, bad
+
+    def test_fonts_come_from_our_own_route(self):
+        assert '/fonts/fonts.css' in self._html()
+
+    def test_decorative_families_are_gone(self):
+        """Manrope/Onest/JetBrains у нас не лежат — оставить их в CSS значит
+        оставить страницу без заявленного шрифта и с чужим запросом."""
+        html_out = self._html()
+        for bad in ("Manrope", "Onest", "JetBrains"):
+            assert bad not in html_out, bad
+
+    def test_families_used_are_the_ones_we_actually_serve(self):
+        import re
+        from pathlib import Path
+        served = (Path(__file__).resolve().parents[1] / "static" / "fonts" / "fonts.css"
+                  ).read_text(encoding="utf-8")
+        have = set(re.findall(r"font-family:\s*['\"]([^'\"]+)['\"]", served))
+        used = set(re.findall(r"['\"]([A-Z][A-Za-z ]+)['\"]\s*,\s*(?:system-ui|sans-serif|monospace)",
+                              self._html()))
+        assert used, "в шаблоне не осталось ни одного именованного шрифта"
+        assert used <= have, f"шрифты, которых мы не отдаём: {used - have}"
+
+    def test_the_page_still_renders_its_content(self):
+        """Смена шрифтов не должна съесть саму страницу."""
+        html_out = self._html()
+        assert VALID_OFFER["h1"] in html_out
+        assert VALID_OFFER["pains"][0]["h2"] in html_out
+        assert 'href="/legal"' in html_out

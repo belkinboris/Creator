@@ -15,8 +15,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{PRODUCT_NAME}}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@700;800&family=Onest:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<!-- Шрифты только со своего домена (A18 в PRODUCT_ROADMAP): внешний
+     шрифтовой хост из России часто не отвечает, а тег стилей в head
+     рендер-блокирующий. Замер 2026-07-28: при молчащем хосте заголовок
+     показывался через 8,07 с, до этого экран полностью белый. Это
+     единственная страница, куда идёт ПЛАТНЫЙ трафик, и ушедший с белого
+     экрана посетитель превращается в наш же вердикт «спроса нет». Имя хоста
+     тут не пишем: оно уехало бы в разметку к каждому посетителю. -->
+<link rel="stylesheet" href="/fonts/fonts.css">
 <style>
   :root{
     --ink:#14181F;        /* чернильный: текст */
@@ -28,11 +34,11 @@
     --line:#E3E6EB;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--paper);color:var(--ink);font:400 17px/1.55 "Onest",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  body{background:var(--paper);color:var(--ink);font:400 17px/1.55 "IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
   .wrap{max-width:640px;margin:0 auto;padding:0 20px}
   header{padding:48px 0 8px}
-  .eyebrow{font:400 13px/1 "JetBrains Mono",monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-  h1{font:700 clamp(28px,6.4vw,40px)/1.15 "Manrope",sans-serif;margin:14px 0 12px}
+  .eyebrow{font:500 13px/1 "IBM Plex Mono",monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  h1{font:700 clamp(28px,6.4vw,40px)/1.15 "IBM Plex Sans",sans-serif;margin:14px 0 12px}
   h1 em{font-style:normal;color:var(--star)}
   .sub{color:var(--muted);font-size:18px;max-width:34em}
   /* Форма — выше сгиба: smoke-тест меряет заявки, а не скролл */
@@ -40,7 +46,7 @@
   @media(min-width:520px){form{flex-direction:row}}
   input[type=text]{flex:1;padding:15px 16px;font:inherit;border:1.5px solid var(--line);border-radius:10px;background:var(--card)}
   input[type=text]:focus{outline:2px solid var(--star);outline-offset:1px;border-color:var(--star)}
-  button{padding:15px 22px;font:600 17px "Onest",sans-serif;border:0;border-radius:10px;background:var(--ink);color:#fff;cursor:pointer}
+  button{padding:15px 22px;font:600 17px "IBM Plex Sans",sans-serif;border:0;border-radius:10px;background:var(--ink);color:#fff;cursor:pointer}
   button:hover{background:#000}
   button:focus-visible{outline:3px solid var(--star);outline-offset:2px}
   .fineprint{font-size:13px;color:var(--muted)}
@@ -48,20 +54,20 @@
 
   /* Signature: живая карточка «отзыв → ответ» */
   .demo{margin:44px 0;background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 8px 28px rgba(20,24,31,.06)}
-  .demo-head{padding:10px 16px;border-bottom:1px solid var(--line);font:400 12px/1 "JetBrains Mono",monospace;color:var(--muted);display:flex;justify-content:space-between}
+  .demo-head{padding:10px 16px;border-bottom:1px solid var(--line);font:500 12px/1 "IBM Plex Mono",monospace;color:var(--muted);display:flex;justify-content:space-between}
   .review,.reply{padding:16px}
   .stars{color:var(--star);letter-spacing:2px;font-size:15px}
   .review p{margin-top:6px}
   .who{font-size:13px;color:var(--muted);margin-top:6px}
   .reply{border-top:1px dashed var(--line);background:#FBFDFC}
-  .reply .tag{display:inline-block;font:400 11px/1 "JetBrains Mono",monospace;color:var(--reply);border:1px solid currentColor;border-radius:99px;padding:4px 9px;margin-bottom:8px}
+  .reply .tag{display:inline-block;font:500 11px/1 "IBM Plex Mono",monospace;color:var(--reply);border:1px solid currentColor;border-radius:99px;padding:4px 9px;margin-bottom:8px}
   .reply p{color:#243b30;min-height:4.6em}
   .caret{display:inline-block;width:2px;height:1em;background:var(--reply);vertical-align:-2px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
   @media(prefers-reduced-motion:reduce){.caret{display:none}}
 
   section.pain{margin:8px 0 40px;display:grid;gap:18px}
-  section.pain h2{font:600 19px "Onest",sans-serif}
+  section.pain h2{font:600 19px "IBM Plex Sans",sans-serif}
   section.pain p{color:var(--muted)}
   footer{padding:28px 0 44px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
 </style>
