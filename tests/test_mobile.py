@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -64,14 +65,18 @@ from app.main import (DemandCheck, ReportPurchase, SmokeProject, SmokeEvent,
                       MagicLinkToken, Session, engine)
 data = {
  "formulations": [{"phrase": "пошив штор и постельного белья на заказ", "count": 1200,
-                   "matched_phrase": "пошив штор на дому недорого"}],
+                   "matched_phrase": "пошив штор на дому недорого"},
+                  {"phrase": "сшить шторы на дому недорого", "count": 480}],
  "best_phrase": "пошив штор и постельного белья на заказ",
  "verdict": {"level": "niche", "text": "Спрос небольшой, но он есть: людей мало, и каждый клиент будет на счету."},
  "competitors": {"found": 15000, "top": [
     {"title": "Пошив штор на заказ в Москве — большой каталог тканей и бесплатный замер",
      "domain": "shtory-na-zakaz-v-moskve.example.ru"},
     {"title": "Ателье", "domain": "atelier.ru"}]},
- "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": "1 200 запросов в месяц"},
+ # note у "demand" ПУСТАЯ — так его и кладёт настоящий check_demand.
+ # Подпись дописывает сервер на выдаче (B9); фикстура с готовой подписью
+ # прятала бы ровно тот дефект, который чинили (урок A13).
+ "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""},
             {"key": "competition", "label": "Конкуренция", "value": 6, "note": "Есть сильные игроки, но ниша не забита"},
             {"key": "timing", "label": "Своевременность", "value": 7, "note": "Рынок готов сейчас"},
             {"key": "execution", "label": "Реализуемость", "value": 8, "note": "Можно начать одному, без вложений в производство"}],
@@ -91,12 +96,51 @@ with Session(engine) as s:
     s.add(ReportPurchase(check_id=out["business_id"], idea=idea, tier="full",
                          contact="sweep@example.com", status="paid", amount=2990,
                          is_example=True,
-                         report_json=json.dumps({"sections": [
+                         report_json=json.dumps({
+                             "viability_score": 65,
+                             "viability_summary": "Идея рабочая, но всё решает умение находить клиентов.",
+                             # Ровно столько рисков отдаёт полный тариф (_risk_count).
+                             # Тексты РАЗНОЙ длины намеренно: сетка обязана
+                             # оставаться ровной именно на неровном содержимом.
+                             "top_risks": [
+                                 {"title": "Высокая конкуренция",
+                                  "body": "В городе уже много мастеров, работающих через агрегаторы. "
+                                          "Чтобы привлечь клиентов, придётся предлагать более низкие "
+                                          "цены или уникальные услуги, что снизит маржинальность."},
+                                 {"title": "Нестабильный поток клиентов",
+                                  "body": "Спрос невелик, и колебания числа клиентов серьёзно влияют "
+                                          "на доход."},
+                                 {"title": "Зависимость от качества услуг",
+                                  "body": "В сфере услуг репутация критична. Один негативный отзыв "
+                                          "может отпугнуть потенциальных клиентов."},
+                                 {"title": "Затраты на маркетинг",
+                                  "body": "Для привлечения клиентов потребуются вложения в рекламу и "
+                                          "продвижение. Неправильный выбор каналов или неэффективная "
+                                          "кампания приведут к бесполезным тратам и снижению прибыли, "
+                                          "а проверить это можно только потратив деньги."},
+                             ],
+                             "sections": [
                              {"key": "summary", "title": "Резюме проекта",
                               "body": "Спрос подтверждён цифрами Вордстата: " + "текст разбора. " * 40}]},
                              ensure_ascii=False)))
+    # Проверочную страницу собираем НАСТОЯЩИМ рендером, а не заглушкой
+    # «<h1>тест</h1>»: с заглушкой сторожа по /l/ проверяли пустоту и зеленели,
+    # ничего не увидев (тот же урок, что в A13 и A19).
+    from app.main import render_landing
+    OFFER = {"angle": "Для тех, кто делает ремонт", "idea_id": "sweep1",
+             "product_name": "Шторы за неделю, а не за месяц",
+             "eyebrow": "Семьи 30-45 лет, ремонт в квартире",
+             "h1": "Шторы <em>за неделю</em>, а не за месяц",
+             "sub": "Приезжаем с образцами, снимаем мерки дома, шьём за 7 дней",
+             "pains": [{"h2": "Ателье срывают сроки", "p": "Обещают три недели, шьют полтора месяца."},
+                       {"h2": "Не тот оттенок", "p": "На экране один цвет, в комнате другой."},
+                       {"h2": "Непонятна цена", "p": "Смету называют уже после замера."}],
+             "demo_left_label": "Ваше окно", "demo_left_text": "Ширина 180, высота 260, тюль",
+             "demo_right_text": "Смета: ткань 6 400 руб, пошив 3 200 руб, срок 7 дней",
+             "direct_queries": ["пошив штор на заказ"] * 6}
     p = SmokeProject(idea_id="sweep1", product_name="Шторы за неделю, а не за месяц",
-                     idea_text=idea, offer_json="{}", landing_html="<h1>тест</h1>",
+                     idea_text=idea, offer_json=json.dumps(OFFER, ensure_ascii=False),
+                     landing_html=render_landing(OFFER),
                      contact="sweep@example.com")
     s.add(p); s.commit()
     for _ in range(52):
@@ -108,6 +152,7 @@ with Session(engine) as s:
     s.add(MagicLinkToken(token="sweep_token", contact="sweep@example.com"))
     s.add(MagicLinkToken(token="sweep_token2", contact="sweep@example.com"))
     s.add(MagicLinkToken(token="sweep_token3", contact="sweep@example.com"))
+    s.add(MagicLinkToken(token="sweep_mono", contact="sweep@example.com"))
     # Ещё две проверки того же человека — чтобы в кабинете было что сравнивать
     # между собой (E4): порядок строк и есть ответ «какая идея сильнее».
     for name, sc, cnt in (("Слабая идея для сравнения", 2, 40),
@@ -608,3 +653,321 @@ def test_paid_project_is_not_labelled_as_just_an_idea(site, browser):
         _assert_clean(page, "страница проекта, метка этапа")
     finally:
         ctx.close()
+
+
+@pytest.mark.parametrize("width", [1000, NARROW])
+def test_frequency_note_follows_the_number_it_explains(site, browser, width):
+    """B8. Разметку строит скрипт, а раскладку — CSS: подстрокой в шаблоне
+    это не проверить. Подпись объясняет ЧИСЛО (оно посчитано по подсказанной
+    Вордстатом формулировке, а не по той, что человек читает), поэтому она
+    обязана идти после числа при любой ширине. Раньше подпись стояла под
+    фразой и говорила «цифра справа» — на узком экране ряд перестраивается
+    в столбик, и указание било мимо."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}",
+                      width=width)
+    try:
+        page.wait_for_selector(".freq-match", timeout=10000)
+        note = page.locator(".freq-match").first
+        num = page.locator(".freq-num").first
+        assert "справа" not in note.inner_text(), note.inner_text()
+        assert "Вордстат" in note.inner_text()
+        nb, mb = num.bounding_box(), note.bounding_box()
+        assert mb["y"] >= nb["y"], f"{width}px: подпись выше числа {nb} {mb}"
+        # и она ближе к своему числу, чем к следующей строке частотности
+        rows = page.eval_on_selector_all(
+            ".freq-item", "e => e.map(x => x.getBoundingClientRect().top)")
+        assert len(rows) >= 2, rows
+        assert mb["y"] < rows[1], f"{width}px: подпись уехала в чужую строку"
+        _assert_clean(page, "частотность", width)
+    finally:
+        ctx.close()
+
+
+# ---------------------------------------------------------------------------
+# Сетки карточек: «ровно и красиво» — машинная проверка, а не глаз
+# ---------------------------------------------------------------------------
+
+# Ищем сетки НЕ по списку селекторов, а по признаку: display:grid, три и более
+# видимых ребёнка, и все они одной ширины. Второе условие отсекает раскладочные
+# сетки («30px 1fr» под номер и текст, «1fr auto» под строку со значением) --
+# там разная ширина колонок это и есть замысел. Остаются ровно карточные сетки,
+# то есть то, что владелец и называет «блоками».
+_FIND_CARD_GRIDS = """() => {
+  const out = [];
+  for (const g of document.querySelectorAll('*')) {
+    if (getComputedStyle(g).display !== 'grid') continue;
+    const kids = [...g.children].filter(c => {
+      const r = c.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+    if (kids.length < 3) continue;
+    const boxes = kids.map(c => c.getBoundingClientRect());
+    const w0 = boxes[0].width;
+    if (!boxes.every(b => Math.abs(b.width - w0) <= 2)) continue;   // раскладка, не карточки
+    const rows = {};
+    boxes.forEach(b => {
+      const k = Math.round(b.top);
+      (rows[k] = rows[k] || []).push(Math.round(b.height));
+    });
+    out.push({
+      name: (g.className && String(g.className).trim()) || g.tagName,
+      rows: Object.keys(rows).sort((a, b) => a - b).map(k => rows[k]),
+    });
+  }
+  return out;
+}"""
+
+
+def _grid_problems(page, label, width):
+    out = []
+    for g in page.evaluate(_FIND_CARD_GRIDS):
+        rows, name = g["rows"], g["name"]
+        for i, heights in enumerate(rows):
+            if len(set(heights)) > 1:
+                out.append(f"{label} на {width}px: .{name} — в ряду {i + 1} "
+                           f"разные высоты карточек {sorted(set(heights))}")
+        if len(rows) > 1 and len(rows[-1]) == 1 and len(rows[0]) > 1:
+            out.append(f"{label} на {width}px: .{name} — карточка-сирота в последнем "
+                       f"ряду (ряды по {[len(r) for r in rows]})")
+    return out
+
+
+@pytest.mark.parametrize("width", [1200, 900, 700, NARROW])
+def test_card_grids_stay_even(site, browser, width):
+    """Ни одна сетка карточек не должна выглядеть случайной ни на одной ширине.
+
+    Владелец поймал это глазами на живом отчёте: блок рисков верстался через
+    `auto-fit minmax(220px,1fr)`, и на промежуточной ширине окна выходило три
+    карточки в ряд плюс четвёртая одиноко под ними, с двумя третями пустоты
+    справа. На 1200 и 390 px тот же блок выглядел прилично — поэтому дефект и
+    дожил до прода: точечные скриншоты его не показывали.
+
+    Проверяем то, что вообще можно проверить машиной:
+      1. **нет карточки-сироты** — последний ряд не содержит одну карточку,
+         когда предыдущие ряды заполнены;
+      2. **в одном ряду карточки одной высоты** — иначе низ блока рвётся.
+
+    Ширины 900 и 700 взяты не для красоты: это те размеры окна, на которых
+    `auto-fit` меняет число колонок. Сетки ищутся на странице сами (см.
+    `_FIND_CARD_GRIDS`), так что новый блок попадает под проверку без правки
+    этого теста.
+    """
+    ids = site["ids"]
+    pages = [
+        ("главная", "/"),
+        ("соцконтракт", "/social-contract"),
+        ("результат проверки", f"/r/{ids['business']}"),
+        ("отчёт", f"/report/{ids['business']}?key={OWNER_KEY}"),
+        ("публичный пример", "/example"),
+        ("плейбук Директа", "/guide/direct"),
+    ]
+    problems = []
+    for label, path in pages:
+        ctx, page = _open(browser, site["base"] + path, width=width)
+        try:
+            page.wait_for_timeout(900)
+            problems += _grid_problems(page, label, width)
+        finally:
+            ctx.close()
+    assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("width", [1000, NARROW])
+def test_sharpen_card_reads_as_two_fields_not_one_broken_sentence(site, browser, width):
+    """B9. Карточку рисует скрипт, поэтому проверять подстрокой в шаблоне
+    бесполезно — смотрим, что человек реально читает.
+
+    Ответ `/api/sharpen` подменяем прямо в браузере: в dev нет ключей LLM, а
+    проверяем мы отрисовку, а не движок. Боль намеренно приходит так, как её
+    пишет модель, — объяснение отдельным предложением с заглавной буквы.
+    Раньше шаблон склеивал его с названием боли через « — », и получалось
+    «Ателье срывают сроки — Обещают три недели»: заглавная посреди строки.
+    """
+    offer = {
+        "angle": "Для тех, кто делает ремонт", "idea_id": "x1", "product_name": "П",
+        "eyebrow": "Семьи 30–45 лет", "h1": "Шторы за неделю", "sub": "Шьём за 7 дней",
+        "pains": [{"h2": "Ателье срывают сроки",
+                   "p": "Обещают три недели, шьют полтора месяца."}],
+        "demo_left_label": "л", "demo_left_text": "л", "demo_right_text": "п",
+        "direct_queries": ["а"] * 6,
+    }
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}", width=width)
+    try:
+        page.route("**/api/sharpen", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"ok": True, "sharpened_note": "", "warning": "",
+                             "offers": [offer]}, ensure_ascii=False)))
+        for _ in range(3):
+            btns = page.locator(".step-next .btn:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+        page.click("#sharpen-btn")
+        page.wait_for_selector(".sharp-pain", timeout=15000)
+        page.wait_for_timeout(300)
+
+        pain = page.locator(".sharp-pain").first
+        assert pain.inner_text().strip() == "Ателье срывают сроки", pain.inner_text()
+
+        row = page.locator(".sharp-meta-row").nth(1).inner_text()
+        assert "сроки — Обещают" not in row, row
+        assert "Обещают три недели, шьют полтора месяца." in row, row
+        # объяснение стоит ПОД названием, а не в одну строку с ним
+        nb = pain.bounding_box()
+        expl = page.evaluate("""() => {
+            const r = document.querySelectorAll('.sharp-meta-row')[1];
+            const t = document.createRange();
+            t.setStartAfter(r.querySelector('.sharp-pain'));
+            t.setEndAfter(r.lastChild);
+            return t.getBoundingClientRect().top;
+        }""")
+        assert expl >= nb["y"] + nb["height"] - 1, (expl, nb)
+        _assert_clean(page, "карточки заострения", width)
+    finally:
+        ctx.close()
+
+
+# Моно-шрифт по дизайн-системе (CLAUDE.md): только числа, метка этапа и код.
+# Всё остальное моно-шрифтом -- та самая «каша шрифтов» на плотных страницах.
+_MONO_PROBE = """() => {
+  const out = [];
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while (n = walk.nextNode()) {
+    const t = (n.textContent || '').trim();
+    if (!t) continue;
+    const el = n.parentElement;
+    if (!el || !el.getBoundingClientRect().width) continue;
+    if (el.closest('code, pre, .code, .copy-box')) continue;   // код -- ему моно и положено
+    if (!/Mono/i.test(getComputedStyle(el).fontFamily || '')) continue;
+    out.push({text: t.slice(0, 70), cls: String(el.className || el.tagName)});
+  }
+  return out;
+}"""
+
+# Числа, деньги, проценты, диапазоны, дроби — и метка этапа как единственная
+# именованная роль, которой моно разрешён словами (см. CLAUDE.md).
+_MONO_OK = re.compile(r"^(?:Этап\s+\d+\s+из\s+\d+|[\d\s.,%/×—–\-₽]*)$")
+
+
+def _mono_problems(page, label):
+    return [f"{label}: моно-шрифтом набран текст [{x['cls']}] «{x['text']}»"
+            for x in page.evaluate(_MONO_PROBE) if not _MONO_OK.match(x["text"])]
+
+
+def test_mono_font_is_only_for_numbers(site, browser):
+    """Моно-шрифт вылезал далеко за числа: целая страница `/contacts` была
+    набрана им, вместе с именем ИП и названиями документов.
+
+    Правило дизайн-системы простое — моно только для чисел и метки «Этап N
+    из 7». Проверять его глазами бесполезно: шрифт задаётся в CSS, а видно
+    его только на отрисованной странице, поэтому смотрим вычисленный
+    font-family у каждого текстового узла.
+    """
+    ids = site["ids"]
+    pages = [
+        ("главная", "/"),
+        ("соцконтракт", "/social-contract"),
+        ("результат проверки", f"/r/{ids['business']}"),
+        ("отчёт", f"/report/{ids['business']}?key={OWNER_KEY}"),
+        ("плейбук Директа", "/guide/direct"),
+        ("страница проекта", f"/p/sweep1?key={OWNER_KEY}"),
+        ("реквизиты", "/contacts"),
+        # Публичный пример — витрина: его читает тот, кто ещё не заплатил.
+        ("публичный пример", "/example"),
+        ("оферта", "/oferta"),
+        ("соглашение", "/agreement"),
+        ("конфиденциальность", "/privacy"),
+    ]
+    problems = []
+    for label, path in pages:
+        ctx, page = _open(browser, site["base"] + path, width=1000)
+        try:
+            page.wait_for_timeout(900)
+            problems += _mono_problems(page, label)
+        finally:
+            ctx.close()
+
+    # Кабинет отдельно: он за входом, а нарушения там свои — подписи под
+    # числами и название этапа рядом с меткой.
+    ctx, page = _open(browser, site["base"] + "/", width=1000)
+    try:
+        _login(page, site["base"], "sweep_mono")
+        _goto(page, site["base"] + "/account")
+        page.wait_for_timeout(900)
+        problems += _mono_problems(page, "кабинет")
+    finally:
+        ctx.close()
+
+    # Панель владельца — тоже за ключом, поэтому отдельным шагом.
+    ctx, page = _open(browser, f"{site['base']}/desk", width=1000)
+    try:
+        page.evaluate("() => sessionStorage.setItem('sozdatel_key', %r)" % OWNER_KEY)
+        _goto(page, site["base"] + "/desk")
+        page.wait_for_timeout(1400)
+        problems += _mono_problems(page, "панель владельца")
+    finally:
+        ctx.close()
+    assert not problems, "\n".join(problems)
+
+
+# Пилюля-бейдж запрещена дизайн-системой (CLAUDE.md): скруглённый по высоте
+# прямоугольник с цветной заливкой или рамкой и текстом внутри. Ищем по
+# отрисованной странице — в CSS это три разных свойства в разных правилах.
+_PILL_PROBE = """() => {
+  const out = [];
+  for (const el of document.querySelectorAll('*')) {
+    const st = getComputedStyle(el);
+    const box = el.getBoundingClientRect();
+    if (!box.height || box.height > 60) continue;
+    const radius = parseFloat(st.borderTopLeftRadius) || 0;
+    const bw = parseFloat(st.borderTopWidth) || 0;
+    const bg = st.backgroundColor;
+    const painted = (bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') || bw > 0;
+    const txt = (el.innerText || '').trim();
+    if (radius >= box.height / 2 && painted && txt && txt.length < 60)
+      out.push({cls: String(el.className || el.tagName), text: txt.slice(0, 40)});
+  }
+  return out;
+}"""
+
+
+def test_no_pill_badges_anywhere(site, browser):
+    """Пилюли-бейджи запрещены дизайн-системой, но жили на проверочной
+    странице — единственной, которую видят посторонние люди и на которую
+    заказчик тратит рекламный бюджет. Шаблон лежит в `app/`, поэтому под
+    сторожа по `static/` не попадал (тот же слепой угол, что A14/A17/A18/A19).
+    """
+    ids = site["ids"]
+    pages = [
+        ("главная", "/"),
+        ("соцконтракт", "/social-contract"),
+        ("результат проверки", f"/r/{ids['business']}"),
+        ("отчёт", f"/report/{ids['business']}?key={OWNER_KEY}"),
+        ("плейбук Директа", "/guide/direct"),
+        ("проверочная страница", "/l/sweep1"),
+    ]
+    problems = []
+    for label, path in pages:
+        ctx, page = _open(browser, site["base"] + path, width=1000)
+        try:
+            page.wait_for_timeout(800)
+            for x in page.evaluate(_PILL_PROBE):
+                problems.append(f"{label}: пилюля-бейдж [{x['cls']}] «{x['text']}»")
+        finally:
+            ctx.close()
+    assert not problems, "\n".join(problems)
+
+
+def test_landing_keeps_mono_for_numbers_only(site, browser):
+    """Проверочная страница живёт по тем же правилам шрифта, что и остальные:
+    моно только для чисел. Под общий сторож она не попадала, потому что
+    собирается не из `static/`, а из шаблона в `app/`."""
+    ctx, page = _open(browser, site["base"] + "/l/sweep1", width=1000)
+    try:
+        page.wait_for_timeout(800)
+        problems = _mono_problems(page, "проверочная страница")
+    finally:
+        ctx.close()
+    assert not problems, "\n".join(problems)

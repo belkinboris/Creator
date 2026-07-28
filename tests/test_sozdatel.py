@@ -127,6 +127,14 @@ class TestOfferEngine:
         assert out["offers"][0]["idea_id"] == "a0"
 
 
+def _read_static(name: str) -> str:
+    """Исходник страницы с диска: часть логики живёт во встроенном скрипте,
+    и проверять её по отрендеренному ответу сервера нельзя -- слоты уже
+    подставлены, а сам скрипт от этого не меняется."""
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "static" / name).read_text(encoding="utf-8")
+
+
 def _slots(html: str) -> str:
     """Незаполненные слоты шаблона (`__ИМЯ__`) — то, что человек читает
     буквально, если страницу отдали в обход подстановки серверных значений."""
@@ -771,13 +779,15 @@ class TestDesk:
             "offer": dict(VALID_OFFER, idea_id="desk_fresh_v1")})
         cab = client.get("/api/cabinet", headers=OWNER).json()
         s = [x for x in cab["smoke"] if x["idea_id"] == "desk_fresh_v1"][0]
-        assert s["next_step"].startswith("Запустить Директ")   # 0 визитов
+        # 0 визитов: зовём запустить рекламу, инструкция идёт ссылкой (A17)
+        assert "Директ" in s["next_step"] and s["next_link"]
         assert s["progress"] == 0 and s["rate"] == 0
         for _ in range(5):
             client.post("/api/smoke-event", json={"event": "page_view", "idea": "desk_fresh_v1"})
         cab = client.get("/api/cabinet", headers=OWNER).json()
         s = [x for x in cab["smoke"] if x["idea_id"] == "desk_fresh_v1"][0]
-        assert "Копим клики" in s["next_step"]
+        # «Копим клики» — владельческий жаргон, теперь строка покупательская
+        assert "35 визитов до вывода" in s["next_step"], s["next_step"]
         assert s["progress"] in (12, 13)  # 5/40 = 12.5%, банковское округление
 
 
@@ -1970,8 +1980,8 @@ class TestSocialContractPurpose:
             m.check_demand = orig
 
     def test_landing_sends_social_contract_purpose(self):
-        text = (main_module.BASE_DIR.parent / "static" / "social-contract.html").read_text()
-        assert "purpose: 'social_contract'" in text
+        text = client.get("/social-contract").text
+        assert 'AUDIENCE = "social_contract"' in text and "purpose: AUDIENCE" in text
 
     def test_landing_does_not_promise_smeta_in_tier_without_finance(self):
         """Главное обещание лендинга -- обоснование сметы, но секции finance
@@ -2026,7 +2036,8 @@ class TestSocialContractPurpose:
         прятался в «Или...». Для рекламной кампании на эту аудиторию это прямая
         потеря конверсии: платим за клик и сразу продаём не то."""
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
-        assert "IS_SOCIAL_CONTRACT" in text
+        # Ветка по аудитории переехала в данные с сервера (F3).
+        assert "AUDIENCE.plan_first" in text
         # бизнес-план поднимается в главный блок, рекламный тест опускается
         assert "alt.className = 'next'" in text
         assert "order.className = 'alt-path'" in text
@@ -2174,11 +2185,30 @@ class TestSocialContractPage:
         assert "/api/demand" in text
         assert 'id="idea"' in text
 
-    def test_not_linked_from_homepage(self):
-        """Страница не часть общего позиционирования -- не должна светиться
-        в навигации главной, чтобы не отпугивать массового пользователя
-        упоминанием соцконтракта/грантов."""
-        assert "/social-contract" not in client.get("/").text
+    def test_homepage_positioning_does_not_start_with_social_contract(self):
+        """**Прежнее решение отменено 2026-07-28, и вот почему.**
+
+        Раньше здесь стояло «страница не должна светиться на главной вовсе» —
+        чтобы не сужать себя перед массовым посетителем упоминанием
+        соцконтракта. Опасение верное, но запрет оказался слишком широким:
+        человек, которому нужно обоснование для комиссии, приходил на главную,
+        читал про венчурную проверку идеи и уходил, не узнав, что мы и про
+        него (F2). Витрина была доступна ТОЛЬКО по ссылке из объявления.
+
+        Решение владельца: витрины публичны, но позиционирование главной не
+        меняется. Поэтому проверяем не «ссылки нет», а «ссылка есть только в
+        переключателе»: заголовок, подзаголовок и описание пути на главной
+        по-прежнему не говорят о соцконтракте.
+        """
+        import re
+        page = client.get("/").text
+        body = page[page.index("<main>"):]
+        switch = re.search(r'<nav class="aud-switch".*?</nav>', body, re.S)
+        assert switch, "переключателя аудитории нет"
+        without_switch = body.replace(switch.group(), "")
+        assert "/social-contract" not in without_switch
+        for word in ("соцконтракт", "социальн", "соцзащит", "комисси"):
+            assert word not in without_switch.lower(), word
 
     def test_uses_light_design_system(self):
         text = client.get("/social-contract").text
@@ -2273,7 +2303,7 @@ class TestYandexMetrika:
 
     def test_demand_started_goal_wired_in_public_entry_points(self):
         static_dir = main_module.BASE_DIR.parent / "static"
-        for name in ("index.html", "social-contract.html"):
+        for name in ("index.html", "audience-landing.html"):
             text = (static_dir / name).read_text()
             assert "sozGoal('demand_started'" in text, f"нет цели demand_started в {name}"
 
@@ -3703,8 +3733,20 @@ class TestNoHardcodedServerValuesInStatic:
     STATIC = main_module.BASE_DIR.parent / "static"
 
     def _sources(self):
+        """Все шаблоны, которые видит человек, — включая те, что лежат НЕ в
+        `static/`.
+
+        Проверочная страница собирается из `app/landing_template.html`, и
+        именно этот файл трижды подряд проваливался мимо сторожей, которые
+        смотрели только `static/`: слово «лендинг» (A14), запрещённые слова в
+        строке следующего шага (A17, тот же слепой угол в `app/main.py`) и
+        рендер-блокирующий запрос шрифтов на чужой домен (A18) — последнее на
+        единственной странице, куда идёт платный трафик.
+        """
         for p in sorted(self.STATIC.glob("*.html")):
             yield p.name, p.read_text()
+        landing = main_module.BASE_DIR / "landing_template.html"
+        yield landing.name, landing.read_text(encoding="utf-8")
 
     def test_prices_are_not_hardcoded(self):
         """Цена на витрине обязана совпадать с той, что спишется."""
@@ -3776,8 +3818,16 @@ class TestNoHardcodedServerValuesInStatic:
             "__PUBLIC_ID__",
             "__PRODUCT_NAME__", "__IDEA_ID__", "__H1__", "__SUB__", "__EYEBROW__",
             "__PAINS__", "__CTA__", "__FORM_NOTE__",
+            # витрина аудитории -- заполняет _audience_landing
+            "__PAGE_TITLE__", "__META__", "__FIELD_LABEL__", "__PLACEHOLDER__",
+            "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
+            "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
+            # страница результата -- audiences.for_page / _optics_html
+            "__AUDIENCE_JSON__", "__OPTICS__",
             # страница подтверждения входа -- заполняет _verify_page
             "__HEADING__", "__LEAD__", "__WHO__", "__ACTION__", "__FINE__",
+            # заголовок и выходные данные листа -- _doc_title_and_meta
+            "__DOC_TITLE__", "__DOC_META__",
         }
         filled = set(re.findall(r'\("(__[A-Z0-9_]+__)"',
                                 inspect.getsource(m._fill_server_values)))
@@ -5347,7 +5397,7 @@ class TestWeakDemandStopsSelling:
         фаундеров (принцип 4)."""
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
         block = text.split("v.level === 'weak'")[1][:2000]
-        assert "IS_SOCIAL_CONTRACT ? '/social-contract' : '/'" in block
+        assert "AUDIENCE.home" in block
 
     def test_good_demand_is_untouched(self):
         """Предупреждение не должно всплывать там, где спрос есть: иначе оно
@@ -5847,7 +5897,7 @@ class TestIdeaIsNotReadableByGuessing:
         assert client.get(f"/r/{d['public_id']}").status_code == 200
 
     def test_showcases_send_people_to_the_public_address(self):
-        for name in ("index.html", "social-contract.html"):
+        for name in ("index.html", "audience-landing.html"):
             src = (main_module.BASE_DIR.parent / "static" / name).read_text()
             assert "data.public_id" in src, name
 
@@ -6082,7 +6132,7 @@ class TestUnmeasuredDemandIsNotSoldAsMeasured:
         """Получателя соцконтракта нельзя возвращать на витрину фаундеров."""
         text = client.get(f"/r/{self._check()}").text
         block = text.split("v.level === 'unknown'")[1][:2200]
-        assert "IS_SOCIAL_CONTRACT ? '/social-contract' : '/'" in block
+        assert "AUDIENCE.home" in block
 
 
 class TestLandingPromisesNothingOnTheOwnersBehalf:
@@ -6299,3 +6349,1043 @@ class TestMagicLinkSurvivesMailScanners:
         for t in (client.get("/account/verify?token=scan_slots").text,
                   client.get("/account/verify?token=nope").text):
             assert "__" not in _slots(t), _slots(t)
+
+
+class TestFrequencyIsAttributedWithoutPointing:
+    """B8: подпись про подсказанную Вордстатом формулировку указывала «справа».
+
+    Найдено кастдев-проходом 2026-07-27. Когда Вордстат подсказывает более
+    ходовую формулировку, чем угадала LLM, число в строке относится к ЕЙ, а не
+    к тому, что человек читает слева (`matched_phrase`, см. `_best_related`).
+    Подпись существует ровно для того, чтобы это назвать -- принцип 1, число
+    не приписывается чужой фразе молча.
+
+    Но написана она была через направление на экране: «цифра справа про неё».
+    На узком экране `.freq-row` переключается в столбик, число уходит ВНИЗ, и
+    подпись показывает не туда. Трафик из Директа преимущественно мобильный,
+    то есть неверный вариант видело большинство.
+
+    Лечится не вёрсткой, а порядком и словами: атрибуция идёт ПОСЛЕ числа и
+    не называет сторон вообще — тогда она верна при любой раскладке.
+    """
+
+    def _script(self):
+        """Без комментариев: объяснение «почему» само называет старый текст,
+        и сторож ловил бы собственную документацию."""
+        import re as _re
+        t = _read_static("result.html")
+        t = _re.sub(r"/\*.*?\*/", "", t, flags=_re.S)
+        return "\n".join(l for l in t.splitlines()
+                          if not l.lstrip().startswith("//"))
+
+    def test_attribution_names_no_direction(self):
+        """Любое слово о стороне экрана снова разъедется с вёрсткой."""
+        t = self._script()
+        for bad in ("цифра справа", "число справа", "справа про неё",
+                    "цифра слева", "цифра выше"):
+            assert bad not in t, bad
+
+    def test_attribution_still_says_the_number_is_not_about_the_asked_phrase(self):
+        """Убрать направление не значит убрать саму оговорку: без неё ручная
+        проверка исходной фразы в Вордстате покажет другое число."""
+        t = self._script()
+        assert "matched_phrase" in t
+        assert "ходов" in t          # «более ходовая формулировка»
+        assert "Вордстат" in t
+
+    def test_weak_branch_does_not_call_a_prompted_phrase_the_users_own(self):
+        """Тот же обман на другом экране: в ветке слабого спроса цифра могла
+        быть посчитана по подсказке Вордстата, а текст звал её «вашей
+        формулировкой»."""
+        t = self._script()
+        assert "Самую популярную из ваших формулировок" not in t
+
+
+class TestScaleCaptionsLookAlike:
+    """B9 (шаг 2): подписи под шкалами оценки выглядели набором обрывков.
+
+    Найдено на живой форме данных 2026-07-28, после жалобы владельца «сделай,
+    чтобы всё было единообразно». Два дефекта в одном месте:
+
+      · **«Спрос» — единственная из четырёх ячеек без подписи вообще.**
+        `check_demand` кладёт ей `note: ""` (три остальные пишет модель), и
+        человек видит три объяснённых числа и одно голое. Причём голым
+        оказывается самое важное: спрос — единственная шкала на реальных
+        данных Яндекса и одновременно потолок общего балла.
+        Фикстуры это прятали — в них у «Спроса» подпись была, чего реальный
+        движок не делает (тот же урок, что в A13: заглушка обязана совпадать
+        с настоящим поведением).
+      · **пунктуация вразнобой.** Модель пишет фрагменты как придётся:
+        «Рынок растёт.» с точкой, «Начать можно одной» без. Рядом в сетке это
+        читается как небрежность.
+
+    Правится на выдаче, а не при записи: тогда чинятся и уже сохранённые
+    проверки, и правило живёт в одном месте на одном языке. В ячейке подпись
+    работает как caption — точка в конце не нужна; в тизере отчёта те же
+    заметки идут отдельными абзацами, и там точка обязательна.
+    """
+
+    def _served(self, rec_id):
+        html_out = client.get(f"/r/{pub(rec_id)}").text
+        raw = html_out.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+        return json.loads(raw)
+
+    def _make(self, notes, count=480):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        data = {
+            "formulations": [{"phrase": "груминг с выездом", "count": count}],
+            "best_phrase": "груминг с выездом",
+            "verdict": {"level": "niche", "text": "Спрос небольшой."},
+            "competitors": {"found": 900, "top": [{"title": "Г", "domain": "g.ru"}]},
+            "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": notes[0]},
+                       {"key": "competition", "label": "Конкуренция", "value": 5, "note": notes[1]},
+                       {"key": "timing", "label": "Своевременность", "value": 8, "note": notes[2]},
+                       {"key": "execution", "label": "Реализуемость", "value": 8, "note": notes[3]}],
+            "overall": {"value": 4, "weakest": "Спрос", "basis": "б"},
+        }
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Груминг с выездом на дом", best_count=count,
+                              result_json=json.dumps(data, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id
+
+    def test_demand_scale_gets_a_caption_like_its_neighbours(self):
+        """Настоящий check_demand кладёт сюда пустую строку — значит подпись
+        обязан дописать тот, кто отдаёт страницу."""
+        rid = self._make(["", "Много мастеров", "Рынок растёт.", "Начать можно одной"])
+        notes = [s["note"] for s in self._served(rid)["scores"]]
+        assert all(notes), notes
+
+    def test_demand_caption_is_built_from_the_number_not_invented(self):
+        """Принцип 1: подпись к шкале спроса — это её же частотность."""
+        rid = self._make(["", "а", "б", "в"], count=2400)
+        demand = self._served(rid)["scores"][0]
+        # Неразрывный пробел -- тот же разделитель, что даёт toLocaleString('ru-RU')
+        # для частотностей выше по странице: число не должно рваться переносом.
+        assert "2\u00a0400" in demand["note"], demand["note"]
+
+    def test_missing_frequency_does_not_invent_a_caption(self):
+        """Нет данных — так и говорим, а не пишем «0 запросов»."""
+        rid = self._make(["", "а", "б", "в"], count=None)
+        demand = self._served(rid)["scores"][0]
+        assert "0" not in demand["note"]
+        assert "недоступн" in demand["note"].lower(), demand["note"]
+
+    def test_captions_do_not_end_with_a_period(self):
+        """В ячейке это подпись под числом, а не предложение: одни с точкой,
+        другие без — та самая «каша», на которую жаловался владелец."""
+        rid = self._make(["", "Много мастеров", "Рынок растёт.", "Начать можно одной"])
+        for s in self._served(rid)["scores"]:
+            assert not s["note"].endswith("."), s["note"]
+
+    def test_caption_keeps_its_meaning(self):
+        """Нормализация не должна съедать текст."""
+        rid = self._make(["", "Много частных мастеров.", "б", "в"])
+        assert self._served(rid)["scores"][1]["note"] == "Много частных мастеров"
+
+    def test_teaser_paragraphs_all_end_as_sentences(self):
+        """Те же заметки в тизере отчёта идут отдельными абзацами — там точка
+        обязательна, иначе абзац выглядит оборванным."""
+        import app.main as m
+        from app.main import Session, engine
+        rid = self._make(["", "Много мастеров", "Рынок растёт.", "Начать можно одной"])
+        with Session(engine) as s:
+            data = json.loads(s.get(m.DemandCheck, rid).result_json)
+        prev = m._report_preview(data)
+        for key in ("competition_note", "timing_note", "execution_note"):
+            assert prev[key].endswith("."), (key, prev[key])
+
+
+class TestSharpenCardDoesNotGlueTwoFields:
+    """B9 (шаг 3): карточка заострения склеивала два поля в кривое предложение.
+
+    Найдено кастдев-проходом за фаундера 2026-07-28. Шаг заострения в прежних
+    проходах всегда пропускался кнопкой «Пропустить», поэтому дефект дожил.
+
+    Движок отдаёт боль двумя полями: `h2` — название боли, `p` — объяснение,
+    каждое самостоятельное предложение (на посадочной `/l/` они и рисуются
+    отдельными элементами). Карточка же склеивала их через « — » в одну
+    строку, и объяснение приносило с собой свою заглавную букву:
+
+        Ателье срывают сроки — Обещают три недели, шьют полтора месяца
+
+    Заглавная после тире посреди строки — не опечатка модели, а наш шаблон:
+    так склеит ЛЮБУЮ пару. Плюс точка в конце то есть, то нет — модель пишет
+    как придётся. Это последний бесплатный экран перед решением платить.
+
+    Лечится тем, что поля перестают притворяться одним предложением: название
+    боли и объяснение — разными строками, как «Для кого» рядом. Пунктуацию
+    приводит к виду сервер, там же, где живёт остальная нормализация (B9 шаг 2).
+    """
+
+    def _script(self):
+        return _read_static("result.html")
+
+    def test_card_does_not_join_pain_fields_with_a_dash(self):
+        t = self._script()
+        assert "pains[0].h2 || '')} — ${" not in t
+        assert "sharp-pain" in t, "название боли и объяснение должны быть разными узлами"
+
+    def test_explanation_is_normalised_to_a_sentence_on_the_server(self, monkeypatch):
+        """Точку дописывает сервер, а не шаблон: правило уже живёт в Python
+        (_as_sentence), второй копии в JS быть не должно."""
+        import app.main as m
+        offers = [dict(VALID_OFFER, pains=[{"h2": "Ателье срывают сроки",
+                                            "p": "Обещают три недели, шьют полтора месяца"}])]
+
+        async def fake_sharpen(idea, *a, **kw):
+            return {"sharpened_note": "", "warning": "", "offers": offers}
+
+        monkeypatch.setattr(m, "sharpen_idea", fake_sharpen)
+        r = client.post("/api/sharpen", json={"idea": "Идея достаточной длины для проверки"})
+        assert r.status_code == 200, r.text
+        pain = r.json()["offers"][0]["pains"][0]
+        assert pain["p"].endswith("."), pain
+        assert pain["h2"] == "Ателье срывают сроки", pain     # название боли не трогаем
+
+    def test_normalisation_does_not_double_existing_punctuation(self, monkeypatch):
+        import app.main as m
+        offers = [dict(VALID_OFFER, pains=[{"h2": "Срывают сроки", "p": "Шьют полтора месяца."}])]
+
+        async def fake_sharpen(idea, *a, **kw):
+            return {"sharpened_note": "", "warning": "", "offers": offers}
+
+        monkeypatch.setattr(m, "sharpen_idea", fake_sharpen)
+        r = client.post("/api/sharpen", json={"idea": "Идея достаточной длины для проверки"})
+        assert r.json()["offers"][0]["pains"][0]["p"] == "Шьют полтора месяца."
+
+    def test_offer_without_pains_still_passes_through(self, monkeypatch):
+        """Нормализация не должна ронять вариант с пустым или битым полем."""
+        import app.main as m
+        offers = [dict(VALID_OFFER, pains=[]), dict(VALID_OFFER, pains=[{"h2": "х"}])]
+
+        async def fake_sharpen(idea, *a, **kw):
+            return {"sharpened_note": "", "warning": "", "offers": offers}
+
+        monkeypatch.setattr(m, "sharpen_idea", fake_sharpen)
+        r = client.post("/api/sharpen", json={"idea": "Идея достаточной длины для проверки"})
+        assert r.status_code == 200
+        assert len(r.json()["offers"]) == 2
+
+
+class TestNextStepSpeaksToTheBuyer:
+    """A17: карточка проекта диктовала покупателю следующий шаг по-владельчески.
+
+    Найдено кастдев-проходом по ПЛАТНОМУ пути 2026-07-28: оплатил тест на
+    реальных людях, вошёл в кабинет — и в карточке своего проекта прочитал
+    строку «следующий шаг», написанную не для него.
+
+    `_smoke_card` собирает `next_step` один раз для обеих панелей — и
+    владельческой `/desk`, и покупательской `/account` (так и задумано: один
+    язык на двоих). Но написан он был владельческим:
+
+      · «Запустить Директ на страницу — инструкция: **/guide/direct**» —
+        человеку показывали путь в адресной строке вместо ссылки. Кликнуть
+        нельзя, надо перепечатывать руками;
+      · «Сигнал есть → идея в очередь на **MVP**» — очередь владельца, не его;
+      · «Спроса нет → идею **в архив**» — архив опять же владельческий;
+      · «Серая зона → второй **оффер** на том же **трафике**» — «оффер»
+        запрещён во всех текстах для пользователя (принцип 5), «трафик» тоже.
+
+    **Сторож на запрещённые слова этого не ловил:** он сканирует `static/`, а
+    строка живёт в `app/main.py`. Ровно та же дыра, что в A14, где «лендинг»
+    отсиделся в `app/landing_template.html`. Поэтому проверяем не файл, а
+    вывод `_smoke_card` по всем ветвям вердикта.
+    """
+
+    def _cards(self):
+        """Карточка во всех состояниях, через которые проходит проект."""
+        import app.main as m
+        p = m.SmokeProject(idea_id="x", product_name="П", idea_text="и",
+                           offer_json="{}", landing_html="<h1>т</h1>",
+                           click_target=40, lead_rate_signal=0.08, lead_rate_dead=0.04)
+        return {
+            "нет визитов": m._smoke_card(p, 0, 0),
+            "копим": m._smoke_card(p, 12, 1),
+            "сигнал есть": m._smoke_card(p, 40, 8),
+            "спроса нет": m._smoke_card(p, 40, 0),
+            "серая зона": m._smoke_card(p, 40, 2),
+        }
+
+    def test_no_forbidden_words_anywhere_in_the_next_step(self):
+        for label, card in self._cards().items():
+            t = card["next_step"].lower()
+            for bad in ("оффер", "лендинг", "трафик", "mvp", "архив", "конверси"):
+                assert bad not in t, f"{label}: {card['next_step']}"
+
+    def test_the_grey_zone_covers_all_verdicts(self):
+        """Сторож бесполезен, если ветви на самом деле не разошлись."""
+        steps = {c["next_step"] for c in self._cards().values()}
+        assert len(steps) == 5, steps
+
+    def test_no_raw_path_is_shown_as_text(self):
+        """Путь в адресной строке — не текст для человека, это ссылка."""
+        for label, card in self._cards().items():
+            assert "/guide" not in card["next_step"], f"{label}: {card['next_step']}"
+
+    def test_first_step_offers_the_instruction_as_a_link(self):
+        card = self._cards()["нет визитов"]
+        assert card["next_link"] == {"href": "/guide/direct",
+                                     "text": "Пошаговая инструкция"}, card
+
+    def test_other_states_carry_no_link(self):
+        for label, card in self._cards().items():
+            if label != "нет визитов":
+                assert card["next_link"] is None, f"{label}: {card['next_link']}"
+
+    def test_cabinet_renders_the_link_not_the_path(self):
+        assert "next_link" in _read_static("account.html")
+        assert "next_link" in _read_static("desk.html")
+
+
+class TestPrintedPlanLooksLikeADocument:
+    """C5: распечатанный бизнес-план не выглядел документом.
+
+    Найдено кастдев-проходом 2026-07-28 по пути соцконтракта: человек несёт
+    разбор в соцзащиту, и комиссии он нужен НА БУМАГЕ — кнопка «Скачать PDF»
+    для этой аудитории не украшение, а способ доставки.
+
+    Печать сама по себе работает (`@media print` прячет шапку, оглавление и
+    витрину тарифов, все разделы уходят на лист). Но лист был озаглавлен
+    **«Отчёт по идее»** независимо от того, что человек купил, — включая тариф,
+    который мы сами называем «Бизнес-план» и под этим именем продаём. Комиссия
+    получала документ, название которого не совпадает ни с чеком, ни с тем,
+    зачем его принесли.
+
+    И на листе **не было даты**. Документ без даты для комиссии — не документ;
+    дата у нас есть готовая, это день оплаты разбора.
+    """
+
+    def _buy(self, purpose="social_contract", tier="full"):
+        import app.main as m
+        from app.main import DemandCheck, ReportPurchase, Session, engine
+        data = {"formulations": [{"phrase": "ф", "count": 480}],
+                "verdict": {"level": "niche", "text": "т"},
+                "competitors": {"found": 9, "top": []},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": ""}],
+                "overall": {"value": 4, "weakest": "Спрос"}}
+        with Session(engine) as s:
+            c = DemandCheck(idea="Груминг с выездом", purpose=purpose,
+                            result_json=json.dumps(data, ensure_ascii=False))
+            s.add(c); s.commit(); s.refresh(c)
+            p = ReportPurchase(check_id=c.id, idea=c.idea, tier=tier, status="paid",
+                               contact="m@example.com", amount=2990,
+                               report_json=json.dumps({"viability_score": 60,
+                                                       "viability_summary": "с",
+                                                       "top_risks": [], "sections": []},
+                                                      ensure_ascii=False))
+            s.add(p); s.commit(); s.refresh(p)
+            return c.public_id, p.access_token, p.created_at
+
+    def test_full_tier_is_titled_as_the_business_plan_that_was_bought(self):
+        pid, tok, _ = self._buy(tier="full")
+        t = client.get(f"/report/{pid}?t={tok}").text
+        assert "<h1>Бизнес-план</h1>" in t, t[t.find("<h1"):t.find("<h1") + 120]
+
+    def test_quick_tier_keeps_its_own_name(self):
+        pid, tok, _ = self._buy(tier="quick")
+        t = client.get(f"/report/{pid}?t={tok}").text
+        assert "<h1>Быстрый разбор</h1>" in t
+
+    def test_names_come_from_the_price_list_not_from_the_template(self):
+        """Третья копия названий тарифов разъехалась бы, как уже разъезжались
+        цены (B5): заголовок берётся из REPORT_PRICES."""
+        import app.main as m
+        for tier, cfg in m.REPORT_PRICES.items():
+            pid, tok, _ = self._buy(tier=tier)
+            assert f"<h1>{cfg['label']}</h1>" in client.get(f"/report/{pid}?t={tok}").text
+
+    def test_unpaid_teaser_is_not_called_a_business_plan(self):
+        """До оплаты человек видит тизер — называть его купленным тарифом
+        значит обещать то, чего он ещё не получил (принцип 3)."""
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            c = DemandCheck(idea="Идея без покупки",
+                            result_json=json.dumps({"formulations": [], "verdict": {},
+                                                    "competitors": {}, "scores": [],
+                                                    "overall": {}}, ensure_ascii=False))
+            s.add(c); s.commit(); s.refresh(c)
+            pid = c.public_id
+        t = client.get(f"/r/{pid}").text and client.get(f"/report/{pid}").text
+        assert "<h1>Бизнес-план</h1>" not in t
+        assert "<h1>Отчёт по идее</h1>" in t
+
+    def test_printed_page_carries_the_date_it_was_bought(self):
+        pid, tok, made = self._buy()
+        t = client.get(f"/report/{pid}?t={tok}").text
+        assert "doc-meta" in t, "на листе нет строки с датой"
+        assert f"{made.day} " in t or f"{made.day:02d}" in t, made
+
+    def test_date_line_is_hidden_on_screen_and_shown_in_print(self):
+        """На экране дата лишняя — там и так видно, что отчёт открыт. Нужна
+        она ровно на листе, который уходит в комиссию."""
+        t = _read_static("report.html")
+        assert ".doc-meta{display:none}" in t.replace(" ", "")
+        assert ".doc-meta" in t.split("@media print")[1]
+
+    def test_unpaid_teaser_has_no_date_line(self):
+        """Тизер не документ, и датировать его нечем."""
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            c = DemandCheck(idea="Ещё идея без покупки",
+                            result_json=json.dumps({"formulations": [], "verdict": {},
+                                                    "competitors": {}, "scores": [],
+                                                    "overall": {}}, ensure_ascii=False))
+            s.add(c); s.commit(); s.refresh(c)
+            pid = c.public_id
+        assert 'class="doc-meta"' not in client.get(f"/report/{pid}").text
+
+
+class TestLandingDoesNotWaitForGoogle:
+    """A18: проверочная страница грузила шрифты с fonts.googleapis.com.
+
+    Найдено кастдев-проходом 2026-07-28. B6 убрала эту зависимость со ВСЕХ
+    страниц сайта — и промахнулась мимо одной: шаблон проверочной страницы
+    лежит в `app/`, а сторож смотрел `static/`. Ровно тот же слепой угол, что
+    в A14 («лендинг» в этом же файле) и A17 (запрещённые слова в `app/main.py`).
+    Третий раз подряд.
+
+    Промах пришёлся на единственную страницу, куда идёт ПЛАТНЫЙ трафик.
+    Замер (2026-07-28, Chromium, домен «молчит» 8 с): заголовок появляется
+    через **8,07 с**, `first-contentful-paint` не наступает вовсе — экран
+    белый всё это время. `display=swap` тут не спасает: он про подмену
+    шрифта, а рендер блокирует сам `<link rel=stylesheet>` в `<head>`.
+
+    Цена ошибки не косметическая. Человек платит нам 1490 ₽ и ещё 3–5 тысяч
+    Яндексу, посетитель уходит с белого экрана — а мы по этой конверсии
+    выносим вердикт «спроса нет» и говорим это заказчику как факт о рынке
+    (принципы 1 и 8).
+    """
+
+    def _html(self):
+        import app.main as m
+        return m.render_landing(VALID_OFFER)
+
+    def test_no_external_hosts_at_all(self):
+        html_out = self._html()
+        for bad in ("fonts.googleapis.com", "fonts.gstatic.com", "//cdn.",
+                    "https://", "http://"):
+            assert bad not in html_out, bad
+
+    def test_fonts_come_from_our_own_route(self):
+        assert '/fonts/fonts.css' in self._html()
+
+    def test_decorative_families_are_gone(self):
+        """Manrope/Onest/JetBrains у нас не лежат — оставить их в CSS значит
+        оставить страницу без заявленного шрифта и с чужим запросом."""
+        html_out = self._html()
+        for bad in ("Manrope", "Onest", "JetBrains"):
+            assert bad not in html_out, bad
+
+    def test_families_used_are_the_ones_we_actually_serve(self):
+        import re
+        from pathlib import Path
+        served = (Path(__file__).resolve().parents[1] / "static" / "fonts" / "fonts.css"
+                  ).read_text(encoding="utf-8")
+        have = set(re.findall(r"font-family:\s*['\"]([^'\"]+)['\"]", served))
+        used = set(re.findall(r"['\"]([A-Z][A-Za-z ]+)['\"]\s*,\s*(?:system-ui|sans-serif|monospace)",
+                              self._html()))
+        assert used, "в шаблоне не осталось ни одного именованного шрифта"
+        assert used <= have, f"шрифты, которых мы не отдаём: {used - have}"
+
+    def test_the_page_still_renders_its_content(self):
+        """Смена шрифтов не должна съесть саму страницу."""
+        html_out = self._html()
+        assert VALID_OFFER["h1"] in html_out
+        assert VALID_OFFER["pains"][0]["h2"] in html_out
+        assert 'href="/legal"' in html_out
+
+
+class TestEngineErrorsAreHumanReadable:
+    """A19: технические сообщения движков доезжали прямо до человека.
+
+    Найдено 2026-07-28 сплошным просмотром строк в `app/*.py` — там, куда
+    сторожа по `static/` никогда не заглядывали. Четвёртый дефект из того же
+    слепого угла (A14, A17, A18).
+
+    Обе ошибки движков попадают на экран дословно: `/api/sharpen` отдаёт
+    `str(e)`, а `result.html` показывает `data.error`; у отчёта тот же путь
+    через `__GEN_ERROR__`. Докстринг `sharpen_idea` прямо обещает «бросает
+    OfferEngineError с человеческим текстом» — но проверки структуры бросали
+    сырьё:
+
+      · «нужно ровно 3 **оффера**» — запрещённое слово (принцип 5) на
+        бесплатном шаге, прямо перед решением платить;
+      · «в **оффере** нет поля demo_left_label», «pains должен содержать
+        3 блока», «direct_queries: 5-12 фраз» — имена полей из нашего JSON;
+      · у отчёта — «недостаточно top_risks», «нет корректного
+        viability_score», «пустой раздел finance». Это читает человек,
+        который уже заплатил 990–2990 ₽.
+
+    Техническая причина нужна нам, а не посетителю: она уходит в лог
+    (`.tech`), а на экран идёт одна человеческая фраза. Заодно неполный ответ
+    модели стал поводом ПОВТОРИТЬ запрос — ровно как испорченный JSON и
+    таймаут, которые движок уже переспрашивает: пропущенное поле такая же
+    случайная осечка, а человек до этой правки упирался в тупик с первого раза.
+    """
+
+    def _sharpen_error(self, body):
+        """Форма ответа — та же, что у настоящего провайдера по умолчанию
+        (`_yandex_response`). С анthropic-образной заглушкой движок падал в
+        ветку «битый JSON» и до проверок структуры вообще не доходил: тест
+        зеленел, ничего не проверив."""
+        import asyncio, json as _json
+        from app.offer_engine import sharpen_idea, OfferEngineError
+
+        async def fake_post(provider, payload):
+            return _yandex_response(_json.dumps(body, ensure_ascii=False))
+        try:
+            asyncio.run(sharpen_idea("Идея достаточно длинная для проверки", _post=fake_post))
+        except OfferEngineError as e:
+            return e
+        raise AssertionError("движок не пожаловался, хотя ответ битый")
+
+    def test_missing_field_does_not_leak_json_names(self):
+        broken = dict(VALID_OFFER); broken.pop("h1")
+        e = self._sharpen_error({"offers": [broken, dict(VALID_OFFER), dict(VALID_OFFER)]})
+        assert "оффер" not in str(e).lower(), str(e)
+        assert "h1" not in str(e), str(e)
+
+    def test_wrong_offer_count_does_not_say_offer(self):
+        e = self._sharpen_error({"offers": [dict(VALID_OFFER)]})
+        assert "оффер" not in str(e).lower(), str(e)
+
+    def test_message_tells_the_person_what_to_do(self):
+        e = self._sharpen_error({"offers": [dict(VALID_OFFER)]})
+        assert "ещё раз" in str(e).lower(), str(e)
+
+    def test_technical_reason_survives_for_the_log(self):
+        """Человеческий текст не должен стоить нам возможности починить."""
+        broken = dict(VALID_OFFER); broken.pop("h1")
+        e = self._sharpen_error({"offers": [broken, dict(VALID_OFFER), dict(VALID_OFFER)]})
+        assert "h1" in getattr(e, "tech", ""), getattr(e, "tech", None)
+
+    def test_broken_structure_is_retried_like_broken_json(self):
+        """Пропущенное поле — такая же случайная осечка модели, как испорченный
+        JSON, который движок уже переспрашивает."""
+        import asyncio, json as _json
+        from app.offer_engine import sharpen_idea
+        calls = {"n": 0}
+
+        async def fake_post(provider, payload):
+            calls["n"] += 1
+            body = ({"offers": [dict(VALID_OFFER)]} if calls["n"] == 1
+                    else {"offers": [dict(VALID_OFFER) for _ in range(3)]})
+            return _yandex_response(_json.dumps(body, ensure_ascii=False))
+
+        out = asyncio.run(sharpen_idea("Идея достаточно длинная для проверки", _post=fake_post))
+        assert calls["n"] == 2, calls
+        assert len(out["offers"]) == 3
+
+    def test_report_engine_hides_its_field_names_too(self):
+        """Эти строки читает человек, который уже заплатил."""
+        import asyncio, json as _json
+        from app.report_engine import generate_core, ReportEngineError
+
+        async def fake_post(provider, payload):
+            body = {"viability_score": 55, "viability_summary": "с", "top_risks": []}
+            return _yandex_response(_json.dumps(body, ensure_ascii=False))
+        try:
+            asyncio.run(generate_core("Груминг собак с выездом на дом клиента",
+                                      DEMAND_DATA_FIXTURE, "full", _post=fake_post))
+        except ReportEngineError as e:
+            assert "top_risks" not in str(e), str(e)
+            assert "top_risks" in getattr(e, "tech", ""), getattr(e, "tech", None)
+            # У отчёта своё действие: страница пересобирает разделы по перезагрузке,
+            # поэтому зовём обновить, а не «попробовать ещё раз» как на /r/.
+            assert "обновите" in str(e).lower(), str(e)
+        else:
+            raise AssertionError("движок не пожаловался на пустые риски")
+
+    def test_no_engine_message_carries_a_forbidden_word(self):
+        """Сплошной сторож: ни одна строка, которая может доехать до экрана,
+        не содержит запрещённых слов."""
+        import ast, pathlib
+        bad = []
+        for name in ("offer_engine.py", "report_engine.py"):
+            f = pathlib.Path(main_module.BASE_DIR) / name
+            for node in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id.endswith("EngineError")):
+                    continue
+                for arg in node.args:
+                    txt = ast.unparse(arg)
+                    for w in ("оффер", "лендинг", "top_risks", "viability_",
+                              "direct_queries", "pains", "offers"):
+                        if w in txt:
+                            bad.append(f"{name}:{node.lineno} → {txt}")
+        assert not bad, "\n".join(bad)
+
+
+class TestOwnerCanSeeAndFixStaleLandings:
+    """A20: правка шаблона не доходила до уже запущенных страниц, и владелец
+    об этом не знал.
+
+    `landing_html` рендерится и кладётся в БД **в момент запуска** проекта.
+    Значит любая правка шаблона действует только на будущие запуски, а живые
+    страницы остаются какими были. Само по себе это защитимо: менять страницу
+    под работающей рекламой значит менять то, что измеряешь, — плейбук прямо
+    просит ничего не трогать во время проверки.
+
+    Не защитимо другое: **владелец не мог ни узнать, что страница устарела, ни
+    обновить её**. Перезапуск требовал вручную собрать POST `/api/launch` с
+    полным JSON варианта.
+
+    Цена вопроса не теоретическая. A18 убрала со страницы рендер-блокирующий
+    запрос шрифтов на чужой домен: замер показал 8,07 с белого экрана, когда
+    хост молчит. Исправление лежит в шаблоне — и **не доходит** до тех, за
+    чей трафик уже платят. То же с пилюлей-бейджем (C4) и любой будущей
+    правкой.
+
+    Теперь у проекта хранится отпечаток шаблона, из которого он собран,
+    `/api/cabinet` показывает `landing_stale`, а `POST
+    /api/projects/{id}/refresh` пересобирает страницу из сохранённого варианта.
+    Обновление — ДЕЙСТВИЕ ВЛАДЕЛЬЦА, а не тихий автопересбор: он должен видеть,
+    что вмешивается в идущую проверку.
+    """
+
+    def _launch(self, idea_id="stale1"):
+        r = client.post("/api/launch", headers=OWNER, json={
+            "idea_text": "Идея для проверки устаревания",
+            "offer": dict(VALID_OFFER, idea_id=idea_id)})
+        assert r.status_code == 200, r.text
+        return idea_id
+
+    def _make_stale(self, idea_id):
+        """Так выглядит страница, собранная до правки шаблона."""
+        from app.main import SmokeProject, Session, engine, select
+        with Session(engine) as s:
+            proj = s.exec(select(SmokeProject).where(
+                SmokeProject.idea_id == idea_id)).first()
+            proj.landing_html = proj.landing_html.replace(
+                '<link rel="stylesheet" href="/fonts/fonts.css">',
+                '<link href="https://fonts.googleapis.com/css2?family=Manrope" rel="stylesheet">')
+            proj.template_hash = "старый-отпечаток"
+            s.add(proj); s.commit()
+
+    def _card(self, idea_id):
+        cab = client.get("/api/cabinet", headers=OWNER).json()
+        return [x for x in cab["smoke"] if x["idea_id"] == idea_id][0]
+
+    def test_fresh_launch_is_not_marked_stale(self):
+        assert self._card(self._launch("stale_fresh"))["landing_stale"] is False
+
+    def test_page_built_before_the_fix_is_marked_stale(self):
+        idea_id = self._launch("stale_old")
+        self._make_stale(idea_id)
+        assert self._card(idea_id)["landing_stale"] is True
+
+    def test_projects_launched_before_this_feature_count_as_stale(self):
+        """У старых записей отпечатка нет вовсе — молчать о них нельзя."""
+        from app.main import SmokeProject, Session, engine, select
+        idea_id = self._launch("stale_nohash")
+        with Session(engine) as s:
+            proj = s.exec(select(SmokeProject).where(
+                SmokeProject.idea_id == idea_id)).first()
+            proj.template_hash = ""
+            s.add(proj); s.commit()
+        assert self._card(idea_id)["landing_stale"] is True
+
+    def test_refresh_rebuilds_the_page_from_the_saved_offer(self):
+        idea_id = self._launch("stale_fix")
+        self._make_stale(idea_id)
+        assert "fonts.googleapis.com" in client.get(f"/l/{idea_id}").text
+        r = client.post(f"/api/projects/{idea_id}/refresh", headers=OWNER)
+        assert r.status_code == 200, r.text
+        page = client.get(f"/l/{idea_id}").text
+        assert "fonts.googleapis.com" not in page
+        assert "/fonts/fonts.css" in page
+        assert self._card(idea_id)["landing_stale"] is False
+
+    def test_refresh_keeps_the_owners_own_name(self):
+        """Переименование живёт на проекте, а не в варианте — пересбор не
+        должен возвращать машинное имя."""
+        idea_id = self._launch("stale_named")
+        client.patch(f"/api/projects/{idea_id}", headers=OWNER, json={"name": "ОтзоВик"})
+        self._make_stale(idea_id)
+        client.post(f"/api/projects/{idea_id}/refresh", headers=OWNER)
+        assert "<title>ОтзоВик</title>" in client.get(f"/l/{idea_id}").text
+
+    def test_refresh_is_owner_only(self):
+        idea_id = self._launch("stale_guard")
+        assert client.post(f"/api/projects/{idea_id}/refresh").status_code == 401
+
+    def test_refresh_of_unknown_project_is_404(self):
+        assert client.post("/api/projects/no-such/refresh", headers=OWNER).status_code == 404
+
+    def test_desk_shows_the_warning_and_the_button(self):
+        text = _read_static("desk.html")
+        assert "landing_stale" in text
+        assert "refresh" in text
+
+
+class TestAudienceLivesInOnePlace:
+    """F1: аудитория была размазана по четырём файлам.
+
+    `purpose` протянут через весь продукт — проверку спроса, оптику отчёта,
+    воронку владельца, цели Метрики, — но ОПИСАНА аудитория была четырьмя
+    разными способами в четырёх местах: персона и критерий балла в
+    `report_engine`, переопределения разделов через ключ `"social"` внутри
+    `SECTION_SPECS`, ветка `IS_SOCIAL_CONTRACT` в скрипте страницы результата
+    и русская метка в `PURPOSE_LABEL` прямо в `desk.html`.
+
+    На двух аудиториях это ещё держалось. На трёх и больше — нет: это тот же
+    дефект-класс, что уже дал расхождения в ценах (B5), названиях тарифов
+    (B7), правиле этапа (A13) и адресе отчёта (E6). Каждый раз копия правила
+    в двух местах молча разъезжалась.
+
+    Поэтому аудитория стала первоклассной сущностью в `app/audiences.py`:
+    одна запись описывает адрес витрины, метку, кто читает результат, персону
+    для модели, что означает балл и обязательна ли смета. Всё остальное
+    спрашивает у реестра.
+    """
+
+    def test_registry_lists_the_audiences_we_actually_have(self):
+        from app.audiences import AUDIENCES
+        assert set(AUDIENCES) == {"business", "social_contract", "student"}
+
+    def test_every_audience_is_described_completely(self):
+        """Полупустая запись — это молчаливый откат к оптике фаундера."""
+        from app.audiences import AUDIENCES
+        for key, a in AUDIENCES.items():
+            for field in ("key", "label", "reader", "persona", "viability"):
+                assert getattr(a, field), f"{key}: пустое поле {field}"
+            assert a.key == key
+
+    def test_slugs_are_unique_and_home_belongs_to_the_founder(self):
+        from app.audiences import AUDIENCES, by_slug
+        slugs = [a.slug for a in AUDIENCES.values()]
+        assert len(slugs) == len(set(slugs)), slugs
+        assert by_slug("").key == "business"
+        assert by_slug("social-contract").key == "social_contract"
+
+    def test_unknown_audience_falls_back_to_the_founder(self):
+        """Мусор в `purpose` не должен ронять страницу — но и притворяться
+        соцконтрактом тоже не должен (принцип 7)."""
+        from app.audiences import get
+        assert get("нет такой").key == "business"
+        assert get("").key == "business"
+        assert get(None).key == "business"
+
+    def test_report_engine_takes_the_persona_from_the_registry(self):
+        """Вторая копия персоны — это разъехавшаяся оптика платного продукта."""
+        import app.report_engine as re_mod
+        from app.audiences import get
+        assert not hasattr(re_mod, "_PERSONA"), "персона осталась копией в движке"
+        assert not hasattr(re_mod, "_VIABILITY_SPEC"), "критерий балла остался копией"
+        for key in ("business", "social_contract"):
+            assert get(key).persona[:40] in re_mod._core_prompt("full", key)
+            assert get(key).viability[:40] in re_mod._core_prompt("full", key)
+
+    def test_section_overrides_are_keyed_by_audience(self):
+        """Ключ `"social"` внутри разделов — это «аудиторий ровно две».
+        Третья потребовала бы `"student"` и ещё одного `if`."""
+        from app.report_engine import SECTION_SPECS
+        for s in SECTION_SPECS:
+            assert "social" not in s, f"{s['key']}: переопределения не по ключу аудитории"
+            from app.audiences import AUDIENCES
+            for aud in (s.get("by_audience") or {}):
+                assert aud in AUDIENCES, f"{s['key']}: {aud}"
+
+    def test_section_titles_still_differ_where_they_did(self):
+        """Переезд не должен потерять то, ради чего оптика заводилась."""
+        from app.report_engine import section_title
+        assert section_title("finance", "social_contract") == "Смета и расчёты для комиссии"
+        assert section_title("finance", "business") == "Финансовая модель"
+
+    def test_desk_labels_come_from_the_server(self):
+        """Русские названия аудиторий жили копией в скрипте панели."""
+        text = _read_static("desk.html")
+        assert "PURPOSE_LABEL = {business:" not in text
+        r = client.get("/api/funnel", headers=OWNER)
+        assert r.status_code == 200, r.text
+        labels = r.json()["audience_labels"]
+        assert labels["business"] and labels["social_contract"]
+        assert labels["social_contract"] != labels["business"]
+
+
+class TestVisitorCanFindHisOwnEntrance:
+    """F2: `/social-contract` был доступен только по ссылке из объявления.
+
+    С самого сайта на него не попасть: ни с главной, ни из подвала, ни из
+    результата проверки. Человек, которому нужно обоснование для комиссии
+    соцзащиты, приходит на главную и читает про венчурную проверку идеи —
+    и не понимает, что это про него тоже.
+
+    Обратное так же верно: пришедший по объявлению соцконтрактник не может
+    уйти на витрину фаундера, если ошибся. Единственная ссылка — логотип,
+    который молча уводит на «другой» сайт.
+
+    Витрин будет больше двух (F3, студенты), поэтому переключатель собирается
+    из реестра аудиторий на сервере и вставляется в страницы одним слотом.
+    Копия в каждой витрине разъехалась бы ровно так же, как разъезжались цены
+    (B5) и названия тарифов (B7).
+    """
+
+    def _switch(self, path):
+        import re
+        t = client.get(path).text
+        m = re.search(r'<nav class="aud-switch".*?</nav>', t, re.S)
+        assert m, f"на {path} нет переключателя аудитории"
+        return m.group()
+
+    def test_home_offers_the_other_entrances(self):
+        block = self._switch("/")
+        assert 'href="/social-contract"' in block
+
+    def test_social_contract_page_offers_the_way_back(self):
+        block = self._switch("/social-contract")
+        assert 'href="/"' in block
+
+    def test_current_audience_is_shown_but_not_a_link(self):
+        """Ссылка на страницу, где человек уже стоит, — шум и лишний клик."""
+        import re
+        block = self._switch("/social-contract")
+        assert 'href="/social-contract"' not in block
+        assert re.search(r'aria-current="page"', block), block
+
+    def test_every_audience_from_the_registry_is_offered(self):
+        """Новая аудитория обязана появиться в переключателе сама."""
+        from app.audiences import AUDIENCES
+        block = self._switch("/")
+        for a in AUDIENCES.values():
+            assert a.switch_label in block, a.key
+
+    def test_labels_speak_from_the_visitors_side(self):
+        """«business» и «social_contract» — наши слова. Человек про себя
+        говорит иначе (принцип 5)."""
+        from app.audiences import AUDIENCES
+        for a in AUDIENCES.values():
+            low = a.switch_label.lower()
+            assert a.key not in low
+            for bad in ("оффер", "лендинг", "аудитория", "purpose"):
+                assert bad not in low, (a.key, a.switch_label)
+
+    def test_switch_is_built_in_one_place(self):
+        """Разметка переключателя не должна лежать копией в витринах."""
+        for name in ("index.html", "audience-landing.html"):
+            t = _read_static(name)
+            assert "__AUDIENCE_SWITCH__" in t, name
+            assert 'class="aud-switch"' not in t, name
+
+    def test_result_page_lets_you_switch_optics_without_rechecking(self):
+        """Спрос уже посчитан — гонять человека через проверку заново, чтобы
+        сменить оптику разбора, незачем."""
+        import app.main as m
+        rid = None
+
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "ф", "count": 480}], "best_phrase": "ф",
+                    "verdict": {"level": "niche", "text": "т"},
+                    "competitors": {"found": 9, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": ""}],
+                    "overall": {"value": 4, "weakest": "Спрос", "basis": "б"}}
+
+        import app.main
+        old = app.main.check_demand
+        app.main.check_demand = fake_check
+        try:
+            r = client.post("/api/demand", json={"idea": "Груминг с выездом на дом",
+                                                 "purpose": "business"})
+            rid = r.json()["id"]
+        finally:
+            app.main.check_demand = old
+        r = client.post(f"/api/demand/{rid}/purpose", json={"purpose": "social_contract"})
+        assert r.status_code == 200, r.text
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            assert s.get(DemandCheck, rid).purpose == "social_contract"
+
+    def test_switching_to_an_unknown_audience_is_refused(self):
+        assert client.post("/api/demand/999999/purpose",
+                           json={"purpose": "нет такой"}).status_code in (400, 404)
+
+
+class TestStudentAudience:
+    """F3: третья аудитория — студенты, и общий шаблон витрины.
+
+    Владелец: «я помню, как у меня в студенчестве идеи генерировались
+    фонтаном», и ему самому не хватало способа идею верифицировать. Для
+    защиты студенту сильнее бизнес-плана работает **тест на реальных людях**:
+    на защите он говорит не «я придумал», а «я проверил, вот цифры».
+    Бизнес-план ему продаём другими словами — не венчурный разбор, а «как это
+    запустить и обо что ты споткнёшься». Цены единые для всех аудиторий —
+    решение владельца.
+
+    **Нулевой поисковый спрос — главный вопрос этой аудитории.** У курсовой
+    идеи спроса в Яндексе может не быть вовсе, а воронка на слабом спросе
+    намеренно перестаёт продавать (A11/A12). Прятать вердикт нельзя — принцип
+    1 не обсуждается, и принцип 2 тоже: вердикт имеет право сказать «нет».
+    Но A4 уже установила правило: **вердикт сообщает находку и НЕ предписывает
+    следующий шаг — шаг у аудиторий разный**. Фаундеру при нулевом спросе
+    честно сказать «не тратьте деньги»; студенту тот же ноль — законный
+    материал для работы, и следующий шаг у него другой. Поэтому реакция на
+    слабый спрос переехала в реестр, а не осталась одна на всех.
+    """
+
+    def test_student_is_in_the_registry_with_its_own_optics(self):
+        from app.audiences import AUDIENCES, get
+        assert "student" in AUDIENCES
+        a = get("student")
+        assert a.slug == "students"
+        for field in ("label", "reader", "persona", "viability", "switch_label"):
+            assert getattr(a, field), field
+        assert a.persona != get("business").persona
+        assert a.viability != get("business").viability
+
+    def test_student_optics_are_not_venture(self):
+        """Мерить курсовую венчурной линейкой — тот же вред, что мерить ею
+        соцконтракт (принцип 4)."""
+        from app.audiences import get
+        low = get("student").persona.lower()
+        # Слово «венчур» в персоне допустимо — она им как раз ОТКАЗЫВАЕТСЯ
+        # мерить. Проверяем позицию, а не наличие слова.
+        assert "не главное" in low or "не применяй" in low, low
+        assert "защит" in low, low
+        assert "масштабируемость" in low
+
+    def test_the_page_opens_and_carries_the_switch(self):
+        r = client.get("/students")
+        assert r.status_code == 200
+        assert 'class="aud-switch"' in r.text
+        assert 'href="/social-contract"' in r.text and 'href="/"' in r.text
+        assert 'href="/students"' not in r.text.split("</nav>")[0]
+
+    def test_the_page_sends_its_own_audience_with_the_check(self):
+        t = client.get("/students").text
+        assert 'AUDIENCE = "student"' in t, "витрина не знает свою аудиторию"
+        assert "purpose: AUDIENCE" in t, "проверка уходит без аудитории"
+
+    def test_both_audience_pages_come_from_one_template(self):
+        """Третья копия витрины разъехалась бы, как разъезжались цены (B5)."""
+        import pathlib
+        static = pathlib.Path(main_module.BASE_DIR).parent / "static"
+        assert (static / "audience-landing.html").exists()
+        assert not (static / "students.html").exists()
+        assert not (static / "social-contract.html").exists()
+
+    def test_prices_are_the_same_for_everyone(self):
+        """Решение владельца: разные цены обидят тех, кто не попал в льготную
+        группу. Витрины обязаны называть одни и те же суммы."""
+        import re
+        nums = [set(re.findall(r"(\d{3,4}) ₽", client.get(p).text))
+                for p in ("/social-contract", "/students")]
+        assert nums[0] == nums[1], nums
+
+    def test_weak_demand_answer_differs_by_audience(self):
+        from app.audiences import get
+        founder, student = get("business").weak_demand, get("student").weak_demand
+        assert founder and student and founder != student
+        # фаундеру — не тратить деньги; студенту ноль тоже материал для работы
+        assert "переформул" in founder.lower() or "не тратить" in founder.lower()
+        assert "работ" in student.lower() or "защит" in student.lower()
+
+    def test_result_page_takes_the_weak_answer_from_the_server(self):
+        """Ветка `IS_SOCIAL_CONTRACT` в скрипте — это «аудиторий ровно две»."""
+        t = _read_static("result.html")
+        assert "IS_SOCIAL_CONTRACT" not in t
+        assert "AUDIENCE.plan_first" in t
+        assert "AUDIENCE.weak_demand" in t, "ответ на слабый спрос всё ещё один на всех"
+
+    def test_social_contract_page_did_not_change_its_promise(self):
+        """Переезд на общий шаблон — не повод потерять то, ради чего витрина
+        заводилась."""
+        t = client.get("/social-contract").text
+        assert "комисси" in t.lower()
+        assert "смет" in t.lower()
+        assert 'id="idea"' in t and "/api/demand" in t
+
+
+class TestOpticsCanBeSwitchedOnTheResultPage:
+    """F3 (остаток): ручка смены оптики была, кнопки не было.
+
+    Прошлый цикл добавил `POST /api/demand/{id}/purpose` — сменить аудиторию
+    на уже посчитанной проверке, не проходя её заново. Но в интерфейсе этой
+    возможности не существовало: человек, попавший не на ту витрину, видел
+    результат чужими глазами и мог только начать всё сначала.
+
+    Случай не редкий. Витрин три, находят нас и поиском, и по ссылке от
+    знакомого, а на самой `/r/` до этой правки вообще ничего не говорило, чьими
+    глазами он читает разбор. Между тем на выбор аудитории завязано многое:
+    что стоит главным действием (`plan_first`), что мы отвечаем при слабом
+    спросе и какой персоной модель напишет платный разбор.
+
+    Спрос при смене не пересчитывается — он от аудитории не зависит, это
+    цифры Яндекса. Меняется только оптика.
+    """
+
+    def _check(self, purpose="business"):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        data = {"formulations": [{"phrase": "ф", "count": 480}], "best_phrase": "ф",
+                "verdict": {"level": "niche", "text": "т"},
+                "competitors": {"found": 9, "top": []},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": ""}],
+                "overall": {"value": 4, "weakest": "Спрос", "basis": "б"}}
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Груминг собак с выездом на дом", purpose=purpose,
+                              result_json=json.dumps(data, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id, rec.public_id
+
+    def test_page_says_whose_eyes_you_are_reading_with(self):
+        _, pid = self._check("student")
+        t = client.get(f"/r/{pid}").text
+        assert 'id="optics"' in t, "на странице нет блока смены оптики"
+        assert "Делаю студенческий проект" in t
+
+    def test_all_other_audiences_are_offered(self):
+        from app.audiences import AUDIENCES
+        _, pid = self._check("business")
+        t = client.get(f"/r/{pid}").text
+        block = t[t.index('id="optics"'):]
+        block = block[:block.index("</div>")]
+        for a in AUDIENCES.values():
+            assert a.switch_label in block, a.key
+
+    def test_switching_keeps_the_numbers(self):
+        """Спрос от аудитории не зависит — это цифры Яндекса, а не мнение."""
+        import app.main as m
+        rid, pid = self._check("business")
+        before = client.get(f"/r/{pid}").text
+        assert client.post(f"/api/demand/{rid}/purpose",
+                           json={"purpose": "student"}).status_code == 200
+        after = client.get(f"/r/{pid}").text
+
+        def payload(html_out):
+            return html_out.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+        assert json.loads(payload(before))["formulations"] == \
+               json.loads(payload(after))["formulations"]
+
+    def test_switching_changes_the_optics(self):
+        rid, pid = self._check("business")
+        client.post(f"/api/demand/{rid}/purpose", json={"purpose": "social_contract"})
+        t = client.get(f"/r/{pid}").text
+        aud = json.loads(t.split("const AUDIENCE = ", 1)[1].split(";\n", 1)[0])
+        assert aud["key"] == "social_contract"
+        assert aud["plan_first"] is True
+
+    def test_report_built_after_the_switch_uses_the_new_optics(self):
+        """Смена оптики бессмысленна, если платный разбор её не увидит."""
+        import app.main as m
+        from app.audiences import get
+        rid, _ = self._check("business")
+        client.post(f"/api/demand/{rid}/purpose", json={"purpose": "student"})
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            purpose = s.get(DemandCheck, rid).purpose
+        from app.report_engine import _core_prompt
+        prompt = _core_prompt("full", purpose)
+        assert get("student").persona[:40] in prompt
+
+    def test_switch_is_not_offered_when_there_is_only_one_audience(self, monkeypatch):
+        """Сторож от бессмысленного блока: если аудитория одна, выбирать не из
+        чего и строка только мешает."""
+        import app.main as m
+        from app.audiences import BUSINESS
+        monkeypatch.setattr(m.audiences, "AUDIENCES", {"business": BUSINESS})
+        _, pid = self._check("business")
+        assert 'id="optics"' not in client.get(f"/r/{pid}").text

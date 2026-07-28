@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Бизнес-план для социального контракта — с обоснованными цифрами</title>
-<meta name="description" content="Опишите идею — бесплатно проверим реальный спрос и конкурентов по данным Яндекса, это ляжет в основу расчётов. Дальше — готовый текст бизнес-плана: рынок, финансовая оценка, риски. От __MIN_REPORT_PRICE__ ₽.">
-<meta property="og:title" content="Бизнес-план для социального контракта — с обоснованными цифрами">
-<meta property="og:description" content="Реальные цифры спроса и конкурентов вместо «рынок большой». Готовый текст бизнес-плана от __MIN_REPORT_PRICE__ ₽.">
+<title>__PAGE_TITLE__</title>
+<meta name="description" content="__META__">
+<meta property="og:title" content="__PAGE_TITLE__">
+<meta property="og:description" content="__META__">
 <meta property="og:type" content="website">
 <meta property="og:locale" content="ru_RU">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2712%27 fill=%27%23FFDE59%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-family=%27Arial,sans-serif%27 font-size=%2736%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%231B1C20%27%3EС%3C/text%3E%3C/svg%3E">
@@ -32,6 +32,15 @@
     padding-top:14px;padding-bottom:14px}
   .logo{font-weight:700;font-size:17px;color:var(--ink);text-decoration:none;letter-spacing:-.01em}
 
+  /* Переключатель витрин: собирается сервером из реестра аудиторий (F2).
+     Не пилюли и не вкладки-табы — простая строка ссылок, чтобы человек
+     сразу увидел, что мы и про него тоже. */
+  .aud-switch{max-width:760px;margin:0 auto;padding:14px 22px 0;
+    display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;font-size:14px}
+  .aud-tag{color:var(--muted);font-size:13px}
+  .aud-switch a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line)}
+  .aud-switch a:hover{color:var(--ink);border-color:var(--ink)}
+  .aud-cur{font-weight:600}
   .hero{padding-top:40px;padding-bottom:30px}
   h1{font-size:clamp(26px,4.6vw,34px);line-height:1.28;font-weight:600;letter-spacing:-.015em;max-width:19em}
   .sub{color:var(--muted);font-size:17px;max-width:38em;margin:14px 0 24px}
@@ -98,13 +107,14 @@
 </header>
 
 <main>
+  __AUDIENCE_SWITCH__
   <section class="hero wrap">
-    <h1>Бизнес-план для социального контракта — с цифрами, которые <span class="hl">выдержат вопросы комиссии</span></h1>
-    <p class="sub">Опишите идею — бесплатно покажем реальный спрос по данным Яндекса и список конкурентов. Эти цифры, а не общие фразы «рынок большой», лягут в основу расчётов вашего бизнес-плана.</p>
+    <h1>__H1__</h1>
+    <p class="sub">__SUB__</p>
 
     <div class="checker">
-      <label for="idea">Опишите идею вашего дела</label>
-      <textarea id="idea" maxlength="300" placeholder="Например: пошив штор и постельного белья на заказ на дому"></textarea>
+      <label for="idea">__FIELD_LABEL__</label>
+      <textarea id="idea" maxlength="300" placeholder="__PLACEHOLDER__"></textarea>
       <div class="checker-foot">
         <button class="btn" id="check-btn" type="button">Проверить спрос — бесплатно</button>
         <span class="fine">2 минуты · без регистрации</span>
@@ -114,24 +124,9 @@
   </section>
 
   <section class="band wrap">
-    <h2>Что вы получите</h2>
-    <p class="band-sub">Комиссия чаще отказывает не из-за идеи, а из-за необоснованных цифр в смете. Мы закрываем именно это.</p>
-    <div class="point"><span class="mark"></span><div>
-      <h3>Реальные цифры вместо выдумки</h3>
-      <p>Частотность запросов в Яндексе и список конкурентов из выдачи — вместо общих фраз о размере рынка.</p>
-    </div></div>
-    <div class="point"><span class="mark"></span><div>
-      <h3>Обоснование сметы <span class="in-tier">в тарифе «__FULL_LABEL__»</span></h3>
-      <p>Смета расходов построчно с суммами, план доходов на первый год, точка безубыточности и срок окупаемости — под вашу конкретную идею, а не типовой шаблон под все виды деятельности сразу.</p>
-    </div></div>
-    <div class="point"><span class="mark"></span><div>
-      <h3>Разбор рисков</h3>
-      <p>Прямые ответы на вопросы, которые обычно задаёт комиссия: почему сработает и что может пойти не так.</p>
-    </div></div>
-    <div class="point"><span class="mark"></span><div>
-      <h3>Готовый текст сразу после оплаты</h3>
-      <p>Переносите текст и цифры в форму, которую требует ваш центр занятости — итоговое оформление по бланку остаётся за вами.</p>
-    </div></div>
+    <h2>__PROMISE_TITLE__</h2>
+    <p class="band-sub">__PROMISE_SUB__</p>
+    __PROMISES__
   </section>
 
   <section class="band wrap">
@@ -144,30 +139,19 @@
       <div class="tier">
         <h3>__QUICK_LABEL__</h3>
         <div><span class="price">__QUICK_PRICE__ ₽</span><span class="was">__QUICK_WAS__ ₽</span></div>
-        <p>Резюме идеи, спрос и рынок, конкуренты, вердикт. <b>Без сметы и расчётов</b> — если план нужен для комиссии, берите «__FULL_LABEL__».</p>
+        <p>__QUICK_NOTE__</p>
       </div>
       <div class="tier full">
         <h3>__FULL_LABEL__</h3>
         <div><span class="price">__FULL_PRICE__ ₽</span><span class="was">__FULL_WAS__ ₽</span></div>
-        <p>Всё из быстрого разбора + смета расходов с суммами, план доходов и окупаемость, аудитория, риски, план запуска.</p>
+        <p>__FULL_NOTE__</p>
       </div>
     </div>
   </section>
 
   <section class="band wrap">
     <h2>Частые вопросы</h2>
-    <div class="faq">
-      <h3>Это официальный документ по форме моего центра занятости?</h3>
-      <p>Нет. Вы получаете обоснованный текст и цифры для бизнес-плана — перенести их в бланк, который требует именно ваш регион, нужно самостоятельно.</p>
-    </div>
-    <div class="faq">
-      <h3>Гарантируете одобрение комиссией?</h3>
-      <p>Нет, решение всегда за комиссией. Мы даём обоснованные цифры вместо голословных утверждений — остальное, включая устную защиту, зависит от вас.</p>
-    </div>
-    <div class="faq">
-      <h3>Как быстро будет готово?</h3>
-      <p>Сразу после оплаты — текст собирается за одну-две минуты.</p>
-    </div>
+    __FAQ__
   </section>
 </main>
 
@@ -178,6 +162,7 @@
 </footer>
 
 <script>
+const AUDIENCE = "__AUDIENCE_KEY__";
 const btn = document.getElementById('check-btn');
 const ideaEl = document.getElementById('idea');
 const errEl = document.getElementById('err');
@@ -200,12 +185,12 @@ btn.addEventListener('click', async () => {
       headers: {'Content-Type': 'application/json'},
       // purpose переключает оптику платного отчёта: смета для комиссии
       // вместо венчурного разбора (см. PURPOSES в app/report_engine.py).
-      body: JSON.stringify({idea, purpose: 'social_contract'})
+      body: JSON.stringify({idea, purpose: AUDIENCE})
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || data.detail || 'Сервис сейчас перегружен. Попробуйте через минуту.');
     if (data.id) {
-      if (window.sozGoal) window.sozGoal('demand_started', {purpose: 'social_contract'});
+      if (window.sozGoal) window.sozGoal('demand_started', {purpose: AUDIENCE});
       location.href = '/r/' + (data.public_id || data.id); return;
     }
     throw new Error('Результат готов, но страница не открылась. Попробуйте ещё раз.');

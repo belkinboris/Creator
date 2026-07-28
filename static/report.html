@@ -65,7 +65,12 @@
   .score-card .num small{font-size:.4em;color:var(--muted)}
   .score-card .note{color:var(--muted);font-size:15px;max-width:40em}
   .risks{display:grid;gap:14px;margin:0 0 22px}
-  @media (min-width:640px){.risks{grid-template-columns:repeat(auto-fit, minmax(220px,1fr))}}
+  /* Ровно две колонки, а не auto-fit: рисков всегда 2 (быстрый разбор) или 4
+     (бизнес-план), см. report_engine._risk_count — значит два столбца дают
+     полные ряды при любом тарифе. auto-fit подбирал число колонок под ширину
+     окна и на промежуточных размерах оставлял четвёртую карточку одну, с
+     двумя третями пустоты справа. */
+  @media (min-width:640px){.risks{grid-template-columns:1fr 1fr}}
   .risk{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:16px}
   .risk h4{font-size:15px;font-weight:600;margin-bottom:6px}
   .risk p{color:var(--muted);font-size:14px}
@@ -142,7 +147,11 @@
   footer a{color:var(--muted)}
   footer a:hover{color:var(--ink)}
 
+  /* Строка выходных данных нужна только на листе: на экране и так видно,
+     что отчёт открыт, а комиссии нужен документ с датой (C5). */
+  .doc-meta{display:none}
   @media print{
+    .doc-meta{display:block;color:#6F6A5C;font-size:12px;margin-top:6px}
     header, .report-nav, .pricing, footer, .no-print{display:none !important}
     body{background:#fff}
     .report-layout{grid-template-columns:1fr;margin-top:0}
@@ -161,7 +170,8 @@
 
 <main class="wrap">
   <div class="head">
-    <h1>Отчёт по идее</h1>
+    <h1>__DOC_TITLE__</h1>
+    __DOC_META__
     <p class="idea" id="idea">__IDEA__</p>
     __CHOSEN_BLOCK__
   </div>

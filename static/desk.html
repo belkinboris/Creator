@@ -71,11 +71,13 @@
   @media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
   .p{background:var(--box);border:1px solid var(--line);border-radius:8px;
     padding:18px;display:flex;flex-direction:column;gap:10px}
-  .p .kind{font:600 11px "IBM Plex Mono",monospace;letter-spacing:.08em;
+  .p .kind{font:600 11px "IBM Plex Sans";letter-spacing:.08em;
     text-transform:uppercase;color:var(--muted)}
   .p h2{font-size:19px;font-weight:600;letter-spacing:-.01em}
   .stage-line{display:flex;flex-direction:column;gap:6px}
-  .stage-txt{font:600 12px "IBM Plex Mono",monospace;color:var(--muted)}
+  /* Моно — только самой метке «Этап N из 7»: название этапа это текст (B9). */
+  .stage-txt{font:600 12px "IBM Plex Sans";color:var(--muted)}
+  .stage-txt .stage-num{font-family:"IBM Plex Mono",monospace}
   .stage-bar{display:flex;gap:3px}
   .stage-bar i{flex:1;height:4px;border-radius:99px;background:var(--line);font-style:normal}
   .stage-bar i.done{background:var(--ink)}
@@ -83,13 +85,15 @@
 
   .nums{display:flex;gap:22px;margin-top:2px}
   .n .v{font:600 26px/1 "IBM Plex Mono",monospace}
-  .n .l{font:500 11px "IBM Plex Mono",monospace;text-transform:uppercase;
+  .n .l{font:500 11px "IBM Plex Sans";text-transform:uppercase;
     letter-spacing:.08em;color:var(--muted);margin-top:4px}
   .bar{height:6px;background:var(--line);border-radius:99px;overflow:hidden}
   .bar i{display:block;height:100%;background:var(--marker);border-radius:99px}
-  .verdict{font:600 13px "IBM Plex Mono",monospace}
+  .verdict{font:600 13px "IBM Plex Sans"}
+  .stale{border-left:3px solid var(--warn);padding:2px 0 2px 12px;margin:0 0 10px;
+    font-size:13px;color:var(--muted)}
   .next{border-left:3px solid var(--marker);padding:2px 0 2px 12px;font-size:14px}
-  .next span{display:block;font:600 10px "IBM Plex Mono",monospace;
+  .next span{display:block;font:600 10px "IBM Plex Sans";
     text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px}
   .acts{margin-top:auto;display:flex;gap:8px;flex-wrap:wrap}
   .btn{border:0;background:var(--btn);color:#fff;border-radius:6px;
@@ -114,7 +118,7 @@
   .order-row{padding:14px 16px;border-top:1px solid var(--line)}
   .order-row:first-child{border-top:0}
   .order-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
-  .order-status{font:600 12px "IBM Plex Mono",monospace;color:var(--muted)}
+  .order-status{font:600 12px "IBM Plex Sans";color:var(--muted)}
   .order-status.paid{color:var(--ok)}
   .order-status.bad{color:var(--bad)}
   .order-offer.bad{border-left-color:var(--bad);color:var(--ink)}
@@ -220,7 +224,7 @@ function stageBadge(stageIdx, name, total){
   // total разный: у smoke-проектов Создателя 7 шагов, у внешних (tracked) --
   // 8, это разные шкалы (см. STAGE_NAMES/TRACKED_STAGE_NAMES в app/main.py).
   const segs = Array.from({length:total}, (_,i)=> `<i class="${i<=stageIdx?'done':''}"></i>`).join('');
-  return `<div class="stage-line"><span class="stage-txt">Этап ${stageIdx+1} из ${total} — ${name}</span><div class="stage-bar">${segs}</div></div>`;
+  return `<div class="stage-line"><span class="stage-txt"><span class="stage-num">Этап ${stageIdx+1} из ${total}</span> — ${name}</span><div class="stage-bar">${segs}</div></div>`;
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -319,7 +323,9 @@ function enter(){
 // --- Воронка -------------------------------------------------------------
 // Числа объясняют себя: у каждого шага подпись, что именно он считает, и
 // доля от предыдущего. Голый счётчик — приглашение сделать неверный вывод.
-const PURPOSE_LABEL = {business: "фаундеры", social_contract: "соцконтракт"};
+// Названия аудиторий приходят с сервера вместе с воронкой: копия здесь
+// разъехалась бы при первой же новой аудитории (F1).
+let PURPOSE_LABEL = {};
 let funnelDays = 0;
 
 function fmtNum(n){ return Number(n).toLocaleString("ru-RU"); }
@@ -329,6 +335,7 @@ async function loadFunnel(){
   const r = await fetch(`/api/funnel?days=${funnelDays}`, {headers:{"X-Owner-Key": KEY}});
   if(!r.ok){ box.innerHTML = ""; return; }
   const d = await r.json();
+  PURPOSE_LABEL = d.audience_labels || {};
   const first = (d.stages[0] || {}).total || 0;
   let prev = null;
 
@@ -443,10 +450,15 @@ async function load(){
       <div class="bar"><i style="width:${s.progress}%"></i></div>
       <canvas class="spark" width="240" height="28"></canvas>
       <div class="verdict">${s.verdict}</div>
-      <div class="next"><span>следующий шаг</span>${s.next_step}</div>
+      <div class="next"><span>следующий шаг</span>${s.next_step}${s.next_link
+        ? ` <a href="${s.next_link.href}">${s.next_link.text} →</a>` : ''}</div>
+      ${s.landing_stale ? `<div class="stale">Страница собрана по старому шаблону —
+        правки движка на неё не попали. Пересборка меняет то, что видят люди,
+        поэтому решаете вы.</div>` : ''}
       <div class="acts">
         <button class="btn" onclick="location.href='${s.project_url}?key='+encodeURIComponent(KEY)">Открыть проект</button>
-        <button class="btn ghost" onclick="window.open('${s.landing_url}','_blank')">Лендинг</button>
+        <button class="btn ghost" onclick="window.open('${s.landing_url}','_blank')">Проверочная страница</button>
+        ${s.landing_stale ? `<button class="btn ghost" onclick="refreshLanding('${s.idea_id}')">Пересобрать страницу</button>` : ''}
         <button class="btn ghost" onclick="del('${s.idea_id}')">Удалить</button>
       </div>`;
     g.appendChild(el);
@@ -511,6 +523,15 @@ async function load(){
 
   loadOrders();
 }
+async function refreshLanding(id){
+  if (!confirm('Пересобрать проверочную страницу по текущему шаблону? '
+             + 'Если по ней уже идёт реклама, люди увидят обновлённую версию.')) return;
+  const r = await fetch(`/api/projects/${id}/refresh`, {method:'POST', headers:{'X-Owner-Key':KEY}});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.ok) { alert(d.detail || d.error || 'Не получилось пересобрать'); return; }
+  load();
+}
+
 async function del(id){
   if(!confirm(`Удалить проверку «${id}» вместе с событиями?`)) return;
   await fetch(`/api/projects/${id}`,{method:"DELETE",headers:{"X-Owner-Key":KEY}}); load();

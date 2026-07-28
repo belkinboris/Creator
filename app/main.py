@@ -20,6 +20,7 @@ ANTHROPIC_API_KEY), DATABASE_URL (по умолчанию sqlite).
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
@@ -63,6 +64,7 @@ from app.report_engine import (  # noqa: E402
     ALL_SECTIONS, QUICK_KEYS, SECTION_GROUPS, section_keys, section_title,
     PURPOSES as report_purposes,
 )
+from app import audiences  # noqa: E402
 from app import payments  # noqa: E402
 from app import mailer  # noqa: E402
 
@@ -129,6 +131,11 @@ class SmokeProject(SQLModel, table=True):
     idea_text: str
     offer_json: str          # выбранный оффер целиком (для повторных генераций)
     landing_html: str        # захощенный лендинг
+    # Отпечаток шаблона, из которого страница собрана. Правка шаблона живые
+    # страницы НЕ трогает (и не должна: менять страницу под работающей
+    # рекламой значит менять то, что измеряешь). Но владелец обязан видеть,
+    # что страница отстала, и уметь пересобрать её сам -- A20.
+    template_hash: str = ""
     click_target: int = CLICK_TARGET
     lead_rate_signal: float = SIGNAL_RATE
     lead_rate_dead: float = DEAD_RATE
@@ -308,6 +315,7 @@ try:  # create_all не добавляет колонки в существую�
         _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
         _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS public_id VARCHAR DEFAULT ''"))
         _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
+        _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS template_hash VARCHAR DEFAULT ''"))
         _c.commit()
 except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
     pass
@@ -481,7 +489,7 @@ async def offers(data: IdeaIn, request: Request):
     _check_owner(request)
     try:
         result = await sharpen_idea(data.idea)
-        return {"ok": True, **result}
+        return {"ok": True, **_polish_offers(result)}
     except OfferEngineError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
@@ -533,6 +541,29 @@ async def demand_check(data: IdeaIn, request: Request):
     return {"ok": True, "id": check_id, "public_id": public_id, **result}
 
 
+def _polish_offers(result: dict) -> dict:
+    """Приводит объяснение боли к виду предложения перед выдачей карточек.
+
+    Модель пишет `p` как придётся -- «Обещают три недели, шьют полтора месяца»
+    без точки рядом с вариантом, где точка есть. В карточке эти строки стоят
+    друг под другом, и разнобой читается как небрежность (B9). Название боли
+    (`h2`) не трогаем: это заголовок, точка ему не нужна.
+    """
+    offers = result.get("offers")
+    if not isinstance(offers, list):
+        return result
+    fixed = []
+    for o in offers:
+        pains = o.get("pains") if isinstance(o, dict) else None
+        if not isinstance(pains, list):
+            fixed.append(o)
+            continue
+        fixed.append({**o, "pains": [
+            {**pn, "p": _as_sentence(pn.get("p", ""))} if isinstance(pn, dict) else pn
+            for pn in pains]})
+    return {**result, "offers": fixed}
+
+
 @app.post("/api/sharpen")
 async def sharpen(data: IdeaIn, request: Request):
     """Бесплатное заострение идеи в 3 варианта позиционирования — по кнопке
@@ -543,7 +574,7 @@ async def sharpen(data: IdeaIn, request: Request):
         raise HTTPException(429, "слишком часто")
     try:
         result = await sharpen_idea(data.idea)
-        return {"ok": True, **result}
+        return {"ok": True, **_polish_offers(result)}
     except OfferEngineError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
@@ -562,7 +593,10 @@ def result_page(rid: str, request: Request):
     if redirect:
         return RedirectResponse(f"/r/{rec.public_id}", status_code=307)
     tpl = _static("result.html")
-    safe_json = rec.result_json.replace("</", "<\\/")
+    # Подписи шкал приводим к одному виду на выдаче: так чинятся и проверки,
+    # сохранённые до этой правки (B9).
+    polished = json.dumps(_polish_scores(json.loads(rec.result_json)), ensure_ascii=False)
+    safe_json = polished.replace("</", "<\\/")
     idea_json = json.dumps(rec.idea, ensure_ascii=False).replace("</", "<\\/")
     html_out = (tpl
         .replace("__CHECK_ID__", str(rec.id))
@@ -577,7 +611,10 @@ def result_page(rid: str, request: Request):
         # Человек с /social-contract пришёл за бизнес-планом для комиссии, а
         # не за рекламным тестом -- страница результата разворачивает финальный
         # шаг под него, см. PURPOSE в result.html.
-        .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False)))
+        .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False))
+        .replace("__AUDIENCE_JSON__",
+                 json.dumps(audiences.for_page(rec.purpose), ensure_ascii=False))
+        .replace("__OPTICS__", _optics_html(rec.purpose)))
     return HTMLResponse(_fill_server_values(html_out))
 
 
@@ -723,6 +760,68 @@ REPORT_PRICES = {
 }
 
 
+_SENTENCE_END = ".!?…:"
+
+
+def _as_caption(text: str) -> str:
+    """Подпись под числом, а не предложение: без точки в конце.
+
+    Заметки к шкалам пишет модель, и пишет как придётся -- «Рынок растёт.» с
+    точкой рядом с «Начать можно одной» без. В сетке из четырёх ячеек это
+    читается как небрежность (B9). Восклицательный и вопросительный знаки не
+    трогаем: если они там есть, это часть смысла, а не пунктуационная случайность.
+    """
+    return str(text or "").strip().rstrip(".").strip()
+
+
+def _as_sentence(text: str) -> str:
+    """Тот же фрагмент, но отдельным абзацем -- там точка обязательна, иначе
+    абзац выглядит оборванным (тизер отчёта)."""
+    t = str(text or "").strip()
+    return t if not t or t[-1] in _SENTENCE_END else t + "."
+
+
+def _demand_caption(demand_data: dict) -> str:
+    """Подпись к шкале спроса -- из её же частотности, без участия модели.
+
+    `check_demand` кладёт сюда пустую строку: три остальные шкалы объясняет
+    модель, а спрос считается по данным, и объяснять его было некому. В
+    результате из четырёх ячеек одна стояла голой -- причём самая важная:
+    спрос единственный посчитан по реальным цифрам Яндекса и он же потолок
+    общего балла. Числа берём готовые, ничего не выдумываем (принцип 1).
+    """
+    known = [f["count"] for f in (demand_data.get("formulations") or [])
+             if f.get("count") is not None]
+    if not known:
+        return "Частотность недоступна"
+    return f"{max(known):,}".replace(",", "\u00a0") + " запросов в месяц"
+
+
+def _polish_scores(demand_data: dict) -> dict:
+    """Приводит подписи шкал к одному виду ПЕРЕД выдачей страницы.
+
+    Именно на выдаче, а не при записи: так чинятся и уже сохранённые проверки,
+    и правило живёт в одном месте на одном языке, а не копией в шаблоне.
+    """
+    scores = demand_data.get("scores")
+    if not isinstance(scores, list):
+        return demand_data
+    out = dict(demand_data)
+    fixed = []
+    for sc in scores:
+        if not isinstance(sc, dict):
+            fixed.append(sc)
+            continue
+        row = dict(sc)
+        note = _as_caption(row.get("note", ""))
+        if not note and row.get("key") == "demand":
+            note = _demand_caption(demand_data)
+        row["note"] = note
+        fixed.append(row)
+    out["scores"] = fixed
+    return out
+
+
 def _report_preview(demand_data: dict) -> dict:
     """Бесплатный тизер отчёта — из уже посчитанных данных проверки спроса,
     без новых вызовов LLM (заметки по шкалам уже сгенерированы бесплатным
@@ -736,7 +835,10 @@ def _report_preview(demand_data: dict) -> dict:
     top = max(known) if known else None
     comp = demand_data.get("competitors") or {}
     top_names = [c.get("domain") or c.get("title") or "" for c in (comp.get("top") or [])[:3]]
-    notes = {s["key"]: s.get("note", "") for s in (demand_data.get("scores") or [])}
+    # В тизере заметки идут отдельными абзацами -- там нужна точка, в отличие
+    # от подписи под числом на /r/ (см. _as_caption/_as_sentence).
+    notes = {s["key"]: _as_sentence(s.get("note", ""))
+             for s in (demand_data.get("scores") or [])}
     return {
         "best_count": top,
         "verdict_text": v.get("text", ""),
@@ -1297,6 +1399,32 @@ def example_page(request: Request):
     return HTMLResponse(_fill_server_values(html_out))
 
 
+_MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+               "августа", "сентября", "октября", "ноября", "декабря")
+
+
+def _doc_title_and_meta(purchase) -> tuple[str, str]:
+    """Заголовок листа и строка с датой — для распечатки, а не для экрана.
+
+    Разбор для соцконтракта человек несёт в комиссию НА БУМАГЕ, и лист был
+    озаглавлен «Отчёт по идее» независимо от того, что куплено, — включая
+    тариф, который мы сами называем «Бизнес-план» и под этим именем продаём.
+    Комиссия получала документ, чьё название не совпадает ни с чеком, ни с
+    тем, зачем его принесли. Названия берём из REPORT_PRICES: третья копия
+    разъехалась бы, как уже разъезжались цены (B5).
+
+    Дата — день оплаты. Документ без даты для комиссии не документ, а
+    выдумывать её неоткуда: она есть готовая.
+    """
+    if not purchase or purchase.status != "paid":
+        return "Отчёт по идее", ""
+    label = REPORT_PRICES.get(purchase.tier, {}).get("label", "Отчёт по идее")
+    d = purchase.created_at
+    made = f"{d.day} {_MONTHS_GEN[d.month - 1]} {d.year} г."
+    return label, (f'<p class="doc-meta">{html.escape(label)} по идее · подготовлен '
+                   f'{made} · projectsozdatel.ru</p>')
+
+
 @app.get("/report/{rid}", response_class=HTMLResponse)
 async def report_page(rid: str, request: Request):
     """Дашборд отчёта: бесплатный тизер виден всегда; полные секции --
@@ -1432,8 +1560,11 @@ async def report_page(rid: str, request: Request):
 
     _purpose = rec.purpose
     _tier_keys = section_keys(purchase.tier) if purchase else []
+    doc_title, doc_meta = _doc_title_and_meta(purchase)
     tpl = _static("report.html")
     html_out = (tpl
+        .replace("__DOC_TITLE__", html.escape(doc_title))
+        .replace("__DOC_META__", doc_meta)
         .replace("__CHECK_ID__", str(rid))
         .replace("__ACCESS_NOTE__", access_note)
         .replace("__OWNER_BAR__", owner_bar)
@@ -1554,6 +1685,9 @@ def owner_funnel(request: Request, days: int = 0):
     return {
         "days": days,
         "purposes": list(report_purposes),
+        # Русские названия аудиторий отдаёт сервер: копия в скрипте панели
+        # разъехалась бы при первой же новой аудитории (F1).
+        "audience_labels": audiences.labels(),
         "stages": [{"name": n, "what": w, **counts} for n, w, counts in stages],
         "revenue": revenue,
     }
@@ -1591,11 +1725,16 @@ def diag_mail(request: Request, to: str = ""):
 _landing_tpl: Optional[str] = None
 
 
-def render_landing(offer: dict) -> str:
+def _landing_template() -> str:
+    """Шаблон проверочной страницы -- один раз за жизнь процесса, как _static()."""
     global _landing_tpl
-    if _landing_tpl is None:  # читаем с диска один раз за жизнь процесса, как и _static()
-        _landing_tpl = (BASE_DIR / "landing_template.html").read_text()
-    tpl = _landing_tpl
+    if _landing_tpl is None:
+        _landing_tpl = (BASE_DIR / "landing_template.html").read_text(encoding="utf-8")
+    return _landing_tpl
+
+
+def render_landing(offer: dict) -> str:
+    tpl = _landing_template()
     pains_html = "".join(
         f"<div><h2>{p['h2']}</h2><p>{p['p']}</p></div>" for p in offer["pains"]
     )
@@ -1626,6 +1765,16 @@ LAUNCH_REQUIRED_FIELDS = ("idea_id", "product_name", "h1", "sub", "pains",
                           "demo_left_label", "demo_left_text", "demo_right_text", "eyebrow")
 
 
+def _template_hash() -> str:
+    """Отпечаток текущего шаблона проверочной страницы.
+
+    Сравнение с сохранённым отвечает на вопрос «эта живая страница собрана до
+    правки или после». Читаем через `_static`, то есть из того же кеша, что и
+    рендер -- иначе отпечаток и страница разъехались бы (A20).
+    """
+    return hashlib.sha256(_landing_template().encode("utf-8")).hexdigest()[:16]
+
+
 def _launch_offer(s: Session, offer: dict, idea_text: str, contact: str = "") -> SmokeProject:
     """Общая логика запуска проекта -- вызывающая сторона уже проверила
     LAUNCH_REQUIRED_FIELDS. contact, если передан, привязывает проект к
@@ -1634,6 +1783,7 @@ def _launch_offer(s: Session, offer: dict, idea_text: str, contact: str = "") ->
     existing = s.exec(select(SmokeProject).where(SmokeProject.idea_id == offer["idea_id"])).first()
     if existing:
         existing.landing_html = html
+        existing.template_hash = _template_hash()
         existing.offer_json = json.dumps(offer, ensure_ascii=False)
         if contact:
             existing.contact = contact
@@ -1644,6 +1794,7 @@ def _launch_offer(s: Session, offer: dict, idea_text: str, contact: str = "") ->
         idea_text=idea_text[:2000],
         offer_json=json.dumps(offer, ensure_ascii=False),
         landing_html=html,
+        template_hash=_template_hash(),
         click_target=int(offer.get("click_target", 40)),
         lead_rate_signal=float(offer.get("lead_rate_signal", 0.08)),
         lead_rate_dead=float(offer.get("lead_rate_dead", 0.04)),
@@ -1793,22 +1944,39 @@ def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
     stage = _smoke_stage(views, p.click_target)
     v = compute_verdict(views, leads, p.click_target, p.lead_rate_signal, p.lead_rate_dead)
     rate = (leads / views) if views else 0.0
+    # Эту строку читает и владелец в /desk, и покупатель в /account -- так и
+    # задумано, один язык на двоих. Значит писать её надо на покупательском:
+    # ему «очередь на MVP», «идею в архив» и «второй оффер на том же трафике»
+    # не говорят ничего, а «оффер» с «трафиком» вдобавок запрещены (принцип 5).
+    # Ссылку отдаём отдельным полем: строка уходит в разметку экранированной,
+    # и путь в ней человек читал как текст, а кликнуть не мог (A17).
+    next_link = None
     if views == 0:
-        next_step = "Запустить Директ на страницу — инструкция: /guide/direct"
+        next_step = "Запустите рекламу в Яндекс Директе на вашу проверочную страницу."
+        next_link = {"href": "/guide/direct", "text": "Пошаговая инструкция"}
     elif views < p.click_target:
-        next_step = f"Копим клики: {p.click_target - views} до вердикта. Ничего не менять."
+        left = p.click_target - views
+        next_step = (f"Идут визиты: ещё {left} "
+                     f"{_plural(left, 'визит', 'визита', 'визитов')} до вывода. "
+                     "Ничего не меняйте, пусть наберётся.")
     elif v["verdict"] == "СИГНАЛ ЕСТЬ":
-        next_step = "Сигнал есть → идея в очередь на MVP"
+        next_step = "Люди оставляют заявки — можно делать первую версию продукта."
     elif v["verdict"] == "СПРОСА НЕТ":
-        next_step = "Спроса нет → остановить кампанию, идею в архив"
+        next_step = "Заявок почти нет — остановите рекламу, чтобы не тратить бюджет зря."
     else:
-        next_step = "Серая зона → второй оффер на том же трафике"
+        next_step = ("Результат посередине: попробуйте другое предложение "
+                     "для той же аудитории.")
     return {"idea_id": p.idea_id, "name": p.product_name,
             "stage": stage, "stage_name": STAGE_NAMES[stage],
             "views": views, "leads": leads, "rate": round(rate * 100),
             "target": p.click_target, "verdict": v["verdict"],
             "next_step": next_step,
+            "next_link": next_link,
             "progress": min(100, round(views / p.click_target * 100)) if p.click_target else 0,
+            # Страница собрана из устаревшего шаблона. Показываем ТОЛЬКО
+            # владельцу (см. /api/cabinet): покупателю это ни о чём не говорит,
+            # а чинит всё равно владелец кнопкой (A20).
+            "landing_stale": p.template_hash != _template_hash(),
             "landing_url": f"/l/{p.idea_id}",
             "project_url": f"/p/{p.idea_id}"}
 
@@ -1913,6 +2081,38 @@ def rename_project(idea_id: str, data: RenameIn, request: Request):
             f"<title>{old_name}</title>", f"<title>{name}</title>")
         s.add(proj); s.commit()
     return {"ok": True, "name": name}
+
+
+@app.post("/api/projects/{idea_id}/refresh")
+def refresh_landing(idea_id: str, request: Request):
+    """Пересобрать проверочную страницу из сохранённого варианта.
+
+    Правка шаблона не догоняет уже запущенные страницы: `landing_html` пишется
+    в БД в момент запуска. Молча пересобирать нельзя -- страница может стоять
+    под работающей рекламой, а менять её во время проверки значит менять то,
+    что измеряешь (об этом же плейбук просит и самого покупателя). Поэтому
+    решение принимает владелец, а мы лишь показываем, что страница отстала.
+
+    Имя проекта живёт на самом проекте, а не в варианте: владелец мог
+    переименовать его после запуска (PATCH /api/projects/{id}), и пересбор не
+    должен возвращать машинное название.
+    """
+    _check_owner(request)
+    with Session(engine) as s:
+        proj = s.exec(select(SmokeProject).where(SmokeProject.idea_id == idea_id)).first()
+        if proj is None:
+            raise HTTPException(404, "проект не найден")
+        try:
+            offer = json.loads(proj.offer_json)
+        except ValueError:
+            raise HTTPException(400, "у проекта не сохранён вариант, из которого он собран")
+        if not isinstance(offer, dict) or not all(offer.get(k) for k in LAUNCH_REQUIRED_FIELDS):
+            raise HTTPException(400, "у проекта не сохранён вариант, из которого он собран")
+        offer = {**offer, "product_name": proj.product_name}
+        proj.landing_html = render_landing(offer)
+        proj.template_hash = _template_hash()
+        s.add(proj); s.commit()
+    return {"ok": True, "landing_url": f"/l/{idea_id}"}
 
 
 class ProjectContactIn(BaseModel):
@@ -2315,6 +2515,34 @@ class ChosenOfferIn(BaseModel):
     offer: dict
 
 
+class PurposeIn(BaseModel):
+    purpose: str
+
+
+@app.post("/api/demand/{rid}/purpose")
+def demand_purpose(rid: int, data: PurposeIn):
+    """Сменить оптику разбора на уже посчитанной проверке.
+
+    Человек мог прийти не с той витрины — это обычное дело, если он нашёл нас
+    поиском, а не по объявлению. Гонять его через проверку заново незачем:
+    спрос уже посчитан, меняется только то, чьими глазами читать результат
+    (см. app/audiences.py). Ограничения доступа тут нет намеренно: адрес
+    проверки и так неугадываемый (E6), а сменить оптику — не то же, что
+    прочитать чужую идею; ничего нового смена не открывает.
+    """
+    if data.purpose not in audiences.keys():
+        return JSONResponse({"ok": False, "error": "Неизвестная аудитория."},
+                            status_code=400)
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."},
+                                status_code=404)
+        rec.purpose = data.purpose
+        s.add(rec); s.commit()
+    return {"ok": True, "purpose": data.purpose}
+
+
 @app.post("/api/demand/{rid}/chosen")
 def demand_chosen(rid: int, data: ChosenOfferIn, request: Request):
     """Запомнить, какой из трёх заострённых вариантов человек выбрал на /r/.
@@ -2460,14 +2688,67 @@ def guide_direct():
     return HTMLResponse(_with_server_values("guide-direct.html"))
 
 
+def _audience_landing(key: str) -> str:
+    """Витрина аудитории: одна вёрстка, тексты из реестра.
+
+    Третья копия HTML разъехалась бы ровно так же, как разъезжались цены (B5)
+    и названия тарифов (B7) — а витрин теперь три. Позиционирование главной
+    при этом не меняется: она общая и о конкретных аудиториях с порога не
+    говорит, ссылки живут в переключателе (F2).
+    """
+    a = audiences.get(key)
+    c = a.copy
+    promises = "".join(
+        f'<div class="point"><span class="mark"></span><div>'
+        f"<h3>{h3}</h3><p>{html.escape(txt)}</p></div></div>"
+        for h3, txt in c.get("promises", []))
+    faq = "".join(f'<div class="faq"><h3>{html.escape(q)}</h3>'
+                  f"<p>{html.escape(ans)}</p></div>"
+                  for q, ans in c.get("faq", []))
+    page = (_static("audience-landing.html")
+            .replace("__PAGE_TITLE__", html.escape(c.get("title", "Создатель")))
+            .replace("__META__", html.escape(c.get("meta", "")))
+            .replace("__H1__", c.get("h1", ""))
+            .replace("__SUB__", html.escape(c.get("sub", "")))
+            .replace("__FIELD_LABEL__", html.escape(c.get("field_label", "Опишите идею")))
+            .replace("__PLACEHOLDER__", html.escape(c.get("placeholder", "")))
+            .replace("__PROMISE_TITLE__", html.escape(c.get("promise_title", "")))
+            .replace("__PROMISE_SUB__", html.escape(c.get("promise_sub", "")))
+            .replace("__PROMISES__", promises)
+            .replace("__QUICK_NOTE__", c.get("quick_note", ""))
+            .replace("__FULL_NOTE__", c.get("full_note", ""))
+            .replace("__FAQ__", faq)
+            .replace("__AUDIENCE_SWITCH__", _audience_switch_html(a.key))
+            .replace("__AUDIENCE_KEY__", a.key))
+    return _fill_server_values(page)
+
+
+@app.get("/students", response_class=HTMLResponse)
+def students_page():
+    """Витрина под студенческие проекты: курсовая, диплом, конкурс, грант.
+
+    Цены те же, что у всех (решение владельца: разные цены обидят тех, кто не
+    попал в льготную группу). Отличается оптика разбора и то, что мы обещаем:
+    студенту сильнее бизнес-плана работает тест на реальных людях — на защите
+    он говорит не «я придумал», а «я проверил, вот цифры».
+    """
+    return HTMLResponse(_audience_landing("student"))
+
+
 @app.get("/social-contract", response_class=HTMLResponse)
 def social_contract_page():
-    """Отдельная посадочная страница под рекламу на аудиторию социального
-    контракта -- специально НЕ часть общего позиционирования сайта (см.
-    CLAUDE.md), чтобы не отпугивать массового пользователя упоминанием
-    грантов/соцконтракта. Ведёт в тот же бесплатный /api/demand -> /r/{id},
-    что и главная страница."""
-    return HTMLResponse(_with_server_values("social-contract.html"))
+    """Витрина под аудиторию социального контракта: те же цены и тот же
+    бесплатный /api/demand -> /r/{id}, что и на главной, но своя оптика
+    разбора (см. app/audiences.py).
+
+    Главная страница по-прежнему не говорит о соцконтракте с порога — незачем
+    сужать себя перед массовым посетителем. Но раньше эта витрина была
+    доступна ТОЛЬКО по ссылке из объявления, и это отдельный дефект (F2):
+    человек, которому нужно обоснование для комиссии, приходил на главную и
+    не понимал, что мы и про него тоже. Теперь на обеих витринах есть
+    переключатель.
+    """
+    return HTMLResponse(_audience_landing("social_contract"))
 
 
 @app.get("/oferta", response_class=HTMLResponse)
@@ -2619,6 +2900,54 @@ def project_page(idea_id: str):
                            .replace("{{PRODUCT_NAME}}", proj.product_name))
 
 
+def _optics_html(current: str) -> str:
+    """Чьими глазами человек читает разбор — и как это поменять.
+
+    Ручка `POST /api/demand/{id}/purpose` появилась раньше кнопки: человек,
+    попавший не на ту витрину, видел результат чужой оптикой и мог только
+    начать всё сначала. Витрин три, находят нас и поиском, и по ссылке от
+    знакомого. Спрос при смене не пересчитывается — цифры Яндекса от
+    аудитории не зависят; меняется только то, что стоит главным действием,
+    что мы отвечаем при слабом спросе и какой персоной пишется платный разбор.
+
+    Если аудитория одна, выбирать не из чего — блока нет вовсе.
+    """
+    if len(audiences.AUDIENCES) < 2:
+        return ""
+    cur = audiences.get(current)
+    others = "".join(
+        f'<button type="button" data-purpose="{a.key}">{html.escape(a.switch_label)}</button>'
+        for a in audiences.AUDIENCES.values() if a.key != cur.key)
+    return ('<div class="optics" id="optics">'
+            f'<span class="optics-cur">Разбор под задачу: <b>{html.escape(cur.switch_label)}</b></span>'
+            f'<span class="optics-alt">Не то? {others}</span></div>')
+
+
+def _audience_switch_html(current: str) -> str:
+    """Переключатель витрин — собирается из реестра, а не пишется в каждой.
+
+    До этого `/social-contract` был доступен только по ссылке из объявления:
+    с сайта на него не попасть, а пришедший по объявлению не мог уйти обратно,
+    если ошибся витриной. Единственной ссылкой был логотип, который молча
+    уводил на «другой» сайт.
+
+    Витрин будет больше двух (студенты), поэтому разметка живёт здесь одна:
+    копия в каждой странице разъехалась бы так же, как разъезжались цены (B5)
+    и названия тарифов (B7). Текущая аудитория не ссылка — вести человека на
+    страницу, где он уже стоит, значит тратить его клик.
+    """
+    items = []
+    for a in audiences.AUDIENCES.values():
+        text = html.escape(a.switch_label)
+        if a.key == current:
+            items.append(f'<span class="aud-cur" aria-current="page">{text}</span>')
+        else:
+            href = f"/{a.slug}" if a.slug else "/"
+            items.append(f'<a href="{href}">{text}</a>')
+    return ('<nav class="aud-switch" aria-label="Кому это нужно">'
+            '<span class="aud-tag">Вы к нам зачем:</span>' + "".join(items) + "</nav>")
+
+
 def _fill_server_values(html: str) -> str:
     """Подставляет в статику всё, чему в коде есть единственный источник:
     цены, названия тарифов, пороги вердикта, рекламный бюджет.
@@ -2632,6 +2961,9 @@ def _fill_server_values(html: str) -> str:
     for slot, value in (
         # По умолчанию записки нет: её подставляет только _lost_page().
         ("__LOST_NOTE__", ""),
+        # Витрина, отданная не своим обработчиком (404-страница, пример),
+        # всё равно получает переключатель — с аудиторией по умолчанию.
+        ("__AUDIENCE_SWITCH__", _audience_switch_html(audiences.DEFAULT.key)),
         ("__CLICK_TARGET__", str(CLICK_TARGET)),
         ("__SIGNAL_PCT__", _pct(SIGNAL_RATE)),
         ("__DEAD_PCT__", _pct(DEAD_RATE)),
@@ -2655,8 +2987,9 @@ def _fill_server_values(html: str) -> str:
     return html
 
 
-def _with_server_values(name: str) -> str:
-    return _fill_server_values(_static(name))
+def _with_server_values(name: str, audience: str = "business") -> str:
+    return _fill_server_values(
+        _static(name).replace("__AUDIENCE_SWITCH__", _audience_switch_html(audience)))
 
 
 def _lost_page() -> HTMLResponse:

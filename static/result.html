@@ -39,6 +39,16 @@
   .path-next{margin-top:10px;padding-left:12px;border-left:3px solid var(--marker);font-size:14px;color:var(--muted)}
   .path-next-tag{display:block;font:600 12px "IBM Plex Sans";color:var(--muted);margin-bottom:2px}
 
+  /* Чьими глазами читается разбор. Спрос от аудитории не зависит — меняется
+     только оптика, поэтому строка тихая и стоит над заголовком (F3). */
+  .optics{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;
+    padding:12px 0 0;font-size:13.5px;color:var(--muted)}
+  .optics b{color:var(--ink);font-weight:600}
+  .optics-alt{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px}
+  .optics-alt button{appearance:none;background:transparent;border:0;padding:0;
+    cursor:pointer;font:inherit;color:var(--muted);border-bottom:1px solid var(--line)}
+  .optics-alt button:hover{color:var(--ink);border-color:var(--ink)}
+  .optics-alt button[disabled]{opacity:.55;cursor:wait}
   .head{padding:14px 0 6px}
   h1{font-size:clamp(21px,3.8vw,27px);font-weight:600;letter-spacing:-.015em}
   .idea{color:var(--muted);font-size:16px;margin-top:6px;max-width:42em}
@@ -91,10 +101,15 @@
   .skip-link{display:inline-block;margin-top:12px;color:var(--muted);font-size:14px;text-decoration:underline}
   .skip-link:hover{color:var(--ink)}
 
-  .freq-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:9px 0}
-  .freq-row + .freq-row{border-top:1px solid var(--line)}
+  /* Строка частотности и подпись к ней -- два элемента, а не один: подпись
+     объясняет ЧИСЛО, поэтому идёт после него и при любой раскладке. Раньше
+     она стояла под фразой слева и говорила «цифра справа», а на узком экране
+     ряд перестраивается в столбик и число уходит вниз (B8). */
+  .freq-item{padding:9px 0}
+  .freq-item + .freq-item{border-top:1px solid var(--line)}
+  .freq-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
   .freq-phrase{display:block}
-  .freq-match{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
+  .freq-match{display:block;color:var(--muted);font-size:12.5px;margin-top:5px}
   .freq-num{font:600 18px/1 "IBM Plex Mono",monospace;white-space:nowrap;
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
   .freq-num.na{color:var(--muted);font-size:14px;font-weight:500;background:none}
@@ -154,6 +169,11 @@
   .sharp-meta-tag{display:block;font:600 11px "IBM Plex Sans";color:var(--muted);
     text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px}
   .sharp-meta-row{font-size:14px;color:var(--ink)}
+  /* Название боли и её объяснение -- два поля движка, а не одно предложение.
+     Раньше их склеивали через « — », и объяснение приносило свою заглавную
+     букву: «Ателье срывают сроки — Обещают три недели». Так склеилась бы
+     любая пара, это шаблон, а не опечатка модели (B9). */
+  .sharp-pain{display:block;font-weight:600}
   .sharp-pick{appearance:none;cursor:pointer;border-radius:6px;margin-top:auto;align-self:flex-start;
     background:transparent;border:1px solid var(--line);color:var(--ink);
     font:500 14px "IBM Plex Sans";padding:9px 14px}
@@ -201,6 +221,7 @@
   @media (max-width:560px){
     :root{--pad:20px}
     .freq-row{flex-direction:column;align-items:flex-start;gap:3px}
+    .freq-match{margin-top:4px}
     .score-grid{grid-template-columns:1fr 1fr}
     .btn,.sharp-pick,#sharpen-btn,.step-next .btn{width:100%;text-align:center}
     .step-summary-detail{max-width:100%}
@@ -233,6 +254,8 @@
     </div>
     <div class="path-next"><span class="path-next-tag">Дальше</span><span id="path-next-text">Этап 3 — соберём проверочную страницу под вашу идею, рекламу вы запустите сами по инструкции</span></div>
   </div>
+
+  __OPTICS__
 
   <div class="head">
     <h1>Результат проверки спроса</h1>
@@ -385,15 +408,15 @@ function serviceName(domain){
 // --- Заполняем содержимое всех шагов сразу (дёшево); видимость управляет лента ---
 
 document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
-  <div class="freq-row">
-    <span>
+  <div class="freq-item">
+    <div class="freq-row">
       <span class="freq-phrase">${escapeHtml(f.phrase)}</span>
-      ${f.matched_phrase ? `<span class="freq-match">Вордстат подсказал более ходовую формулировку: «${escapeHtml(f.matched_phrase)}» — цифра справа про неё</span>` : ''}
-    </span>
-    <span>${f.count === null
-      ? '<span class="freq-num na">нет данных у Яндекса</span>'
-      : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`}
-    </span>
+      <span>${f.count === null
+        ? '<span class="freq-num na">нет данных у Яндекса</span>'
+        : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`}
+      </span>
+    </div>
+    ${f.matched_phrase ? `<span class="freq-match">Число посчитано по более ходовой формулировке, которую подсказал Вордстат: «${escapeHtml(f.matched_phrase)}»</span>` : ''}
   </div>`).join('');
 
 const v = DATA.verdict || {};
@@ -446,12 +469,12 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
 // --- Лента: один активный фокус, шаги без данных пропускаются целиком ---
 
 // --- Финальный шаг разворачиваем под ту аудиторию, которая пришла ---
-// Человек с /social-contract пришёл за бизнес-планом для комиссии: рекламный
-// платный рекламный тест ему не нужен, а именно он стоял главной кнопкой, пока
-// бизнес-план прятался в «Или...». Для фаундера с главной порядок прежний.
-const IS_SOCIAL_CONTRACT = PURPOSE === 'social_contract';
+// Чем эта аудитория отличается — приходит с сервера, а не вычисляется здесь:
+// ветка `PURPOSE === 'social_contract'` означала «аудиторий ровно две», а их
+// уже три (F3). Реестр — app/audiences.py.
+const AUDIENCE = __AUDIENCE_JSON__;
 
-if (IS_SOCIAL_CONTRACT) {
+if (AUDIENCE.plan_first) {
   document.getElementById('path-next-text').textContent =
     'Этап 3 — соберём бизнес-план с расчётами: смета, план доходов, окупаемость';
 
@@ -501,7 +524,7 @@ if (v.level === 'unknown') {
     'измерили. Попробуйте запустить проверку ещё раз через несколько минут.';
   const again = document.getElementById('weak-lead-btn');
   again.textContent = 'Проверить ещё раз — бесплатно';
-  again.setAttribute('href', IS_SOCIAL_CONTRACT ? '/social-contract' : '/');
+  again.setAttribute('href', AUDIENCE.home);
   document.getElementById('weak-lead').classList.add('show');
 
   const cav = document.getElementById('weak-caveat');
@@ -527,13 +550,15 @@ if (v.level === 'weak') {
   const freq = top ? `${top.toLocaleString('ru-RU')} раз в месяц` : 'почти не ищут';
 
   document.getElementById('weak-lead-p').textContent =
-    'Самую популярную из ваших формулировок в Яндексе ищут ' + freq +
+    'Самую частую из проверенных формулировок в Яндексе ищут ' + freq +
     '. Чтобы судить по заявкам, нужно __CLICK_TARGET__ визитов — при такой ' +
     'частотности набрать их из поиска будет нечем. Чаще всего дело в словах: ' +
-    'люди ищут то же самое, но называют иначе. Опишите идею по-другому — ' +
-    'проверка бесплатная и занимает пару минут.';
+    // Что делать дальше — у каждой аудитории своё (правило A4: вердикт
+    // сообщает находку и не предписывает шаг). Студенту ноль в поиске — тоже
+    // материал для работы, фаундеру — повод не тратить бюджет (F3).
+    'люди ищут то же самое, но называют иначе. ' + AUDIENCE.weak_demand;
   document.getElementById('weak-lead-btn').setAttribute(
-    'href', IS_SOCIAL_CONTRACT ? '/social-contract' : '/');
+    'href', AUDIENCE.home);
   document.getElementById('weak-lead').classList.add('show');
 
   // Шапка обещала следующий этап так, будто вердикта не было. Обещать
@@ -554,7 +579,7 @@ if (v.level === 'weak') {
 }
 
 const ARRIVAL = {2: 'конкуренты', 3: 'оценка идеи', 4: 'заострим идею',
-                 5: IS_SOCIAL_CONTRACT ? 'бизнес-план' : 'живой тест'};
+                 5: AUDIENCE.plan_first ? 'бизнес-план' : 'живой тест'};
 const STEP_ORDER = [1, hasComp ? 2 : null, hasScores ? 3 : null, 4, 5].filter(Boolean);
 
 function nextLabel(afterStep){
@@ -654,7 +679,7 @@ function renderSharpen(offers){
       <p>${escapeHtml(o.sub || '')}</p>
       ${(o.eyebrow || (o.pains && o.pains[0])) ? `<div class="sharp-meta">
         ${o.eyebrow ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Для кого:</span>${escapeHtml(o.eyebrow)}</div>` : ''}
-        ${o.pains && o.pains[0] ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Боль:</span>${escapeHtml(o.pains[0].h2 || '')} — ${escapeHtml(o.pains[0].p || '')}</div>` : ''}
+        ${o.pains && o.pains[0] ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Боль:</span><span class="sharp-pain">${escapeHtml(o.pains[0].h2 || '')}</span>${escapeHtml(o.pains[0].p || '')}</div>` : ''}
       </div>` : ''}
       <button class="sharp-pick" type="button">Выбрать этот вариант</button>
     </div>`).join('');
@@ -700,7 +725,7 @@ const orderBtn = document.getElementById('order-btn');
 // оно ничего не говорит, поэтому там кнопка описывает действие словами.
 orderBtn.textContent = PAY_ENABLED
   ? `Оплатить и запустить — ${fmt(PRICE)} ₽`
-  : (IS_SOCIAL_CONTRACT ? 'Оставить заявку на проверку идеи'
+  : (AUDIENCE.plan_first ? 'Оставить заявку на проверку идеи'
                         : 'Оставить заявку на живой тест');
 // Чек 54-ФЗ уходит только при реальной оплате -- без кассы это просто
 // заявка для связи, обещать чек в её плейсхолдере было бы неточно.
@@ -793,6 +818,25 @@ document.getElementById('share-btn').addEventListener('click', async () => {
   if (navigator.share) { try { await navigator.share({title: 'Проверка спроса — Создатель', url}); } catch(e){} return; }
   try { await navigator.clipboard.writeText(url); btn.textContent = 'Ссылка скопирована';
     setTimeout(()=>{btn.textContent='Поделиться результатом';}, 1600); } catch(e){}
+});
+
+// Смена оптики: пересчитывать спрос незачем, он от аудитории не зависит —
+// перезагружаем страницу, чтобы сервер собрал её под новую аудиторию (F3).
+document.querySelectorAll('#optics button[data-purpose]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Меняем…';
+    try {
+      const r = await fetch(`/api/demand/${CHECK_ID}/purpose`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({purpose: btn.dataset.purpose})
+      });
+      if (!r.ok) throw new Error();
+      location.reload();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = label;
+    }
+  });
 });
 </script>
 </body>
