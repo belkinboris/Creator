@@ -64,7 +64,8 @@ from app.main import (DemandCheck, ReportPurchase, SmokeProject, SmokeEvent,
                       MagicLinkToken, Session, engine)
 data = {
  "formulations": [{"phrase": "пошив штор и постельного белья на заказ", "count": 1200,
-                   "matched_phrase": "пошив штор на дому недорого"}],
+                   "matched_phrase": "пошив штор на дому недорого"},
+                  {"phrase": "сшить шторы на дому недорого", "count": 480}],
  "best_phrase": "пошив штор и постельного белья на заказ",
  "verdict": {"level": "niche", "text": "Спрос небольшой, но он есть: людей мало, и каждый клиент будет на счету."},
  "competitors": {"found": 15000, "top": [
@@ -606,5 +607,33 @@ def test_paid_project_is_not_labelled_as_just_an_idea(site, browser):
         segs = page.eval_on_selector_all("#path-bar i", "e => e.length")
         assert segs == 7, segs
         _assert_clean(page, "страница проекта, метка этапа")
+    finally:
+        ctx.close()
+
+
+@pytest.mark.parametrize("width", [1000, NARROW])
+def test_frequency_note_follows_the_number_it_explains(site, browser, width):
+    """B8. Разметку строит скрипт, а раскладку — CSS: подстрокой в шаблоне
+    это не проверить. Подпись объясняет ЧИСЛО (оно посчитано по подсказанной
+    Вордстатом формулировке, а не по той, что человек читает), поэтому она
+    обязана идти после числа при любой ширине. Раньше подпись стояла под
+    фразой и говорила «цифра справа» — на узком экране ряд перестраивается
+    в столбик, и указание било мимо."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}",
+                      width=width)
+    try:
+        page.wait_for_selector(".freq-match", timeout=10000)
+        note = page.locator(".freq-match").first
+        num = page.locator(".freq-num").first
+        assert "справа" not in note.inner_text(), note.inner_text()
+        assert "Вордстат" in note.inner_text()
+        nb, mb = num.bounding_box(), note.bounding_box()
+        assert mb["y"] >= nb["y"], f"{width}px: подпись выше числа {nb} {mb}"
+        # и она ближе к своему числу, чем к следующей строке частотности
+        rows = page.eval_on_selector_all(
+            ".freq-item", "e => e.map(x => x.getBoundingClientRect().top)")
+        assert len(rows) >= 2, rows
+        assert mb["y"] < rows[1], f"{width}px: подпись уехала в чужую строку"
+        _assert_clean(page, "частотность", width)
     finally:
         ctx.close()

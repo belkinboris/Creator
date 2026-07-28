@@ -91,10 +91,15 @@
   .skip-link{display:inline-block;margin-top:12px;color:var(--muted);font-size:14px;text-decoration:underline}
   .skip-link:hover{color:var(--ink)}
 
-  .freq-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:9px 0}
-  .freq-row + .freq-row{border-top:1px solid var(--line)}
+  /* Строка частотности и подпись к ней -- два элемента, а не один: подпись
+     объясняет ЧИСЛО, поэтому идёт после него и при любой раскладке. Раньше
+     она стояла под фразой слева и говорила «цифра справа», а на узком экране
+     ряд перестраивается в столбик и число уходит вниз (B8). */
+  .freq-item{padding:9px 0}
+  .freq-item + .freq-item{border-top:1px solid var(--line)}
+  .freq-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
   .freq-phrase{display:block}
-  .freq-match{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
+  .freq-match{display:block;color:var(--muted);font-size:12.5px;margin-top:5px}
   .freq-num{font:600 18px/1 "IBM Plex Mono",monospace;white-space:nowrap;
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
   .freq-num.na{color:var(--muted);font-size:14px;font-weight:500;background:none}
@@ -201,6 +206,7 @@
   @media (max-width:560px){
     :root{--pad:20px}
     .freq-row{flex-direction:column;align-items:flex-start;gap:3px}
+    .freq-match{margin-top:4px}
     .score-grid{grid-template-columns:1fr 1fr}
     .btn,.sharp-pick,#sharpen-btn,.step-next .btn{width:100%;text-align:center}
     .step-summary-detail{max-width:100%}
@@ -385,15 +391,15 @@ function serviceName(domain){
 // --- Заполняем содержимое всех шагов сразу (дёшево); видимость управляет лента ---
 
 document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
-  <div class="freq-row">
-    <span>
+  <div class="freq-item">
+    <div class="freq-row">
       <span class="freq-phrase">${escapeHtml(f.phrase)}</span>
-      ${f.matched_phrase ? `<span class="freq-match">Вордстат подсказал более ходовую формулировку: «${escapeHtml(f.matched_phrase)}» — цифра справа про неё</span>` : ''}
-    </span>
-    <span>${f.count === null
-      ? '<span class="freq-num na">нет данных у Яндекса</span>'
-      : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`}
-    </span>
+      <span>${f.count === null
+        ? '<span class="freq-num na">нет данных у Яндекса</span>'
+        : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`}
+      </span>
+    </div>
+    ${f.matched_phrase ? `<span class="freq-match">Число посчитано по более ходовой формулировке, которую подсказал Вордстат: «${escapeHtml(f.matched_phrase)}»</span>` : ''}
   </div>`).join('');
 
 const v = DATA.verdict || {};
@@ -527,7 +533,7 @@ if (v.level === 'weak') {
   const freq = top ? `${top.toLocaleString('ru-RU')} раз в месяц` : 'почти не ищут';
 
   document.getElementById('weak-lead-p').textContent =
-    'Самую популярную из ваших формулировок в Яндексе ищут ' + freq +
+    'Самую частую из проверенных формулировок в Яндексе ищут ' + freq +
     '. Чтобы судить по заявкам, нужно __CLICK_TARGET__ визитов — при такой ' +
     'частотности набрать их из поиска будет нечем. Чаще всего дело в словах: ' +
     'люди ищут то же самое, но называют иначе. Опишите идею по-другому — ' +
