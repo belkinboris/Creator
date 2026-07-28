@@ -628,7 +628,7 @@ def result_page(rid: str, request: Request):
         .replace("__AUDIENCE_JSON__",
                  json.dumps(audiences.for_page(rec.purpose), ensure_ascii=False))
         .replace("__OPTICS__", _optics_html(rec.purpose)))
-    return HTMLResponse(_fill_server_values(html_out))
+    return HTMLResponse(_fill_server_values(html_out, rec.purpose))
 
 
 class LiveTestIn(SQLModel):
@@ -1219,15 +1219,30 @@ def _tier_summary_html() -> str:
         '</div>')
 
 
-def _example_link(text: str) -> str:
-    """Ссылка на пример — только когда пример реально существует.
+def _example_link(text: str, purpose: str = "business") -> str:
+    """Ссылка на пример — только когда пример реально существует И собран
+    для ТОЙ ЖЕ аудитории, что сейчас смотрит на страницу.
 
     Обещать «посмотрите пример» и привести на пустую страницу хуже, чем не
     обещать вовсе (принципы 3 и 7). Поэтому витрины спрашивают об этом у
     сервера, а не носят ссылку зашитой.
+
+    Пример ровно один на весь сервис (F2/C1) -- собран под чью-то одну
+    оптику. Показать венчурный разбор фаундера как «вот что вы получите»
+    получателю соцконтракта или студенту обещает не ту оптику, что мы
+    реально отдадим по его заявке (принцип 4 -- одна аудитория, одна
+    оптика; принцип 3 -- продаём только то, что реально отдаём).
     """
     with Session(engine) as s:
-        if not _example_purchase(s):
+        ex = _example_purchase(s)
+        if not ex:
+            return ""
+        example_purpose = "business"
+        if ex.check_id:
+            check = s.get(DemandCheck, ex.check_id)
+            if check and check.purpose:
+                example_purpose = check.purpose
+        if example_purpose != purpose:
             return ""
     return f'<a href="/example">{html.escape(text)}</a>'
 
@@ -2739,7 +2754,7 @@ def _audience_landing(key: str) -> str:
             .replace("__FAQ__", faq)
             .replace("__AUDIENCE_SWITCH__", _audience_switch_html(a.key))
             .replace("__AUDIENCE_KEY__", a.key))
-    return _fill_server_values(page)
+    return _fill_server_values(page, a.key)
 
 
 @app.get("/students", response_class=HTMLResponse)
@@ -2967,7 +2982,7 @@ def _audience_switch_html(current: str) -> str:
             '<span class="aud-tag">Вы к нам зачем:</span>' + "".join(items) + "</nav>")
 
 
-def _fill_server_values(html: str) -> str:
+def _fill_server_values(html: str, purpose: str = "business") -> str:
     """Подставляет в статику всё, чему в коде есть единственный источник:
     цены, названия тарифов, пороги вердикта, рекламный бюджет.
 
@@ -3000,7 +3015,7 @@ def _fill_server_values(html: str) -> str:
     # Ссылка на пример стоит денег (запрос в БД) и появляется, только когда
     # пример опубликован -- считаем её лишь если слот на странице есть.
     if "__EXAMPLE_LINK__" in html:
-        html = html.replace("__EXAMPLE_LINK__", _example_link("Посмотреть пример отчёта"))
+        html = html.replace("__EXAMPLE_LINK__", _example_link("Посмотреть пример отчёта", purpose))
     if "__TIER_SUMMARY__" in html:
         html = html.replace("__TIER_SUMMARY__", _tier_summary_html())
     return html

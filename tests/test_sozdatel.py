@@ -4079,7 +4079,7 @@ class TestPublicReportExample:
     «без этого доверия не будет»: человек платит 990–2990 ₽, не видя ни
     строчки того, что получит."""
 
-    def _check(self):
+    def _check(self, purpose="business"):
         import app.main as m
         async def fake_check(idea):
             return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
@@ -4091,11 +4091,12 @@ class TestPublicReportExample:
         orig = m.check_demand
         m.check_demand = fake_check
         try:
-            return client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+            return client.post("/api/demand", json={"idea": "Пошив штор на заказ",
+                                                    "purpose": purpose}).json()["id"]
         finally:
             m.check_demand = orig
 
-    def _built_report(self, monkeypatch, body="Смета расходов построчно."):
+    def _built_report(self, monkeypatch, body="Смета расходов построчно.", purpose="business"):
         import app.main as m
         async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
                             purpose="business", **kw):
@@ -4106,7 +4107,7 @@ class TestPublicReportExample:
             return {"key": key, "title": "Резюме", "body": body}
         monkeypatch.setattr(m, "generate_core", fake_core)
         monkeypatch.setattr(m, "generate_section", fake_section)
-        rid = self._check()
+        rid = self._check(purpose)
         client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)   # ядро
         client.post(f"/api/report/{rid}/section?key=summary", headers=OWNER)   # раздел
         return rid
@@ -4142,13 +4143,37 @@ class TestPublicReportExample:
         assert "Это настоящий отчёт, собранный сервисом" in page.text
 
     def test_showcases_link_the_example_once_it_exists(self, monkeypatch):
+        """Пример собран для фаундера (business) -- ссылка появляется там,
+        где сейчас смотрят тем же взглядом: /r/ на такой же проверке."""
         self._clear_examples()
         rid = self._built_report(monkeypatch)
         client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
         other = self._check()
-        for url in (f"/r/{pub(other)}", "/social-contract"):
-            text = client.get(url).text
-            assert 'href="/example"' in text, url
+        assert 'href="/example"' in client.get(f"/r/{pub(other)}").text
+
+    def test_examples_do_not_leak_across_audiences(self, monkeypatch):
+        """Пример собран под одну оптику (business) -- показывать его как
+        «вот что вы получите» соцконтракту или студенту обещает не ту оптику,
+        что мы реально отдадим по их заявке (принцип 4). Раньше пример был
+        виден на любой витрине, у которой есть слот __EXAMPLE_LINK__."""
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        assert 'href="/example"' not in client.get("/social-contract").text
+        assert 'href="/example"' not in client.get("/students").text
+        soc_check = self._check("social_contract")
+        assert 'href="/example"' not in client.get(f"/r/{pub(soc_check)}").text
+
+    def test_example_link_appears_for_its_own_audience(self, monkeypatch):
+        """Пример, собранный под соцконтракт, виден именно на витрине
+        соцконтракта -- а не фаундера или студента."""
+        self._clear_examples()
+        rid = self._built_report(monkeypatch, purpose="social_contract")
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        assert 'href="/example"' in client.get("/social-contract").text
+        assert 'href="/example"' not in client.get("/students").text
+        biz_check = self._check()
+        assert 'href="/example"' not in client.get(f"/r/{pub(biz_check)}").text
 
     def test_only_the_owner_can_publish(self, monkeypatch):
         self._clear_examples()
