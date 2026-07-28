@@ -3456,9 +3456,24 @@ class TestAccountFirstEntry:
         assert client.get("/api/account/me").json()["purpose"] == "business"
         client.cookies.clear()
 
-    def test_cabinet_routes_social_contract_back_to_its_own_landing(self):
+    def test_cabinet_routes_back_to_its_own_landing_server_driven(self):
+        """Раньше адрес был хардкодом в account.html ("social_contract или /"),
+        и третья аудитория (студент) в него не попадала -- утекала на витрину
+        для фаундеров. Сервер обязан отдавать готовый адрес, а кабинет -- не
+        знать про purpose вовсе (та же дыра, что F1 закрыла в других файлах)."""
         text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
-        assert "d.purpose === 'social_contract' ? '/social-contract' : '/'" in text
+        assert "d.home" in text
+        assert "social_contract" not in text
+
+    def test_home_url_for_each_audience(self):
+        client.cookies.clear()
+        for purpose, expected in (("business", "/"), ("social_contract", "/social-contract"),
+                                  ("student", "/students")):
+            contact = f"home_{purpose}@example.com"
+            self._login(contact)
+            self._check(contact, purpose)
+            assert client.get("/api/account/me").json()["home"] == expected, purpose
+            client.cookies.clear()
 
     def test_tier_label_comes_from_server(self):
         """Тариф уже переименовывали («Полный отчёт» -> «Бизнес-план»), и
@@ -3500,6 +3515,23 @@ class TestAccountFirstEntry:
         text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
         assert "на которую оформляли заказ" not in text
         assert "Пароль не нужен" in text
+
+
+class TestStartupPrewarmListStaysInSyncWithDisk:
+    """_lifespan прогревает список статических страниц на старте, а ошибка
+    поймана и только залогирована (принцип 7) -- сервис не падает, если файла
+    больше нет. Из-за этого переименование/удаление файла проходит МОЛЧА: так
+    и было с social-contract.html, который F2 заменила на audience-landing.html,
+    а имя в списке прогрева осталось старым. Прод не падал, но каждый рестарт
+    писал в лог исключение, а сама audience-landing.html (обслуживает и
+    /social-contract, и /students -- обе новые витрины под рекламу) прогревом
+    вообще не была покрыта."""
+
+    def test_every_prewarmed_name_exists_on_disk(self):
+        import app.main as m
+        missing = [name for name in m.PREWARM_STATIC_PAGES
+                  if not (main_module.BASE_DIR.parent / "static" / name).exists()]
+        assert not missing, missing
 
 
 class TestNumbersExplainThemselves:

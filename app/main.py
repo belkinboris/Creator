@@ -351,6 +351,17 @@ try:  # Покупки, оформленные до появления токе�
 except Exception:
     logging.getLogger(__name__).warning("backfill access_token failed", exc_info=True)
 
+# Прогреваемые на старте страницы -- список вручную, а не сканирование
+# static/: часть файлов там не HTML-шаблоны (fonts/, README). Отдельная
+# константа, а не тело _lifespan, чтобы тест мог проверить, что каждое имя
+# всё ещё существует на диске -- переименование/удаление файла (как
+# social-contract.html -> audience-landing.html в F2) иначе тихо переставало
+# прогреваться: исключение в _lifespan поймано и лишь залогировано (принцип
+# 7), так что сам сервис не падает, просто первый визит снова платит за всё.
+PREWARM_STATIC_PAGES = ("index.html", "project.html", "guide-direct.html", "result.html",
+                        "report.html", "audience-landing.html", "account.html", "verify.html")
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """Прогрев при старте: соединение с БД и статика читаются ДО первого
@@ -360,8 +371,7 @@ async def _lifespan(_app: FastAPI):
             s.exec(select(SmokeProject.id).limit(1)).first()
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
-    for name in ("index.html", "project.html", "guide-direct.html", "result.html", "report.html",
-                 "social-contract.html", "account.html", "verify.html"):
+    for name in PREWARM_STATIC_PAGES:
         try:
             _static(name)
         except Exception:
@@ -2658,6 +2668,12 @@ def account_me(request: Request):
                 counts[(idea, event)] += 1
     return {
         "ok": True, "contact": contact, "purpose": purpose,
+        # Куда вести за следующей идеей -- адрес своей витрины, а не
+        # хардкод в статике. Раньше это была ветка "social_contract или /"
+        # прямо в account.html: третья аудитория (студент) в неё не попадала
+        # и тихо утекала на витрину для фаундеров (тот же класс дефекта,
+        # что и F1, только в другом файле).
+        "home": audiences.for_page(purpose)["home"],
         "projects": [_smoke_card(p, counts[(p.idea_id, "page_view")],
                                  counts[(p.idea_id, "lead_submitted")]) for p in projects],
         # tier_label приходит с сервера, а не зашит в кабинете: тариф уже
