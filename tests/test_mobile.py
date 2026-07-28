@@ -874,6 +874,8 @@ def test_mono_font_is_only_for_numbers(site, browser):
         ("плейбук Директа", "/guide/direct"),
         ("страница проекта", f"/p/sweep1?key={OWNER_KEY}"),
         ("реквизиты", "/contacts"),
+        # Публичный пример — витрина: его читает тот, кто ещё не заплатил.
+        ("публичный пример", "/example"),
         ("оферта", "/oferta"),
         ("соглашение", "/agreement"),
         ("конфиденциальность", "/privacy"),
@@ -895,6 +897,16 @@ def test_mono_font_is_only_for_numbers(site, browser):
         _goto(page, site["base"] + "/account")
         page.wait_for_timeout(900)
         problems += _mono_problems(page, "кабинет")
+    finally:
+        ctx.close()
+
+    # Панель владельца — тоже за ключом, поэтому отдельным шагом.
+    ctx, page = _open(browser, f"{site['base']}/desk", width=1000)
+    try:
+        page.evaluate("() => sessionStorage.setItem('sozdatel_key', %r)" % OWNER_KEY)
+        _goto(page, site["base"] + "/desk")
+        page.wait_for_timeout(1400)
+        problems += _mono_problems(page, "панель владельца")
     finally:
         ctx.close()
     assert not problems, "\n".join(problems)
