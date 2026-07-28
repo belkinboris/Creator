@@ -64,6 +64,7 @@ from app.report_engine import (  # noqa: E402
     ALL_SECTIONS, QUICK_KEYS, SECTION_GROUPS, section_keys, section_title,
     PURPOSES as report_purposes,
 )
+from app import audiences  # noqa: E402
 from app import payments  # noqa: E402
 from app import mailer  # noqa: E402
 
@@ -1681,6 +1682,9 @@ def owner_funnel(request: Request, days: int = 0):
     return {
         "days": days,
         "purposes": list(report_purposes),
+        # Русские названия аудиторий отдаёт сервер: копия в скрипте панели
+        # разъехалась бы при первой же новой аудитории (F1).
+        "audience_labels": audiences.labels(),
         "stages": [{"name": n, "what": w, **counts} for n, w, counts in stages],
         "revenue": revenue,
     }

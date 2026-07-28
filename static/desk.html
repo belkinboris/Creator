@@ -323,7 +323,9 @@ function enter(){
 // --- Воронка -------------------------------------------------------------
 // Числа объясняют себя: у каждого шага подпись, что именно он считает, и
 // доля от предыдущего. Голый счётчик — приглашение сделать неверный вывод.
-const PURPOSE_LABEL = {business: "фаундеры", social_contract: "соцконтракт"};
+// Названия аудиторий приходят с сервера вместе с воронкой: копия здесь
+// разъехалась бы при первой же новой аудитории (F1).
+let PURPOSE_LABEL = {};
 let funnelDays = 0;
 
 function fmtNum(n){ return Number(n).toLocaleString("ru-RU"); }
@@ -333,6 +335,7 @@ async function loadFunnel(){
   const r = await fetch(`/api/funnel?days=${funnelDays}`, {headers:{"X-Owner-Key": KEY}});
   if(!r.ok){ box.innerHTML = ""; return; }
   const d = await r.json();
+  PURPOSE_LABEL = d.audience_labels || {};
   const first = (d.stages[0] || {}).total || 0;
   let prev = null;
 

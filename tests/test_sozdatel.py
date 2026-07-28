@@ -6994,3 +6994,87 @@ class TestOwnerCanSeeAndFixStaleLandings:
         text = _read_static("desk.html")
         assert "landing_stale" in text
         assert "refresh" in text
+
+
+class TestAudienceLivesInOnePlace:
+    """F1: аудитория была размазана по четырём файлам.
+
+    `purpose` протянут через весь продукт — проверку спроса, оптику отчёта,
+    воронку владельца, цели Метрики, — но ОПИСАНА аудитория была четырьмя
+    разными способами в четырёх местах: персона и критерий балла в
+    `report_engine`, переопределения разделов через ключ `"social"` внутри
+    `SECTION_SPECS`, ветка `IS_SOCIAL_CONTRACT` в скрипте страницы результата
+    и русская метка в `PURPOSE_LABEL` прямо в `desk.html`.
+
+    На двух аудиториях это ещё держалось. На трёх и больше — нет: это тот же
+    дефект-класс, что уже дал расхождения в ценах (B5), названиях тарифов
+    (B7), правиле этапа (A13) и адресе отчёта (E6). Каждый раз копия правила
+    в двух местах молча разъезжалась.
+
+    Поэтому аудитория стала первоклассной сущностью в `app/audiences.py`:
+    одна запись описывает адрес витрины, метку, кто читает результат, персону
+    для модели, что означает балл и обязательна ли смета. Всё остальное
+    спрашивает у реестра.
+    """
+
+    def test_registry_lists_the_audiences_we_actually_have(self):
+        from app.audiences import AUDIENCES
+        assert set(AUDIENCES) == {"business", "social_contract"}
+
+    def test_every_audience_is_described_completely(self):
+        """Полупустая запись — это молчаливый откат к оптике фаундера."""
+        from app.audiences import AUDIENCES
+        for key, a in AUDIENCES.items():
+            for field in ("key", "label", "reader", "persona", "viability"):
+                assert getattr(a, field), f"{key}: пустое поле {field}"
+            assert a.key == key
+
+    def test_slugs_are_unique_and_home_belongs_to_the_founder(self):
+        from app.audiences import AUDIENCES, by_slug
+        slugs = [a.slug for a in AUDIENCES.values()]
+        assert len(slugs) == len(set(slugs)), slugs
+        assert by_slug("").key == "business"
+        assert by_slug("social-contract").key == "social_contract"
+
+    def test_unknown_audience_falls_back_to_the_founder(self):
+        """Мусор в `purpose` не должен ронять страницу — но и притворяться
+        соцконтрактом тоже не должен (принцип 7)."""
+        from app.audiences import get
+        assert get("нет такой").key == "business"
+        assert get("").key == "business"
+        assert get(None).key == "business"
+
+    def test_report_engine_takes_the_persona_from_the_registry(self):
+        """Вторая копия персоны — это разъехавшаяся оптика платного продукта."""
+        import app.report_engine as re_mod
+        from app.audiences import get
+        assert not hasattr(re_mod, "_PERSONA"), "персона осталась копией в движке"
+        assert not hasattr(re_mod, "_VIABILITY_SPEC"), "критерий балла остался копией"
+        for key in ("business", "social_contract"):
+            assert get(key).persona[:40] in re_mod._core_prompt("full", key)
+            assert get(key).viability[:40] in re_mod._core_prompt("full", key)
+
+    def test_section_overrides_are_keyed_by_audience(self):
+        """Ключ `"social"` внутри разделов — это «аудиторий ровно две».
+        Третья потребовала бы `"student"` и ещё одного `if`."""
+        from app.report_engine import SECTION_SPECS
+        for s in SECTION_SPECS:
+            assert "social" not in s, f"{s['key']}: переопределения не по ключу аудитории"
+            for aud in (s.get("by_audience") or {}):
+                assert aud in {"business", "social_contract"}, f"{s['key']}: {aud}"
+
+    def test_section_titles_still_differ_where_they_did(self):
+        """Переезд не должен потерять то, ради чего оптика заводилась."""
+        from app.report_engine import section_title
+        assert section_title("finance", "social_contract") == "Смета и расчёты для комиссии"
+        assert section_title("finance", "business") == "Финансовая модель"
+
+    def test_desk_labels_come_from_the_server(self):
+        """Русские названия аудиторий жили копией в скрипте панели."""
+        text = _read_static("desk.html")
+        assert "PURPOSE_LABEL = {business:" not in text
+        r = client.get("/api/funnel", headers=OWNER)
+        assert r.status_code == 200, r.text
+        labels = r.json()["audience_labels"]
+        assert labels["business"] and labels["social_contract"]
+        assert labels["social_contract"] != labels["business"]
