@@ -779,13 +779,15 @@ class TestDesk:
             "offer": dict(VALID_OFFER, idea_id="desk_fresh_v1")})
         cab = client.get("/api/cabinet", headers=OWNER).json()
         s = [x for x in cab["smoke"] if x["idea_id"] == "desk_fresh_v1"][0]
-        assert s["next_step"].startswith("Запустить Директ")   # 0 визитов
+        # 0 визитов: зовём запустить рекламу, инструкция идёт ссылкой (A17)
+        assert "Директ" in s["next_step"] and s["next_link"]
         assert s["progress"] == 0 and s["rate"] == 0
         for _ in range(5):
             client.post("/api/smoke-event", json={"event": "page_view", "idea": "desk_fresh_v1"})
         cab = client.get("/api/cabinet", headers=OWNER).json()
         s = [x for x in cab["smoke"] if x["idea_id"] == "desk_fresh_v1"][0]
-        assert "Копим клики" in s["next_step"]
+        # «Копим клики» — владельческий жаргон, теперь строка покупательская
+        assert "35 визитов до вывода" in s["next_step"], s["next_step"]
         assert s["progress"] in (12, 13)  # 5/40 = 12.5%, банковское округление
 
 
@@ -6525,3 +6527,73 @@ class TestSharpenCardDoesNotGlueTwoFields:
         r = client.post("/api/sharpen", json={"idea": "Идея достаточной длины для проверки"})
         assert r.status_code == 200
         assert len(r.json()["offers"]) == 2
+
+
+class TestNextStepSpeaksToTheBuyer:
+    """A17: карточка проекта диктовала покупателю следующий шаг по-владельчески.
+
+    Найдено кастдев-проходом по ПЛАТНОМУ пути 2026-07-28: оплатил тест на
+    реальных людях, вошёл в кабинет — и в карточке своего проекта прочитал
+    строку «следующий шаг», написанную не для него.
+
+    `_smoke_card` собирает `next_step` один раз для обеих панелей — и
+    владельческой `/desk`, и покупательской `/account` (так и задумано: один
+    язык на двоих). Но написан он был владельческим:
+
+      · «Запустить Директ на страницу — инструкция: **/guide/direct**» —
+        человеку показывали путь в адресной строке вместо ссылки. Кликнуть
+        нельзя, надо перепечатывать руками;
+      · «Сигнал есть → идея в очередь на **MVP**» — очередь владельца, не его;
+      · «Спроса нет → идею **в архив**» — архив опять же владельческий;
+      · «Серая зона → второй **оффер** на том же **трафике**» — «оффер»
+        запрещён во всех текстах для пользователя (принцип 5), «трафик» тоже.
+
+    **Сторож на запрещённые слова этого не ловил:** он сканирует `static/`, а
+    строка живёт в `app/main.py`. Ровно та же дыра, что в A14, где «лендинг»
+    отсиделся в `app/landing_template.html`. Поэтому проверяем не файл, а
+    вывод `_smoke_card` по всем ветвям вердикта.
+    """
+
+    def _cards(self):
+        """Карточка во всех состояниях, через которые проходит проект."""
+        import app.main as m
+        p = m.SmokeProject(idea_id="x", product_name="П", idea_text="и",
+                           offer_json="{}", landing_html="<h1>т</h1>",
+                           click_target=40, lead_rate_signal=0.08, lead_rate_dead=0.04)
+        return {
+            "нет визитов": m._smoke_card(p, 0, 0),
+            "копим": m._smoke_card(p, 12, 1),
+            "сигнал есть": m._smoke_card(p, 40, 8),
+            "спроса нет": m._smoke_card(p, 40, 0),
+            "серая зона": m._smoke_card(p, 40, 2),
+        }
+
+    def test_no_forbidden_words_anywhere_in_the_next_step(self):
+        for label, card in self._cards().items():
+            t = card["next_step"].lower()
+            for bad in ("оффер", "лендинг", "трафик", "mvp", "архив", "конверси"):
+                assert bad not in t, f"{label}: {card['next_step']}"
+
+    def test_the_grey_zone_covers_all_verdicts(self):
+        """Сторож бесполезен, если ветви на самом деле не разошлись."""
+        steps = {c["next_step"] for c in self._cards().values()}
+        assert len(steps) == 5, steps
+
+    def test_no_raw_path_is_shown_as_text(self):
+        """Путь в адресной строке — не текст для человека, это ссылка."""
+        for label, card in self._cards().items():
+            assert "/guide" not in card["next_step"], f"{label}: {card['next_step']}"
+
+    def test_first_step_offers_the_instruction_as_a_link(self):
+        card = self._cards()["нет визитов"]
+        assert card["next_link"] == {"href": "/guide/direct",
+                                     "text": "Пошаговая инструкция"}, card
+
+    def test_other_states_carry_no_link(self):
+        for label, card in self._cards().items():
+            if label != "нет визитов":
+                assert card["next_link"] is None, f"{label}: {card['next_link']}"
+
+    def test_cabinet_renders_the_link_not_the_path(self):
+        assert "next_link" in _read_static("account.html")
+        assert "next_link" in _read_static("desk.html")

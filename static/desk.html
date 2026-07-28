@@ -443,7 +443,8 @@ async function load(){
       <div class="bar"><i style="width:${s.progress}%"></i></div>
       <canvas class="spark" width="240" height="28"></canvas>
       <div class="verdict">${s.verdict}</div>
-      <div class="next"><span>следующий шаг</span>${s.next_step}</div>
+      <div class="next"><span>следующий шаг</span>${s.next_step}${s.next_link
+        ? ` <a href="${s.next_link.href}">${s.next_link.text} →</a>` : ''}</div>
       <div class="acts">
         <button class="btn" onclick="location.href='${s.project_url}?key='+encodeURIComponent(KEY)">Открыть проект</button>
         <button class="btn ghost" onclick="window.open('${s.landing_url}','_blank')">Лендинг</button>

@@ -1884,21 +1884,34 @@ def _smoke_card(p: "SmokeProject", views: int, leads: int) -> dict:
     stage = _smoke_stage(views, p.click_target)
     v = compute_verdict(views, leads, p.click_target, p.lead_rate_signal, p.lead_rate_dead)
     rate = (leads / views) if views else 0.0
+    # Эту строку читает и владелец в /desk, и покупатель в /account -- так и
+    # задумано, один язык на двоих. Значит писать её надо на покупательском:
+    # ему «очередь на MVP», «идею в архив» и «второй оффер на том же трафике»
+    # не говорят ничего, а «оффер» с «трафиком» вдобавок запрещены (принцип 5).
+    # Ссылку отдаём отдельным полем: строка уходит в разметку экранированной,
+    # и путь в ней человек читал как текст, а кликнуть не мог (A17).
+    next_link = None
     if views == 0:
-        next_step = "Запустить Директ на страницу — инструкция: /guide/direct"
+        next_step = "Запустите рекламу в Яндекс Директе на вашу проверочную страницу."
+        next_link = {"href": "/guide/direct", "text": "Пошаговая инструкция"}
     elif views < p.click_target:
-        next_step = f"Копим клики: {p.click_target - views} до вердикта. Ничего не менять."
+        left = p.click_target - views
+        next_step = (f"Идут визиты: ещё {left} "
+                     f"{_plural(left, 'визит', 'визита', 'визитов')} до вывода. "
+                     "Ничего не меняйте, пусть наберётся.")
     elif v["verdict"] == "СИГНАЛ ЕСТЬ":
-        next_step = "Сигнал есть → идея в очередь на MVP"
+        next_step = "Люди оставляют заявки — можно делать первую версию продукта."
     elif v["verdict"] == "СПРОСА НЕТ":
-        next_step = "Спроса нет → остановить кампанию, идею в архив"
+        next_step = "Заявок почти нет — остановите рекламу, чтобы не тратить бюджет зря."
     else:
-        next_step = "Серая зона → второй оффер на том же трафике"
+        next_step = ("Результат посередине: попробуйте другое предложение "
+                     "для той же аудитории.")
     return {"idea_id": p.idea_id, "name": p.product_name,
             "stage": stage, "stage_name": STAGE_NAMES[stage],
             "views": views, "leads": leads, "rate": round(rate * 100),
             "target": p.click_target, "verdict": v["verdict"],
             "next_step": next_step,
+            "next_link": next_link,
             "progress": min(100, round(views / p.click_target * 100)) if p.click_target else 0,
             "landing_url": f"/l/{p.idea_id}",
             "project_url": f"/p/{p.idea_id}"}

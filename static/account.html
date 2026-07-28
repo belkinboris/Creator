@@ -197,7 +197,9 @@ function stageBadge(stageIdx, name){
         <div class="n"><div class="v">${p.rate}%</div><div class="l">конверсия</div></div>
       </div>
       <div class="verdict">${escapeHtml(p.verdict)}</div>
-      <div class="next">${escapeHtml(p.next_step)}</div>
+      <div class="next">${escapeHtml(p.next_step)}${p.next_link
+        ? ` <a href="${escapeHtml(p.next_link.href)}">${escapeHtml(p.next_link.text)} →</a>`
+        : ''}</div>
       <div class="acts"><a class="btn-ghost" href="${p.project_url}">Открыть проект →</a></div>
     </div>`;
 
