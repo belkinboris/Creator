@@ -65,7 +65,12 @@
   .score-card .num small{font-size:.4em;color:var(--muted)}
   .score-card .note{color:var(--muted);font-size:15px;max-width:40em}
   .risks{display:grid;gap:14px;margin:0 0 22px}
-  @media (min-width:640px){.risks{grid-template-columns:repeat(auto-fit, minmax(220px,1fr))}}
+  /* Ровно две колонки, а не auto-fit: рисков всегда 2 (быстрый разбор) или 4
+     (бизнес-план), см. report_engine._risk_count — значит два столбца дают
+     полные ряды при любом тарифе. auto-fit подбирал число колонок под ширину
+     окна и на промежуточных размерах оставлял четвёртую карточку одну, с
+     двумя третями пустоты справа. */
+  @media (min-width:640px){.risks{grid-template-columns:1fr 1fr}}
   .risk{border:1px solid var(--line);background:var(--box);border-radius:8px;padding:16px}
   .risk h4{font-size:15px;font-weight:600;margin-bottom:6px}
   .risk p{color:var(--muted);font-size:14px}

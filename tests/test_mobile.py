@@ -92,7 +92,30 @@ with Session(engine) as s:
     s.add(ReportPurchase(check_id=out["business_id"], idea=idea, tier="full",
                          contact="sweep@example.com", status="paid", amount=2990,
                          is_example=True,
-                         report_json=json.dumps({"sections": [
+                         report_json=json.dumps({
+                             "viability_score": 65,
+                             "viability_summary": "Идея рабочая, но всё решает умение находить клиентов.",
+                             # Ровно столько рисков отдаёт полный тариф (_risk_count).
+                             # Тексты РАЗНОЙ длины намеренно: сетка обязана
+                             # оставаться ровной именно на неровном содержимом.
+                             "top_risks": [
+                                 {"title": "Высокая конкуренция",
+                                  "body": "В городе уже много мастеров, работающих через агрегаторы. "
+                                          "Чтобы привлечь клиентов, придётся предлагать более низкие "
+                                          "цены или уникальные услуги, что снизит маржинальность."},
+                                 {"title": "Нестабильный поток клиентов",
+                                  "body": "Спрос невелик, и колебания числа клиентов серьёзно влияют "
+                                          "на доход."},
+                                 {"title": "Зависимость от качества услуг",
+                                  "body": "В сфере услуг репутация критична. Один негативный отзыв "
+                                          "может отпугнуть потенциальных клиентов."},
+                                 {"title": "Затраты на маркетинг",
+                                  "body": "Для привлечения клиентов потребуются вложения в рекламу и "
+                                          "продвижение. Неправильный выбор каналов или неэффективная "
+                                          "кампания приведут к бесполезным тратам и снижению прибыли, "
+                                          "а проверить это можно только потратив деньги."},
+                             ],
+                             "sections": [
                              {"key": "summary", "title": "Резюме проекта",
                               "body": "Спрос подтверждён цифрами Вордстата: " + "текст разбора. " * 40}]},
                              ensure_ascii=False)))
@@ -637,3 +660,92 @@ def test_frequency_note_follows_the_number_it_explains(site, browser, width):
         _assert_clean(page, "частотность", width)
     finally:
         ctx.close()
+
+
+# ---------------------------------------------------------------------------
+# Сетки карточек: «ровно и красиво» — машинная проверка, а не глаз
+# ---------------------------------------------------------------------------
+
+# Ищем сетки НЕ по списку селекторов, а по признаку: display:grid, три и более
+# видимых ребёнка, и все они одной ширины. Второе условие отсекает раскладочные
+# сетки («30px 1fr» под номер и текст, «1fr auto» под строку со значением) --
+# там разная ширина колонок это и есть замысел. Остаются ровно карточные сетки,
+# то есть то, что владелец и называет «блоками».
+_FIND_CARD_GRIDS = """() => {
+  const out = [];
+  for (const g of document.querySelectorAll('*')) {
+    if (getComputedStyle(g).display !== 'grid') continue;
+    const kids = [...g.children].filter(c => {
+      const r = c.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+    if (kids.length < 3) continue;
+    const boxes = kids.map(c => c.getBoundingClientRect());
+    const w0 = boxes[0].width;
+    if (!boxes.every(b => Math.abs(b.width - w0) <= 2)) continue;   // раскладка, не карточки
+    const rows = {};
+    boxes.forEach(b => {
+      const k = Math.round(b.top);
+      (rows[k] = rows[k] || []).push(Math.round(b.height));
+    });
+    out.push({
+      name: (g.className && String(g.className).trim()) || g.tagName,
+      rows: Object.keys(rows).sort((a, b) => a - b).map(k => rows[k]),
+    });
+  }
+  return out;
+}"""
+
+
+def _grid_problems(page, label, width):
+    out = []
+    for g in page.evaluate(_FIND_CARD_GRIDS):
+        rows, name = g["rows"], g["name"]
+        for i, heights in enumerate(rows):
+            if len(set(heights)) > 1:
+                out.append(f"{label} на {width}px: .{name} — в ряду {i + 1} "
+                           f"разные высоты карточек {sorted(set(heights))}")
+        if len(rows) > 1 and len(rows[-1]) == 1 and len(rows[0]) > 1:
+            out.append(f"{label} на {width}px: .{name} — карточка-сирота в последнем "
+                       f"ряду (ряды по {[len(r) for r in rows]})")
+    return out
+
+
+@pytest.mark.parametrize("width", [1200, 900, 700, NARROW])
+def test_card_grids_stay_even(site, browser, width):
+    """Ни одна сетка карточек не должна выглядеть случайной ни на одной ширине.
+
+    Владелец поймал это глазами на живом отчёте: блок рисков верстался через
+    `auto-fit minmax(220px,1fr)`, и на промежуточной ширине окна выходило три
+    карточки в ряд плюс четвёртая одиноко под ними, с двумя третями пустоты
+    справа. На 1200 и 390 px тот же блок выглядел прилично — поэтому дефект и
+    дожил до прода: точечные скриншоты его не показывали.
+
+    Проверяем то, что вообще можно проверить машиной:
+      1. **нет карточки-сироты** — последний ряд не содержит одну карточку,
+         когда предыдущие ряды заполнены;
+      2. **в одном ряду карточки одной высоты** — иначе низ блока рвётся.
+
+    Ширины 900 и 700 взяты не для красоты: это те размеры окна, на которых
+    `auto-fit` меняет число колонок. Сетки ищутся на странице сами (см.
+    `_FIND_CARD_GRIDS`), так что новый блок попадает под проверку без правки
+    этого теста.
+    """
+    ids = site["ids"]
+    pages = [
+        ("главная", "/"),
+        ("соцконтракт", "/social-contract"),
+        ("результат проверки", f"/r/{ids['business']}"),
+        ("отчёт", f"/report/{ids['business']}?key={OWNER_KEY}"),
+        ("публичный пример", "/example"),
+        ("плейбук Директа", "/guide/direct"),
+    ]
+    problems = []
+    for label, path in pages:
+        ctx, page = _open(browser, site["base"] + path, width=width)
+        try:
+            page.wait_for_timeout(900)
+            problems += _grid_problems(page, label, width)
+        finally:
+            ctx.close()
+    assert not problems, "\n".join(problems)
