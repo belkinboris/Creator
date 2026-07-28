@@ -39,6 +39,16 @@
   .path-next{margin-top:10px;padding-left:12px;border-left:3px solid var(--marker);font-size:14px;color:var(--muted)}
   .path-next-tag{display:block;font:600 12px "IBM Plex Sans";color:var(--muted);margin-bottom:2px}
 
+  /* Чьими глазами читается разбор. Спрос от аудитории не зависит — меняется
+     только оптика, поэтому строка тихая и стоит над заголовком (F3). */
+  .optics{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;
+    padding:12px 0 0;font-size:13.5px;color:var(--muted)}
+  .optics b{color:var(--ink);font-weight:600}
+  .optics-alt{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px}
+  .optics-alt button{appearance:none;background:transparent;border:0;padding:0;
+    cursor:pointer;font:inherit;color:var(--muted);border-bottom:1px solid var(--line)}
+  .optics-alt button:hover{color:var(--ink);border-color:var(--ink)}
+  .optics-alt button[disabled]{opacity:.55;cursor:wait}
   .head{padding:14px 0 6px}
   h1{font-size:clamp(21px,3.8vw,27px);font-weight:600;letter-spacing:-.015em}
   .idea{color:var(--muted);font-size:16px;margin-top:6px;max-width:42em}
@@ -244,6 +254,8 @@
     </div>
     <div class="path-next"><span class="path-next-tag">Дальше</span><span id="path-next-text">Этап 3 — соберём проверочную страницу под вашу идею, рекламу вы запустите сами по инструкции</span></div>
   </div>
+
+  __OPTICS__
 
   <div class="head">
     <h1>Результат проверки спроса</h1>
@@ -806,6 +818,25 @@ document.getElementById('share-btn').addEventListener('click', async () => {
   if (navigator.share) { try { await navigator.share({title: 'Проверка спроса — Создатель', url}); } catch(e){} return; }
   try { await navigator.clipboard.writeText(url); btn.textContent = 'Ссылка скопирована';
     setTimeout(()=>{btn.textContent='Поделиться результатом';}, 1600); } catch(e){}
+});
+
+// Смена оптики: пересчитывать спрос незачем, он от аудитории не зависит —
+// перезагружаем страницу, чтобы сервер собрал её под новую аудиторию (F3).
+document.querySelectorAll('#optics button[data-purpose]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Меняем…';
+    try {
+      const r = await fetch(`/api/demand/${CHECK_ID}/purpose`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({purpose: btn.dataset.purpose})
+      });
+      if (!r.ok) throw new Error();
+      location.reload();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = label;
+    }
+  });
 });
 </script>
 </body>

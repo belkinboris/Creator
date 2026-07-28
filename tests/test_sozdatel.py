@@ -3822,8 +3822,8 @@ class TestNoHardcodedServerValuesInStatic:
             "__PAGE_TITLE__", "__META__", "__FIELD_LABEL__", "__PLACEHOLDER__",
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
-            # страница результата -- audiences.for_page
-            "__AUDIENCE_JSON__",
+            # страница результата -- audiences.for_page / _optics_html
+            "__AUDIENCE_JSON__", "__OPTICS__",
             # страница подтверждения входа -- заполняет _verify_page
             "__HEADING__", "__LEAD__", "__WHO__", "__ACTION__", "__FINE__",
             # заголовок и выходные данные листа -- _doc_title_and_meta
@@ -7297,3 +7297,95 @@ class TestStudentAudience:
         assert "комисси" in t.lower()
         assert "смет" in t.lower()
         assert 'id="idea"' in t and "/api/demand" in t
+
+
+class TestOpticsCanBeSwitchedOnTheResultPage:
+    """F3 (остаток): ручка смены оптики была, кнопки не было.
+
+    Прошлый цикл добавил `POST /api/demand/{id}/purpose` — сменить аудиторию
+    на уже посчитанной проверке, не проходя её заново. Но в интерфейсе этой
+    возможности не существовало: человек, попавший не на ту витрину, видел
+    результат чужими глазами и мог только начать всё сначала.
+
+    Случай не редкий. Витрин три, находят нас и поиском, и по ссылке от
+    знакомого, а на самой `/r/` до этой правки вообще ничего не говорило, чьими
+    глазами он читает разбор. Между тем на выбор аудитории завязано многое:
+    что стоит главным действием (`plan_first`), что мы отвечаем при слабом
+    спросе и какой персоной модель напишет платный разбор.
+
+    Спрос при смене не пересчитывается — он от аудитории не зависит, это
+    цифры Яндекса. Меняется только оптика.
+    """
+
+    def _check(self, purpose="business"):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        data = {"formulations": [{"phrase": "ф", "count": 480}], "best_phrase": "ф",
+                "verdict": {"level": "niche", "text": "т"},
+                "competitors": {"found": 9, "top": []},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 4, "note": ""}],
+                "overall": {"value": 4, "weakest": "Спрос", "basis": "б"}}
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Груминг собак с выездом на дом", purpose=purpose,
+                              result_json=json.dumps(data, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id, rec.public_id
+
+    def test_page_says_whose_eyes_you_are_reading_with(self):
+        _, pid = self._check("student")
+        t = client.get(f"/r/{pid}").text
+        assert 'id="optics"' in t, "на странице нет блока смены оптики"
+        assert "Делаю студенческий проект" in t
+
+    def test_all_other_audiences_are_offered(self):
+        from app.audiences import AUDIENCES
+        _, pid = self._check("business")
+        t = client.get(f"/r/{pid}").text
+        block = t[t.index('id="optics"'):]
+        block = block[:block.index("</div>")]
+        for a in AUDIENCES.values():
+            assert a.switch_label in block, a.key
+
+    def test_switching_keeps_the_numbers(self):
+        """Спрос от аудитории не зависит — это цифры Яндекса, а не мнение."""
+        import app.main as m
+        rid, pid = self._check("business")
+        before = client.get(f"/r/{pid}").text
+        assert client.post(f"/api/demand/{rid}/purpose",
+                           json={"purpose": "student"}).status_code == 200
+        after = client.get(f"/r/{pid}").text
+
+        def payload(html_out):
+            return html_out.split("const DATA = ", 1)[1].split(";\n", 1)[0]
+        assert json.loads(payload(before))["formulations"] == \
+               json.loads(payload(after))["formulations"]
+
+    def test_switching_changes_the_optics(self):
+        rid, pid = self._check("business")
+        client.post(f"/api/demand/{rid}/purpose", json={"purpose": "social_contract"})
+        t = client.get(f"/r/{pid}").text
+        aud = json.loads(t.split("const AUDIENCE = ", 1)[1].split(";\n", 1)[0])
+        assert aud["key"] == "social_contract"
+        assert aud["plan_first"] is True
+
+    def test_report_built_after_the_switch_uses_the_new_optics(self):
+        """Смена оптики бессмысленна, если платный разбор её не увидит."""
+        import app.main as m
+        from app.audiences import get
+        rid, _ = self._check("business")
+        client.post(f"/api/demand/{rid}/purpose", json={"purpose": "student"})
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            purpose = s.get(DemandCheck, rid).purpose
+        from app.report_engine import _core_prompt
+        prompt = _core_prompt("full", purpose)
+        assert get("student").persona[:40] in prompt
+
+    def test_switch_is_not_offered_when_there_is_only_one_audience(self, monkeypatch):
+        """Сторож от бессмысленного блока: если аудитория одна, выбирать не из
+        чего и строка только мешает."""
+        import app.main as m
+        from app.audiences import BUSINESS
+        monkeypatch.setattr(m.audiences, "AUDIENCES", {"business": BUSINESS})
+        _, pid = self._check("business")
+        assert 'id="optics"' not in client.get(f"/r/{pid}").text
