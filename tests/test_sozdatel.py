@@ -324,7 +324,7 @@ class TestReportEngine:
         asyncio.run(generate_section("finance", "Пошив штор на заказ на дому",
                                      DEMAND_DATA_FIXTURE, "full",
                                      purpose=PURPOSE_SOCIAL_CONTRACT,
-                                     _post=_fake_llm(captured=cap)))
+                                     _post=_fake_llm(body="Смета: 50 000 ₽.", captured=cap)))
         flat = " ".join(cap["instructions"].split())
         assert "комиссии по социальному контракту" in flat
 
@@ -340,6 +340,41 @@ class TestReportEngine:
         with pytest.raises(ReportEngineError):
             asyncio.run(generate_section("summary", self.IDEA, DEMAND_DATA_FIXTURE,
                                          "quick", _post=_fake_llm(body="   ")))
+
+    def test_finance_section_without_numbers_rejected_for_estimate_required_audience(self):
+        """`estimate_required` (Audience) описывал, что смета обязана быть
+        посчитана «до копейки», но само поле нигде не читалось -- непустой
+        ответ модели без единой суммы в рублях проходил как валидный раздел.
+        Для получателя соцконтракта смета -- единственное, за чем платят
+        (принцип 3): недосчитанная смета это не более скудный раздел, а
+        недоставленная услуга."""
+        from app.report_engine import generate_section, ReportEngineError, PURPOSE_SOCIAL_CONTRACT
+        with pytest.raises(ReportEngineError):
+            asyncio.run(generate_section(
+                "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+                purpose=PURPOSE_SOCIAL_CONTRACT,
+                _post=_fake_llm(body="Точных данных недостаточно для расчёта, "
+                                     "но дело выглядит перспективным.")))
+
+    def test_finance_section_with_numbers_accepted_for_estimate_required_audience(self):
+        from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
+        out = asyncio.run(generate_section(
+            "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_SOCIAL_CONTRACT,
+            _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.")))
+        assert "15 000" in out["body"]
+
+    def test_finance_section_without_numbers_still_accepted_for_business(self):
+        """Проверка узкая для той аудитории, где смета — единственное, за чем
+        платят (Audience.estimate_required). Для фаундера смета — один из
+        разделов, а не весь смысл покупки, ужесточать его без решения
+        владельца не за чем."""
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="Пока рано считать точно, вернёмся к этому позже.")))
+        assert out["body"]
 
     def test_missing_viability_score_rejected(self):
         from app.report_engine import generate_core, ReportEngineError

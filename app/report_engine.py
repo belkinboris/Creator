@@ -465,6 +465,15 @@ async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "
     body = str(data.get("body") or "").strip()
     if not body:
         raise ReportEngineError(_MALFORMED, tech=f"пустой раздел {key}")
+    # Промпт финансового раздела прямо запрещает модели отказаться считать
+    # («недостаточно данных»), но до сих пор это была просьба без проверки:
+    # непустой ответ без единой суммы проходил как валидный. Для аудитории,
+    # где смета — единственное, за чем платят (комиссии соцзащиты она нужна
+    # «до копейки», Audience.estimate_required), непосчитанная смета — это не
+    # раздел похуже, а недоставленная услуга (принцип 3).
+    if (key == "finance" and audiences.get(purpose).estimate_required
+            and "₽" not in body and "руб" not in body.lower()):
+        raise ReportEngineError(_MALFORMED, tech=f"раздел {key}: нет сумм в рублях")
     return {"key": key, "title": section_title(key, purpose), "body": body}
 
 
