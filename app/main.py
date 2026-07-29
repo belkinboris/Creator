@@ -877,22 +877,37 @@ async def _ensure_sample(check_id: int) -> dict | None:
     """Бесплатный образец платного разбора: балл, объяснение, названные риски
     и один настоящий раздел целиком.
 
-    Считается ОДИН раз на проверку и кэшируется навсегда: это два вызова
+    Считается ОДИН раз НА АУДИТОРИЮ и кэшируется навсегда: это два вызова
     модели, и платит за них владелец. Генерируем лениво — только когда
     человек реально открыл страницу отчёта, то есть думает о покупке.
     Сбой не имеет права уронить страницу: без образца она просто остаётся
     такой, какой была (принцип 7 — деградация вместо ошибки).
+
+    Кэш — словарь `{purpose: sample}`, а не один сэмпл на проверку: человек
+    может переключить оптику на `/r/` (POST /api/demand/{id}/purpose) уже
+    ПОСЛЕ того, как образец сгенерировался под старую аудиторию, и увидеть
+    венчурный образец на витрине соцконтракта — тот самый образец, который
+    существует ровно для того, чтобы убедить купить (принцип 3, найдено
+    кастдев-проходом по платному пути 2026-07-29). Ключей ровно столько,
+    сколько аудиторий (сейчас три) — переключение туда-обратно не может
+    стоить владельцу больше одной генерации на каждую.
     """
     with Session(engine) as s:
         rec = s.get(DemandCheck, check_id)
         if not rec or not rec.result_json:
             return None
+        purpose = rec.purpose or "business"
+        cached = {}
         if rec.sample_json:
             try:
-                return json.loads(rec.sample_json)
+                parsed = json.loads(rec.sample_json)
+                if isinstance(parsed, dict):
+                    cached = parsed
             except ValueError:
                 pass
-        idea, purpose = rec.idea, rec.purpose
+        if purpose in cached:
+            return cached[purpose]
+        idea = rec.idea
         chosen = _chosen_offer(rec)
         demand_data = json.loads(rec.result_json)
 
@@ -909,9 +924,19 @@ async def _ensure_sample(check_id: int) -> dict | None:
     sample = {**core, "section": section}
     with Session(engine) as s:
         fresh = s.get(DemandCheck, check_id)
-        if fresh and not fresh.sample_json:
-            fresh.sample_json = json.dumps(sample, ensure_ascii=False)
-            s.add(fresh); s.commit()
+        if fresh:
+            store = {}
+            if fresh.sample_json:
+                try:
+                    parsed = json.loads(fresh.sample_json)
+                    if isinstance(parsed, dict):
+                        store = parsed
+                except ValueError:
+                    pass
+            if purpose not in store:
+                store[purpose] = sample
+                fresh.sample_json = json.dumps(store, ensure_ascii=False)
+                s.add(fresh); s.commit()
     return sample
 
 

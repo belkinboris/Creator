@@ -4660,6 +4660,47 @@ class TestFreeSampleSellsTheReport:
         client.get(f"/report/{pub(rid)}")
         assert seen == {"core": "social_contract", "section": "social_contract"}
 
+    def test_sample_regenerates_after_a_switch_then_stays_cached_per_audience(self, monkeypatch):
+        """Образец кэшировался НАВСЕГДА одной записью на проверку — человек,
+        сгенерировавший его под одной оптикой и переключившийся на другую
+        (POST /api/demand/{id}/purpose на /r/), видел на витрине соцконтракта
+        или студента застрявший венчурный образец. Образец существует ровно
+        затем, чтобы убедить купить (принцип 3) -- показывать не ту персону
+        работает против этой же цели."""
+        purposes_seen = []
+        import app.main as m
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            purposes_seen.append(purpose)
+            return {"viability_score": 61, "viability_summary": f"для {purpose}",
+                    "top_risks": [{"title": "т", "body": "б"}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            return {"key": key, "title": "Резюме", "body": f"текст для {purpose}"}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
+
+        rid = self._check("business")
+        assert "для business" in client.get(f"/report/{pub(rid)}").text
+        assert purposes_seen == ["business"]
+
+        client.post(f"/api/demand/{rid}/purpose", json={"purpose": "social_contract"})
+        text = client.get(f"/report/{pub(rid)}").text
+        assert "для social_contract" in text          # новая оптика видна сразу
+        assert "для business" not in text             # старую больше не показываем
+        assert purposes_seen == ["business", "social_contract"]
+
+        # Второй визит под той же (новой) оптикой -- из кэша, не новый вызов.
+        client.get(f"/report/{pub(rid)}")
+        assert purposes_seen == ["business", "social_contract"]
+
+        # Переключение обратно -- бизнес-версия уже была посчитана, повторно
+        # модель не зовём: переключаться туда-обратно не может стоить дороже
+        # одной генерации на каждую из (немногих) аудиторий.
+        client.post(f"/api/demand/{rid}/purpose", json={"purpose": "business"})
+        assert "для business" in client.get(f"/report/{pub(rid)}").text
+        assert purposes_seen == ["business", "social_contract"]
+
     def test_buyer_does_not_pay_for_a_sample(self, monkeypatch):
         """У покупателя весь разбор открыт — лишний вызов модели ему не нужен."""
         from app.main import ReportPurchase, Session, engine, select
