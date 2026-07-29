@@ -4296,6 +4296,23 @@ class TestPublicReportExample:
         assert "Смета расходов построчно." in page.text          # текст виден без оплаты
         assert "Это настоящий отчёт, собранный сервисом" in page.text
 
+    def test_example_page_has_no_leaked_template_placeholders(self, monkeypatch):
+        """Найдено живым кастдев-прогоном: `example_page` собирала HTML из
+        того же шаблона `report.html`, что и `/report/{id}`, но забыла два
+        `.replace(...)` из длинной цепочки -- `__DOC_TITLE__`/`__DOC_META__`
+        (заголовок и строка даты для печати, см. `_doc_title_and_meta`).
+        `/report/{id}` их всегда подставляет, а `/example` -- нет, и сырые
+        токены шаблона утекали прямо в `<h1>` самой важной для доверия
+        публичной страницы (см. C1 в PRODUCT_ROADMAP: без примера человек
+        платит 990-2990 ₽, не видя ни строчки того, что получит — а увидел
+        бы буквально `__DOC_TITLE__`)."""
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        page = client.get("/example").text
+        assert "__DOC_TITLE__" not in page
+        assert "__DOC_META__" not in page
+
     def test_showcases_link_the_example_once_it_exists(self, monkeypatch):
         """Пример собран для фаундера (business) -- ссылка появляется там,
         где сейчас смотрят тем же взглядом: /r/ на такой же проверке."""

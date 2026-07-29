@@ -1461,6 +1461,7 @@ def example_page(request: Request):
     note = (f'<div class="example-note">Это настоящий отчёт, собранный сервисом — '
             f'тариф «{html.escape(REPORT_PRICES.get(tier, {}).get("label", tier))}», '
             f'открыт целиком. Ваш будет по вашей идее и вашим цифрам спроса.</div>')
+    doc_title, doc_meta = _doc_title_and_meta(ex)
     _purpose = rec.purpose if rec else PURPOSE_DEFAULT
     # Только те разделы, что реально опубликованы. Полный список тарифа
     # заставил бы страницу дозаказывать недостающее -- то есть жечь вызовы
@@ -1469,6 +1470,8 @@ def example_page(request: Request):
     _tier_keys = [s["key"] for s in (report_full.get("sections") or []) if s.get("key")]
     tpl = _static("report.html")
     html_out = (tpl
+        .replace("__DOC_TITLE__", html.escape(doc_title))
+        .replace("__DOC_META__", doc_meta)
         .replace("__CHECK_ID__", str(ex.check_id or 0))
         .replace("__ACCESS_NOTE__", "")
         .replace("__OWNER_BAR__", note)
