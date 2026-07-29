@@ -1156,7 +1156,7 @@ def _example_purchase(s: Session):
         ReportPurchase.is_example == True)).first()          # noqa: E712
 
 
-def _tier_summary_html() -> str:
+def _tier_summary_html(purpose: str = "business") -> str:
     """Что входит в каждый тариф — там, где человек решает платить.
 
     Раньше на `/r/` стояло только «от 990 ₽», а состав тарифов открывался
@@ -1174,14 +1174,21 @@ def _tier_summary_html() -> str:
     группам `SECTION_GROUPS`: имя группы держит взгляд, а «Финансовая
     модель» находится в «Деньгах», а не тонет в середине списка. Для
     соцконтракта это ровно та строка, ради которой человек и платит.
+
+    Названия разделов берём через `section_title(key, purpose)`, а не
+    статический `ALL_SECTIONS` — у финансового раздела для соцконтракта
+    другое имя («Смета и расчёты для комиссии»), и сам отчёт после оплаты
+    покажет именно его. Показать на витрине «Финансовая модель», а после
+    оплаты — другое название той же секции, значит не узнать в списке то,
+    ради чего платишь (найдено кастдев-проходом по платному пути 2026-07-29).
     """
     # Заголовок «План запуска — по этапам» внутри перечисления через запятую
     # читается двусмысленно из-за тире: берём часть до него.
     def short(title: str) -> str:
         return title.split(" — ")[0].strip()
 
-    titles = dict(ALL_SECTIONS)
-    quick = [short(t) for k, t in ALL_SECTIONS if k in QUICK_KEYS]
+    titles = {k: section_title(k, purpose) for k, _ in ALL_SECTIONS}
+    quick = [short(titles[k]) for k, _ in ALL_SECTIONS if k in QUICK_KEYS]
     extra_keys = [k for k, _ in ALL_SECTIONS if k not in QUICK_KEYS]
 
     group_html = ""
@@ -3017,7 +3024,7 @@ def _fill_server_values(html: str, purpose: str = "business") -> str:
     if "__EXAMPLE_LINK__" in html:
         html = html.replace("__EXAMPLE_LINK__", _example_link("Посмотреть пример отчёта", purpose))
     if "__TIER_SUMMARY__" in html:
-        html = html.replace("__TIER_SUMMARY__", _tier_summary_html())
+        html = html.replace("__TIER_SUMMARY__", _tier_summary_html(purpose))
     return html
 
 

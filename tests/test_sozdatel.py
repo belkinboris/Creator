@@ -4308,8 +4308,15 @@ class TestTierDifferenceAtTheDecisionPoint:
         assert finance_title.lower() in full_part.lower()
 
     def test_summary_follows_the_engine_not_a_copy(self, monkeypatch):
-        """Если в движке появится новая секция, витрина обязана её назвать."""
+        """Если в движке появится новая секция, витрина обязана её назвать.
+
+        Название теперь читается через section_title() (SECTION_SPECS), а не
+        напрямую из ALL_SECTIONS — иначе аудиторный заголовок секции (finance
+        для соцконтракта) не попал бы на витрину. Патчим оба источника."""
         import app.main as m
+        import app.report_engine as re
+        new_spec = {"key": "newthing", "group": "Идея и рынок", "title": "Новая секция"}
+        monkeypatch.setattr(re, "SECTION_SPECS", list(re.SECTION_SPECS) + [new_spec])
         monkeypatch.setattr(m, "ALL_SECTIONS",
                             list(m.ALL_SECTIONS) + [("newthing", "Новая секция")])
         # в полном тарифе секции перечисляются со строчной буквы
@@ -4322,6 +4329,24 @@ class TestTierDifferenceAtTheDecisionPoint:
         assert m.REPORT_PRICES["full"]["label"] in text
         assert f"{m.REPORT_PRICES['full']['price']} ₽" in text
         assert 'id="alt-report"' in text and "__TIER_SUMMARY__" not in text
+
+    def test_tier_breakdown_names_sections_the_way_this_audience_will_see_them(self):
+        """Найдено кастдев-проходом по платному пути 2026-07-29: витрина
+        показывала «Финансовая модель» всем подряд, хотя у соцконтракта
+        та же секция в самом отчёте после оплаты называется «Смета и расчёты
+        для комиссии» (SECTION_SPECS.by_audience). Человек ищет глазами
+        «смету», видит «Финансовую модель» и не узнаёт в ней то, за чем
+        пришёл — витрина и отчёт должны называть секцию одинаково."""
+        import app.main as m
+        from app.report_engine import section_title
+        biz_text = client.get(f"/r/{pub(self._check('business'))}").text.lower()
+        soc_text = client.get(f"/r/{pub(self._check('social_contract'))}").text.lower()
+        biz_title = section_title("finance", "business").lower()
+        soc_title = section_title("finance", "social_contract").lower()
+        assert biz_title != soc_title          # предпосылка теста
+        assert biz_title in biz_text
+        assert soc_title in soc_text
+        assert soc_title not in biz_text
 
     def test_prices_are_still_not_hardcoded_in_static(self):
         """C2 не должна протащить обратно то, что закрыла B5."""
@@ -5560,15 +5585,24 @@ class TestTierListIsReadableAtTheDecisionPoint:
     def test_section_without_a_group_still_reaches_the_showcase(self):
         """Раскладка по группам не должна уметь ронять секцию. Молча
         пропасть — это ровно тот разъезд движка и витрины, против которого
-        весь этот блок и написан (принцип 3)."""
+        весь этот блок и написан (принцип 3).
+
+        Название теперь читается через section_title() (SECTION_SPECS), а
+        не напрямую из ALL_SECTIONS — патчим оба источника."""
         import app.main as m
+        import app.report_engine as re_engine
+        new_spec = {"key": "newthing", "group": "Идея и рынок",
+                   "title": "Совершенно новая секция"}
         with_new = list(m.ALL_SECTIONS) + [("newthing", "Совершенно новая секция")]
-        orig = m.ALL_SECTIONS
+        orig_all = m.ALL_SECTIONS
+        orig_specs = re_engine.SECTION_SPECS
         m.ALL_SECTIONS = with_new
+        re_engine.SECTION_SPECS = list(orig_specs) + [new_spec]
         try:
             plain = self._plain(m._tier_summary_html()).lower()
         finally:
-            m.ALL_SECTIONS = orig
+            m.ALL_SECTIONS = orig_all
+            re_engine.SECTION_SPECS = orig_specs
         assert "совершенно новая секция" in plain
 
     def test_count_is_computed_not_written_by_hand(self):
