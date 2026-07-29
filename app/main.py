@@ -93,8 +93,11 @@ PURPOSE_DEFAULT = "business"
 AD_BUDGET_HINT = "3–5 тысяч ₽"
 
 CLICK_TARGET = 40       # раньше этого числа визитов цифры -- шум, не результат
-SIGNAL_RATE = 0.08      # заявок/визитов, с которых интерес считается настоящим
-DEAD_RATE = 0.04        # и ниже -- интереса нет
+# A8: 8%/4% были ориентиром на тёплый трафик, для холодного Директа завышены --
+# владелец решил снизить перед началом рекламы (2026-07-28). Серая зона
+# сохранена той же относительной ширины (была 4-8%, стала 2-4%).
+SIGNAL_RATE = 0.04      # заявок/визитов, с которых интерес считается настоящим
+DEAD_RATE = 0.02        # и ниже -- интереса нет
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -295,30 +298,59 @@ class SmokeEvent(SQLModel, table=True):
 
 
 SQLModel.metadata.create_all(engine)
-try:  # create_all не добавляет колонки в существующие таблицы -- добиваем вручную
-    from sqlalchemy import text as _sqltext
+# create_all не добавляет колонки в существующие таблицы -- добиваем вручную.
+# `ADD COLUMN IF NOT EXISTS` -- диалект Postgres; SQLite (dev) на него падает
+# синтаксической ошибкой (проверено: sqlite3 3.45 не понимает эту форму даже
+# в новой версии -- это не вопрос возраста движка). На свежей sqlite-БД это
+# было незаметно: create_all создаёт таблицу сразу со всеми колонками, ALTER
+# просто не нужен. Но на БД, пережившей хотя бы одно добавление колонки в
+# прошлой сессии (ровно то, для чего dev вообще держит файл `sozdatel.db`
+# между запусками, а не только `sqlite://` в памяти, как в тестах) -- первый
+# же ALTER падал с "syntax error", единственный `except: pass` глотал ВСЮ
+# оставшуюся часть списка разом, и следующее же обращение к новой колонке
+# роняло страницу 500-й (принцип 7 требует ровно обратного). Проверяем
+# наличие колонки через инспектор БД (работает одинаково для sqlite и
+# Postgres) и добавляем только то, чего действительно не хватает -- по
+# одной колонке за раз, чтобы сбой одной не глушил остальные.
+_MIGRATIONS = [
+    ("demandcheck", "result_json", "VARCHAR DEFAULT ''"),
+    ("livetestorder", "chosen_offer", "VARCHAR DEFAULT ''"),
+    ("smokeproject", "contact", "VARCHAR DEFAULT ''"),
+    ("livetestorder", "idea_id", "VARCHAR"),
+    ("demandcheck", "contact", "VARCHAR DEFAULT ''"),
+    ("demandcheck", "purpose", "VARCHAR DEFAULT 'business'"),
+    ("reportpurchase", "gen_error", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "fail_notified", "BOOLEAN DEFAULT FALSE"),
+    ("reportpurchase", "paid_notified", "BOOLEAN DEFAULT FALSE"),
+    ("livetestorder", "paid_notified", "BOOLEAN DEFAULT FALSE"),
+    ("demandcheck", "chosen_offer", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "is_example", "BOOLEAN DEFAULT FALSE"),
+    ("demandcheck", "sample_json", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "access_token", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "buyer_notified", "BOOLEAN DEFAULT FALSE"),
+    ("demandcheck", "public_id", "VARCHAR DEFAULT ''"),
+    ("livetestorder", "buyer_notified", "BOOLEAN DEFAULT FALSE"),
+    ("smokeproject", "template_hash", "VARCHAR DEFAULT ''"),
+]
+try:
+    from sqlalchemy import inspect as _sa_inspect, text as _sqltext
+    _inspector = _sa_inspect(engine)
+    _existing_cols = {
+        _table: {c["name"] for c in _inspector.get_columns(_table)}
+        for _table in {m[0] for m in _MIGRATIONS}
+    }
     with engine.connect() as _c:
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS result_json VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS idea_id VARCHAR"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS purpose VARCHAR DEFAULT 'business'"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS gen_error VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS fail_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS is_example BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS sample_json VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS access_token VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS public_id VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS template_hash VARCHAR DEFAULT ''"))
-        _c.commit()
-except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
-    pass
+        for _table, _col, _ddl in _MIGRATIONS:
+            if _col in _existing_cols.get(_table, set()):
+                continue
+            try:
+                _c.execute(_sqltext(f"ALTER TABLE {_table} ADD COLUMN {_col} {_ddl}"))
+                _c.commit()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "миграция не прошла: %s.%s", _table, _col, exc_info=True)
+except Exception:
+    logging.getLogger(__name__).warning("проверка колонок при старте не удалась", exc_info=True)
 
 try:  # Проверки, сделанные до появления неугадываемого адреса, иначе
     # остались бы доступны по порядковому номеру (E6). Досыпаем по строке.
@@ -348,6 +380,17 @@ try:  # Покупки, оформленные до появления токе�
 except Exception:
     logging.getLogger(__name__).warning("backfill access_token failed", exc_info=True)
 
+# Прогреваемые на старте страницы -- список вручную, а не сканирование
+# static/: часть файлов там не HTML-шаблоны (fonts/, README). Отдельная
+# константа, а не тело _lifespan, чтобы тест мог проверить, что каждое имя
+# всё ещё существует на диске -- переименование/удаление файла (как
+# social-contract.html -> audience-landing.html в F2) иначе тихо переставало
+# прогреваться: исключение в _lifespan поймано и лишь залогировано (принцип
+# 7), так что сам сервис не падает, просто первый визит снова платит за всё.
+PREWARM_STATIC_PAGES = ("index.html", "project.html", "guide-direct.html", "result.html",
+                        "report.html", "audience-landing.html", "account.html", "verify.html")
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """Прогрев при старте: соединение с БД и статика читаются ДО первого
@@ -357,8 +400,7 @@ async def _lifespan(_app: FastAPI):
             s.exec(select(SmokeProject.id).limit(1)).first()
     except Exception:
         logger.exception("warm-up db failed (non-fatal)")
-    for name in ("index.html", "project.html", "guide-direct.html", "result.html", "report.html",
-                 "social-contract.html", "account.html", "verify.html"):
+    for name in PREWARM_STATIC_PAGES:
         try:
             _static(name)
         except Exception:
@@ -488,7 +530,7 @@ class IdeaIn(BaseModel):
 async def offers(data: IdeaIn, request: Request):
     _check_owner(request)
     try:
-        result = await sharpen_idea(data.idea)
+        result = await sharpen_idea(data.idea, purpose=data.purpose)
         return {"ok": True, **_polish_offers(result)}
     except OfferEngineError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -573,7 +615,7 @@ async def sharpen(data: IdeaIn, request: Request):
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
     try:
-        result = await sharpen_idea(data.idea)
+        result = await sharpen_idea(data.idea, purpose=data.purpose)
         return {"ok": True, **_polish_offers(result)}
     except OfferEngineError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
@@ -615,7 +657,7 @@ def result_page(rid: str, request: Request):
         .replace("__AUDIENCE_JSON__",
                  json.dumps(audiences.for_page(rec.purpose), ensure_ascii=False))
         .replace("__OPTICS__", _optics_html(rec.purpose)))
-    return HTMLResponse(_fill_server_values(html_out))
+    return HTMLResponse(_fill_server_values(html_out, rec.purpose))
 
 
 class LiveTestIn(SQLModel):
@@ -864,22 +906,37 @@ async def _ensure_sample(check_id: int) -> dict | None:
     """Бесплатный образец платного разбора: балл, объяснение, названные риски
     и один настоящий раздел целиком.
 
-    Считается ОДИН раз на проверку и кэшируется навсегда: это два вызова
+    Считается ОДИН раз НА АУДИТОРИЮ и кэшируется навсегда: это два вызова
     модели, и платит за них владелец. Генерируем лениво — только когда
     человек реально открыл страницу отчёта, то есть думает о покупке.
     Сбой не имеет права уронить страницу: без образца она просто остаётся
     такой, какой была (принцип 7 — деградация вместо ошибки).
+
+    Кэш — словарь `{purpose: sample}`, а не один сэмпл на проверку: человек
+    может переключить оптику на `/r/` (POST /api/demand/{id}/purpose) уже
+    ПОСЛЕ того, как образец сгенерировался под старую аудиторию, и увидеть
+    венчурный образец на витрине соцконтракта — тот самый образец, который
+    существует ровно для того, чтобы убедить купить (принцип 3, найдено
+    кастдев-проходом по платному пути 2026-07-29). Ключей ровно столько,
+    сколько аудиторий (сейчас три) — переключение туда-обратно не может
+    стоить владельцу больше одной генерации на каждую.
     """
     with Session(engine) as s:
         rec = s.get(DemandCheck, check_id)
         if not rec or not rec.result_json:
             return None
+        purpose = rec.purpose or "business"
+        cached = {}
         if rec.sample_json:
             try:
-                return json.loads(rec.sample_json)
+                parsed = json.loads(rec.sample_json)
+                if isinstance(parsed, dict):
+                    cached = parsed
             except ValueError:
                 pass
-        idea, purpose = rec.idea, rec.purpose
+        if purpose in cached:
+            return cached[purpose]
+        idea = rec.idea
         chosen = _chosen_offer(rec)
         demand_data = json.loads(rec.result_json)
 
@@ -896,9 +953,19 @@ async def _ensure_sample(check_id: int) -> dict | None:
     sample = {**core, "section": section}
     with Session(engine) as s:
         fresh = s.get(DemandCheck, check_id)
-        if fresh and not fresh.sample_json:
-            fresh.sample_json = json.dumps(sample, ensure_ascii=False)
-            s.add(fresh); s.commit()
+        if fresh:
+            store = {}
+            if fresh.sample_json:
+                try:
+                    parsed = json.loads(fresh.sample_json)
+                    if isinstance(parsed, dict):
+                        store = parsed
+                except ValueError:
+                    pass
+            if purpose not in store:
+                store[purpose] = sample
+                fresh.sample_json = json.dumps(store, ensure_ascii=False)
+                s.add(fresh); s.commit()
     return sample
 
 
@@ -1143,7 +1210,7 @@ def _example_purchase(s: Session):
         ReportPurchase.is_example == True)).first()          # noqa: E712
 
 
-def _tier_summary_html() -> str:
+def _tier_summary_html(purpose: str = "business") -> str:
     """Что входит в каждый тариф — там, где человек решает платить.
 
     Раньше на `/r/` стояло только «от 990 ₽», а состав тарифов открывался
@@ -1161,14 +1228,21 @@ def _tier_summary_html() -> str:
     группам `SECTION_GROUPS`: имя группы держит взгляд, а «Финансовая
     модель» находится в «Деньгах», а не тонет в середине списка. Для
     соцконтракта это ровно та строка, ради которой человек и платит.
+
+    Названия разделов берём через `section_title(key, purpose)`, а не
+    статический `ALL_SECTIONS` — у финансового раздела для соцконтракта
+    другое имя («Смета и расчёты для комиссии»), и сам отчёт после оплаты
+    покажет именно его. Показать на витрине «Финансовая модель», а после
+    оплаты — другое название той же секции, значит не узнать в списке то,
+    ради чего платишь (найдено кастдев-проходом по платному пути 2026-07-29).
     """
     # Заголовок «План запуска — по этапам» внутри перечисления через запятую
     # читается двусмысленно из-за тире: берём часть до него.
     def short(title: str) -> str:
         return title.split(" — ")[0].strip()
 
-    titles = dict(ALL_SECTIONS)
-    quick = [short(t) for k, t in ALL_SECTIONS if k in QUICK_KEYS]
+    titles = {k: section_title(k, purpose) for k, _ in ALL_SECTIONS}
+    quick = [short(titles[k]) for k, _ in ALL_SECTIONS if k in QUICK_KEYS]
     extra_keys = [k for k, _ in ALL_SECTIONS if k not in QUICK_KEYS]
 
     group_html = ""
@@ -1206,15 +1280,30 @@ def _tier_summary_html() -> str:
         '</div>')
 
 
-def _example_link(text: str) -> str:
-    """Ссылка на пример — только когда пример реально существует.
+def _example_link(text: str, purpose: str = "business") -> str:
+    """Ссылка на пример — только когда пример реально существует И собран
+    для ТОЙ ЖЕ аудитории, что сейчас смотрит на страницу.
 
     Обещать «посмотрите пример» и привести на пустую страницу хуже, чем не
     обещать вовсе (принципы 3 и 7). Поэтому витрины спрашивают об этом у
     сервера, а не носят ссылку зашитой.
+
+    Пример ровно один на весь сервис (F2/C1) -- собран под чью-то одну
+    оптику. Показать венчурный разбор фаундера как «вот что вы получите»
+    получателю соцконтракта или студенту обещает не ту оптику, что мы
+    реально отдадим по его заявке (принцип 4 -- одна аудитория, одна
+    оптика; принцип 3 -- продаём только то, что реально отдаём).
     """
     with Session(engine) as s:
-        if not _example_purchase(s):
+        ex = _example_purchase(s)
+        if not ex:
+            return ""
+        example_purpose = "business"
+        if ex.check_id:
+            check = s.get(DemandCheck, ex.check_id)
+            if check and check.purpose:
+                example_purpose = check.purpose
+        if example_purpose != purpose:
             return ""
     return f'<a href="/example">{html.escape(text)}</a>'
 
@@ -1372,6 +1461,7 @@ def example_page(request: Request):
     note = (f'<div class="example-note">Это настоящий отчёт, собранный сервисом — '
             f'тариф «{html.escape(REPORT_PRICES.get(tier, {}).get("label", tier))}», '
             f'открыт целиком. Ваш будет по вашей идее и вашим цифрам спроса.</div>')
+    doc_title, doc_meta = _doc_title_and_meta(ex)
     _purpose = rec.purpose if rec else PURPOSE_DEFAULT
     # Только те разделы, что реально опубликованы. Полный список тарифа
     # заставил бы страницу дозаказывать недостающее -- то есть жечь вызовы
@@ -1380,6 +1470,8 @@ def example_page(request: Request):
     _tier_keys = [s["key"] for s in (report_full.get("sections") or []) if s.get("key")]
     tpl = _static("report.html")
     html_out = (tpl
+        .replace("__DOC_TITLE__", html.escape(doc_title))
+        .replace("__DOC_META__", doc_meta)
         .replace("__CHECK_ID__", str(ex.check_id or 0))
         .replace("__ACCESS_NOTE__", "")
         .replace("__OWNER_BAR__", note)
@@ -1796,8 +1888,8 @@ def _launch_offer(s: Session, offer: dict, idea_text: str, contact: str = "") ->
         landing_html=html,
         template_hash=_template_hash(),
         click_target=int(offer.get("click_target", 40)),
-        lead_rate_signal=float(offer.get("lead_rate_signal", 0.08)),
-        lead_rate_dead=float(offer.get("lead_rate_dead", 0.04)),
+        lead_rate_signal=float(offer.get("lead_rate_signal", SIGNAL_RATE)),
+        lead_rate_dead=float(offer.get("lead_rate_dead", DEAD_RATE)),
         contact=contact,
     )
     s.add(proj); s.commit(); s.refresh(proj)
@@ -2146,6 +2238,20 @@ def delete_project(idea_id: str, request: Request):
             raise HTTPException(404, "идея не найдена")
         for ev in s.exec(select(SmokeEvent).where(SmokeEvent.idea == idea_id)).all():
             s.delete(ev)
+        # Заявка на живой тест, из которой запущен этот проект, иначе
+        # осталась бы с оборванной ссылкой: /api/orders берёт project_url
+        # прямо из idea_id заявки, не проверяя, жив ли ещё сам проект --
+        # /desk продолжал бы звать «Проект уже запущен → открыть» на
+        # страницу, которая уже отдаёт голый `{"detail": "проект не
+        # найден"}` (тот же класс дефекта, что и A19: техническое сообщение
+        # движка доезжает до человека). Хуже того: в /account эта же заявка
+        # с непустым idea_id вообще перестала бы показываться -- ни
+        # карточкой проекта (SmokeProject уже нет), ни обычной заявкой
+        # (cabinet-запрос отбирает только заявки с idea_id IS NULL) --
+        # человек, оплативший тест, увидел бы, что его заказ просто исчез.
+        for order in s.exec(select(LiveTestOrder).where(LiveTestOrder.idea_id == idea_id)).all():
+            order.idea_id = None
+            s.add(order)
         s.delete(proj)
         s.commit()
     return {"ok": True, "deleted": idea_id}
@@ -2254,7 +2360,7 @@ PRESET_OFFERS = [
         "direct_queries": ["ответы на отзывы вайлдберриз", "как отвечать на отзывы озон",
             "шаблоны ответов на отзывы покупателей", "ответ на негативный отзыв wildberries",
             "автоответ на отзывы маркетплейс", "сервис ответов на отзывы", "работа с отзывами wb"],
-        "lead_rate_signal": 0.08, "lead_rate_dead": 0.04, "click_target": 40,
+        "lead_rate_signal": 0.04, "lead_rate_dead": 0.02, "click_target": 40,
     },
     {
         "angle": "работа без договора = работа под честное слово",
@@ -2277,7 +2383,7 @@ PRESET_OFFERS = [
         "direct_queries": ["договор для самозанятого образец", "договор оказания услуг самозанятый",
             "договор с самозанятым шаблон", "как составить договор на услуги",
             "договор фрилансера с заказчиком", "договор подряда для самозанятых"],
-        "lead_rate_signal": 0.07, "lead_rate_dead": 0.035, "click_target": 40,
+        "lead_rate_signal": 0.035, "lead_rate_dead": 0.0175, "click_target": 40,
     },
 ]
 
@@ -2655,6 +2761,12 @@ def account_me(request: Request):
                 counts[(idea, event)] += 1
     return {
         "ok": True, "contact": contact, "purpose": purpose,
+        # Куда вести за следующей идеей -- адрес своей витрины, а не
+        # хардкод в статике. Раньше это была ветка "social_contract или /"
+        # прямо в account.html: третья аудитория (студент) в неё не попадала
+        # и тихо утекала на витрину для фаундеров (тот же класс дефекта,
+        # что и F1, только в другом файле).
+        "home": audiences.for_page(purpose)["home"],
         "projects": [_smoke_card(p, counts[(p.idea_id, "page_view")],
                                  counts[(p.idea_id, "lead_submitted")]) for p in projects],
         # tier_label приходит с сервера, а не зашит в кабинете: тариф уже
@@ -2720,7 +2832,7 @@ def _audience_landing(key: str) -> str:
             .replace("__FAQ__", faq)
             .replace("__AUDIENCE_SWITCH__", _audience_switch_html(a.key))
             .replace("__AUDIENCE_KEY__", a.key))
-    return _fill_server_values(page)
+    return _fill_server_values(page, a.key)
 
 
 @app.get("/students", response_class=HTMLResponse)
@@ -2948,7 +3060,7 @@ def _audience_switch_html(current: str) -> str:
             '<span class="aud-tag">Вы к нам зачем:</span>' + "".join(items) + "</nav>")
 
 
-def _fill_server_values(html: str) -> str:
+def _fill_server_values(html: str, purpose: str = "business") -> str:
     """Подставляет в статику всё, чему в коде есть единственный источник:
     цены, названия тарифов, пороги вердикта, рекламный бюджет.
 
@@ -2981,9 +3093,9 @@ def _fill_server_values(html: str) -> str:
     # Ссылка на пример стоит денег (запрос в БД) и появляется, только когда
     # пример опубликован -- считаем её лишь если слот на странице есть.
     if "__EXAMPLE_LINK__" in html:
-        html = html.replace("__EXAMPLE_LINK__", _example_link("Посмотреть пример отчёта"))
+        html = html.replace("__EXAMPLE_LINK__", _example_link("Посмотреть пример отчёта", purpose))
     if "__TIER_SUMMARY__" in html:
-        html = html.replace("__TIER_SUMMARY__", _tier_summary_html())
+        html = html.replace("__TIER_SUMMARY__", _tier_summary_html(purpose))
     return html
 
 

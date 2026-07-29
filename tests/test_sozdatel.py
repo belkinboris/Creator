@@ -81,10 +81,30 @@ class TestOfferEngine:
             return _yandex_response(json.dumps(body, ensure_ascii=False))
         out = asyncio.run(sharpen_idea("Сервис отвечает на отзывы за селлеров маркетплейсов", _post=fake_post))
         assert len(out["offers"]) == 3
-        assert "Идея фаундера" in payload_capture["input"]
+        assert payload_capture["input"].startswith("Идея:")
         assert "РАЗНЫХ оффера" in payload_capture["instructions"]
+        assert "Проверяю идею для своего дела" in payload_capture["instructions"]   # дефолт business
         # DeepSeek/не-Claude жёстко просим не класть markdown внутрь JSON-полей
         assert "markdown" in payload_capture["instructions"]
+
+    def test_purpose_changes_who_the_model_thinks_it_is_writing_for(self):
+        """Заострение раньше всегда писалось "за фаундера" -- system-промпт
+        не менялся, даже когда идею принесли с /social-contract или /students.
+        Один и тот же бесплатный шаг обязан понимать, кто перед ним, как и
+        платный отчёт (F1-F3)."""
+        for purpose, phrase in (
+            ("social_contract", "Готовлю обоснование для соцзащиты"),
+            ("student", "Делаю студенческий проект"),
+        ):
+            payload_capture = {}
+            async def fake_post(provider, payload):
+                payload_capture.update(payload)
+                body = {"offers": [dict(VALID_OFFER, idea_id=f"i{i}") for i in range(3)]}
+                return _yandex_response(json.dumps(body, ensure_ascii=False))
+            asyncio.run(sharpen_idea("Идея достаточно длинная для проверки аудитории",
+                                     purpose=purpose, _post=fake_post))
+            assert phrase in payload_capture["instructions"], purpose
+            assert "Фаундер" not in payload_capture["instructions"], purpose
 
     def test_thinking_budget_added_to_max_tokens(self):
         """DeepSeek thinking всегда включён -- max_output_tokens должен быть
@@ -120,7 +140,7 @@ class TestOfferEngine:
         monkeypatch.setattr(llm_adapter, "LLM_PROVIDER", "anthropic")
         async def fake_post(provider, payload):
             assert provider == "anthropic"
-            assert payload["messages"][0]["content"].startswith("Идея фаундера")
+            assert payload["messages"][0]["content"].startswith("Идея:")
             body = {"offers": [dict(VALID_OFFER, idea_id=f"a{i}") for i in range(3)]}
             return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}]}
         out = asyncio.run(sharpen_idea("Идея достаточно длинная для проверки отката", _post=fake_post))
@@ -298,13 +318,25 @@ class TestReportEngine:
         assert _section_prompt("summary", "full", "чепуха") == \
                _section_prompt("summary", "full", PURPOSE_BUSINESS)
 
+    def test_reader_reaches_both_core_and_section_prompts(self):
+        """`Audience.reader` описывал, кто на самом деле читает разбор
+        («комиссия соцзащиты», «преподаватель или жюри»), но само поле нигде
+        не читалось -- модель ничего не знала о конкретном читателе, кроме
+        того, что можно было косвенно вывести из persona."""
+        from app.report_engine import _core_prompt, _section_prompt, PURPOSES
+        from app import audiences
+        for purpose in PURPOSES:
+            reader = audiences.get(purpose).reader
+            assert reader in _core_prompt("full", purpose)
+            assert reader in _section_prompt("summary", "full", purpose)
+
     def test_purpose_reaches_the_model_prompt(self):
         from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
         cap = {}
         asyncio.run(generate_section("finance", "Пошив штор на заказ на дому",
                                      DEMAND_DATA_FIXTURE, "full",
                                      purpose=PURPOSE_SOCIAL_CONTRACT,
-                                     _post=_fake_llm(captured=cap)))
+                                     _post=_fake_llm(body="Смета: 50 000 ₽.", captured=cap)))
         flat = " ".join(cap["instructions"].split())
         assert "комиссии по социальному контракту" in flat
 
@@ -320,6 +352,41 @@ class TestReportEngine:
         with pytest.raises(ReportEngineError):
             asyncio.run(generate_section("summary", self.IDEA, DEMAND_DATA_FIXTURE,
                                          "quick", _post=_fake_llm(body="   ")))
+
+    def test_finance_section_without_numbers_rejected_for_estimate_required_audience(self):
+        """`estimate_required` (Audience) описывал, что смета обязана быть
+        посчитана «до копейки», но само поле нигде не читалось -- непустой
+        ответ модели без единой суммы в рублях проходил как валидный раздел.
+        Для получателя соцконтракта смета -- единственное, за чем платят
+        (принцип 3): недосчитанная смета это не более скудный раздел, а
+        недоставленная услуга."""
+        from app.report_engine import generate_section, ReportEngineError, PURPOSE_SOCIAL_CONTRACT
+        with pytest.raises(ReportEngineError):
+            asyncio.run(generate_section(
+                "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+                purpose=PURPOSE_SOCIAL_CONTRACT,
+                _post=_fake_llm(body="Точных данных недостаточно для расчёта, "
+                                     "но дело выглядит перспективным.")))
+
+    def test_finance_section_with_numbers_accepted_for_estimate_required_audience(self):
+        from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
+        out = asyncio.run(generate_section(
+            "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_SOCIAL_CONTRACT,
+            _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.")))
+        assert "15 000" in out["body"]
+
+    def test_finance_section_without_numbers_still_accepted_for_business(self):
+        """Проверка узкая для той аудитории, где смета — единственное, за чем
+        платят (Audience.estimate_required). Для фаундера смета — один из
+        разделов, а не весь смысл покупки, ужесточать его без решения
+        владельца не за чем."""
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="Пока рано считать точно, вернёмся к этому позже.")))
+        assert out["body"]
 
     def test_missing_viability_score_rejected(self):
         from app.report_engine import generate_core, ReportEngineError
@@ -473,6 +540,38 @@ class TestOwnerKey:
 
     def test_delete_requires_key(self):
         assert client.delete("/api/projects/whatever").status_code == 401
+
+    def test_delete_project_unlinks_its_live_test_order(self):
+        """Найдено живым кастдев-прогоном: удаление проекта не трогало
+        LiveTestOrder.idea_id, из которой этот проект был запущен.
+        `/api/orders` (владелец, /desk) строит `project_url` прямо из
+        `idea_id` заказа, не проверяя, жив ли ещё сам проект -- «Проект уже
+        запущен → открыть» продолжал звать на страницу, которая после
+        удаления отдаёт голый `{"detail": "проект не найден"}` (класс A19).
+        А в /account эта же заявка вообще пропадала бы из вида: не карточка
+        проекта (SmokeProject уже нет) и не обычная заявка (`/api/account/me`
+        отбирает только заказы с idea_id IS NULL) -- оплативший тест человек
+        решил бы, что заказ потерялся."""
+        from app.main import LiveTestOrder, Session, engine
+        client.post("/api/launch", headers=OWNER,
+                    json={"idea_text": "т", "offer": dict(VALID_OFFER, idea_id="unlink_v1")})
+        with Session(engine) as s:
+            order = LiveTestOrder(idea="живой тест для проверки отвязки", contact="unlink@example.com",
+                                  status="paid", amount=1490, idea_id="unlink_v1")
+            s.add(order); s.commit(); s.refresh(order)
+            order_id = order.id
+
+        before = client.get("/api/orders", headers=OWNER).json()["orders"]
+        before_row = next(o for o in before if o["id"] == order_id)
+        assert before_row["project_url"] == "/p/unlink_v1"
+
+        r = client.delete("/api/projects/unlink_v1", headers=OWNER)
+        assert r.status_code == 200
+
+        after = client.get("/api/orders", headers=OWNER).json()["orders"]
+        after_row = next(o for o in after if o["id"] == order_id)
+        assert after_row["project_url"] is None, after_row
+        assert after_row["idea_id"] is None, after_row
 
 
 class TestTimeoutRetry:
@@ -754,6 +853,50 @@ class TestPresets:
         assert "за 5 минут" in page
         assert "договор готов · 12 пунктов" in page
         assert "★" not in page.replace("★☆☆☆☆", "") or "★☆☆☆☆" not in page  # без звёзд отзывов
+
+
+class TestStartupMigrationOnAStaleSqliteFile:
+    """Реальный баг, найденный в живом прогоне (не в тестах — они всегда
+    берут свежую `sqlite://` в памяти, где ALTER вообще не нужен): миграция
+    при старте использовала `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` —
+    это диалект Postgres, SQLite падает на нём "syntax error" (проверено
+    напрямую sqlite3 3.45, дело не в старой версии движка). На БД, которая
+    пережила хотя бы одно добавление колонки в прошлом запуске (а dev держит
+    файл `sozdatel.db` между запусками ровно за этим), первый же ALTER падал,
+    единственный `except: pass` глушил ВСЮ оставшуюся миграцию разом, и
+    следующее же обращение к новой колонке ронялось 500-й."""
+
+    def test_missing_column_gets_added_without_crashing(self, tmp_path):
+        import sqlite3
+        import subprocess
+        import sys
+        import textwrap
+
+        db_path = tmp_path / "stale.db"
+        con = sqlite3.connect(str(db_path))
+        con.execute("CREATE TABLE demandcheck (id INTEGER PRIMARY KEY, idea VARCHAR)")
+        con.commit()
+        con.close()
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = textwrap.dedent(f"""
+            import os
+            os.environ["DATABASE_URL"] = "sqlite:///{db_path}"
+            os.environ.setdefault("YANDEX_FOLDER_ID", "test-folder")
+            os.environ.setdefault("YANDEX_API_KEY", "test-yandex-key")
+            import app.main  # выполняет миграцию на импорте
+        """)
+        result = subprocess.run([sys.executable, "-c", script], cwd=repo_root,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+
+        con = sqlite3.connect(str(db_path))
+        cols = {row[1] for row in con.execute("PRAGMA table_info(demandcheck)")}
+        con.close()
+        assert "public_id" in cols
+        # Колонки, добавленные ДО той, что уронила бы блок на старом коде --
+        # регрессия того же класса: единственный сбой глушил и их тоже.
+        assert "purpose" in cols and "sample_json" in cols
 
 
 class TestHealthVersion:
@@ -1271,6 +1414,30 @@ class TestOverallAndStats:
         assert out["overall"]["value"] == 1
         assert out["overall"]["weakest"] == "Спрос"
 
+    def test_overall_hidden_when_demand_unknown_not_just_low(self):
+        """Найдено живым прогоном (кастдев-проход, dev без ключей Вордстата,
+        LLM-ответы подменены инъекцией): Вордстат недоступен (demand_value
+        is None -- НЕ то же самое, что "спрос есть и он маленький", тогда
+        было бы demand_value=1), но три LLM-шкалы отработали. Раньше это
+        молча усредняло три оставшиеся шкалы и подписывало результат «среднее
+        по ЧЕТЫРЁМ шкалам», хотя спрос в среднем не участвовал вообще -- рядом
+        с вердиктом "unknown" ("данных нет") эта уверенная семёрка внушала
+        обратное. Спрос -- ворота (см. test_overall_capped_by_weak_demand);
+        если неизвестно, что за воротами, показывать число нельзя."""
+        score_json = json.dumps({"competition": 7, "timing": 8, "execution": 6,
+            "notes": {"competition": "", "timing": "", "execution": ""}}, ensure_ascii=False)
+        async def post(provider, payload):
+            if provider == "yandex":
+                if "шкалам" in payload["instructions"]:
+                    return _yandex_response(score_json)
+                return _yandex_response(json.dumps(["a b", "c d", "e f"]))
+            if provider == "wordstat":
+                raise RuntimeError("Вордстат недоступен")
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Идея с недоступным Вордстатом, но рабочими LLM-шкалами", _post=post))
+        assert out["scores"][0]["value"] is None          # спрос действительно неизвестен
+        assert out["overall"] is None
+
     def test_demand_check_persisted_and_stats(self):
         import app.main as m
         async def fake_check(idea):
@@ -1675,7 +1842,7 @@ class TestSharpenPublic:
 
     def test_sharpen_public_no_owner_key_required(self):
         import app.main as m
-        async def fake_sharpen(idea):
+        async def fake_sharpen(idea, *a, **kw):
             return {"sharpened_note": "сместил акценты", "warning": "",
                     "offers": [dict(VALID_OFFER, idea_id=f"pub{i}") for i in range(3)]}
         orig = m.sharpen_idea
@@ -1688,9 +1855,28 @@ class TestSharpenPublic:
         finally:
             m.sharpen_idea = orig
 
+    def test_sharpen_passes_purpose_through(self):
+        """Раньше заострение всегда писалось "за фаундера" -- purpose с
+        витрины/страницы результата не доезжал до движка вовсе."""
+        import app.main as m
+        captured = {}
+        async def fake_sharpen(idea, *a, purpose="business", **kw):
+            captured["purpose"] = purpose
+            return {"sharpened_note": "", "warning": "",
+                    "offers": [dict(VALID_OFFER, idea_id=f"pub{i}") for i in range(3)]}
+        orig = m.sharpen_idea
+        m.sharpen_idea = fake_sharpen
+        try:
+            r = client.post("/api/sharpen", json={"idea": "Идея достаточно длинная для заострения",
+                                                  "purpose": "student"})
+            assert r.status_code == 200
+            assert captured["purpose"] == "student"
+        finally:
+            m.sharpen_idea = orig
+
     def test_sharpen_llm_failure_returns_400(self):
         import app.main as m
-        async def failing(idea):
+        async def failing(idea, *a, **kw):
             raise OfferEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
         orig = m.sharpen_idea
         m.sharpen_idea = failing
@@ -3456,9 +3642,24 @@ class TestAccountFirstEntry:
         assert client.get("/api/account/me").json()["purpose"] == "business"
         client.cookies.clear()
 
-    def test_cabinet_routes_social_contract_back_to_its_own_landing(self):
+    def test_cabinet_routes_back_to_its_own_landing_server_driven(self):
+        """Раньше адрес был хардкодом в account.html ("social_contract или /"),
+        и третья аудитория (студент) в него не попадала -- утекала на витрину
+        для фаундеров. Сервер обязан отдавать готовый адрес, а кабинет -- не
+        знать про purpose вовсе (та же дыра, что F1 закрыла в других файлах)."""
         text = (main_module.BASE_DIR.parent / "static" / "account.html").read_text()
-        assert "d.purpose === 'social_contract' ? '/social-contract' : '/'" in text
+        assert "d.home" in text
+        assert "social_contract" not in text
+
+    def test_home_url_for_each_audience(self):
+        client.cookies.clear()
+        for purpose, expected in (("business", "/"), ("social_contract", "/social-contract"),
+                                  ("student", "/students")):
+            contact = f"home_{purpose}@example.com"
+            self._login(contact)
+            self._check(contact, purpose)
+            assert client.get("/api/account/me").json()["home"] == expected, purpose
+            client.cookies.clear()
 
     def test_tier_label_comes_from_server(self):
         """Тариф уже переименовывали («Полный отчёт» -> «Бизнес-план»), и
@@ -3502,6 +3703,23 @@ class TestAccountFirstEntry:
         assert "Пароль не нужен" in text
 
 
+class TestStartupPrewarmListStaysInSyncWithDisk:
+    """_lifespan прогревает список статических страниц на старте, а ошибка
+    поймана и только залогирована (принцип 7) -- сервис не падает, если файла
+    больше нет. Из-за этого переименование/удаление файла проходит МОЛЧА: так
+    и было с social-contract.html, который F2 заменила на audience-landing.html,
+    а имя в списке прогрева осталось старым. Прод не падал, но каждый рестарт
+    писал в лог исключение, а сама audience-landing.html (обслуживает и
+    /social-contract, и /students -- обе новые витрины под рекламу) прогревом
+    вообще не была покрыта."""
+
+    def test_every_prewarmed_name_exists_on_disk(self):
+        import app.main as m
+        missing = [name for name in m.PREWARM_STATIC_PAGES
+                  if not (main_module.BASE_DIR.parent / "static" / name).exists()]
+        assert not missing, missing
+
+
 class TestNumbersExplainThemselves:
     """B3: числа показывались без объяснения, а на витринах стояли ДРУГИЕ
     числа, чем считал движок. Человек с 3% читал на главной «идея живая», а
@@ -3542,7 +3760,7 @@ class TestNumbersExplainThemselves:
         assert _pct(SIGNAL_RATE) in signal["detail"]
         dead = compute_verdict(50, 1, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
         assert _pct(DEAD_RATE) in dead["detail"]
-        gray = compute_verdict(50, 3, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
+        gray = compute_verdict(100, 3, CLICK_TARGET, SIGNAL_RATE, DEAD_RATE)
         assert _pct(DEAD_RATE) in gray["detail"] and _pct(SIGNAL_RATE) in gray["detail"]
 
     def test_verdict_has_no_forbidden_words_or_owner_language(self):
@@ -4047,7 +4265,7 @@ class TestPublicReportExample:
     «без этого доверия не будет»: человек платит 990–2990 ₽, не видя ни
     строчки того, что получит."""
 
-    def _check(self):
+    def _check(self, purpose="business"):
         import app.main as m
         async def fake_check(idea):
             return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
@@ -4059,11 +4277,12 @@ class TestPublicReportExample:
         orig = m.check_demand
         m.check_demand = fake_check
         try:
-            return client.post("/api/demand", json={"idea": "Пошив штор на заказ"}).json()["id"]
+            return client.post("/api/demand", json={"idea": "Пошив штор на заказ",
+                                                    "purpose": purpose}).json()["id"]
         finally:
             m.check_demand = orig
 
-    def _built_report(self, monkeypatch, body="Смета расходов построчно."):
+    def _built_report(self, monkeypatch, body="Смета расходов построчно.", purpose="business"):
         import app.main as m
         async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
                             purpose="business", **kw):
@@ -4074,7 +4293,7 @@ class TestPublicReportExample:
             return {"key": key, "title": "Резюме", "body": body}
         monkeypatch.setattr(m, "generate_core", fake_core)
         monkeypatch.setattr(m, "generate_section", fake_section)
-        rid = self._check()
+        rid = self._check(purpose)
         client.get(f"/report/{pub(rid)}?preview=full", headers=OWNER)   # ядро
         client.post(f"/api/report/{rid}/section?key=summary", headers=OWNER)   # раздел
         return rid
@@ -4109,14 +4328,55 @@ class TestPublicReportExample:
         assert "Смета расходов построчно." in page.text          # текст виден без оплаты
         assert "Это настоящий отчёт, собранный сервисом" in page.text
 
+    def test_example_page_has_no_leaked_template_placeholders(self, monkeypatch):
+        """Найдено живым кастдев-прогоном: `example_page` собирала HTML из
+        того же шаблона `report.html`, что и `/report/{id}`, но забыла два
+        `.replace(...)` из длинной цепочки -- `__DOC_TITLE__`/`__DOC_META__`
+        (заголовок и строка даты для печати, см. `_doc_title_and_meta`).
+        `/report/{id}` их всегда подставляет, а `/example` -- нет, и сырые
+        токены шаблона утекали прямо в `<h1>` самой важной для доверия
+        публичной страницы (см. C1 в PRODUCT_ROADMAP: без примера человек
+        платит 990-2990 ₽, не видя ни строчки того, что получит — а увидел
+        бы буквально `__DOC_TITLE__`)."""
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        page = client.get("/example").text
+        assert "__DOC_TITLE__" not in page
+        assert "__DOC_META__" not in page
+
     def test_showcases_link_the_example_once_it_exists(self, monkeypatch):
+        """Пример собран для фаундера (business) -- ссылка появляется там,
+        где сейчас смотрят тем же взглядом: /r/ на такой же проверке."""
         self._clear_examples()
         rid = self._built_report(monkeypatch)
         client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
         other = self._check()
-        for url in (f"/r/{pub(other)}", "/social-contract"):
-            text = client.get(url).text
-            assert 'href="/example"' in text, url
+        assert 'href="/example"' in client.get(f"/r/{pub(other)}").text
+
+    def test_examples_do_not_leak_across_audiences(self, monkeypatch):
+        """Пример собран под одну оптику (business) -- показывать его как
+        «вот что вы получите» соцконтракту или студенту обещает не ту оптику,
+        что мы реально отдадим по их заявке (принцип 4). Раньше пример был
+        виден на любой витрине, у которой есть слот __EXAMPLE_LINK__."""
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        assert 'href="/example"' not in client.get("/social-contract").text
+        assert 'href="/example"' not in client.get("/students").text
+        soc_check = self._check("social_contract")
+        assert 'href="/example"' not in client.get(f"/r/{pub(soc_check)}").text
+
+    def test_example_link_appears_for_its_own_audience(self, monkeypatch):
+        """Пример, собранный под соцконтракт, виден именно на витрине
+        соцконтракта -- а не фаундера или студента."""
+        self._clear_examples()
+        rid = self._built_report(monkeypatch, purpose="social_contract")
+        client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
+        assert 'href="/example"' in client.get("/social-contract").text
+        assert 'href="/example"' not in client.get("/students").text
+        biz_check = self._check()
+        assert 'href="/example"' not in client.get(f"/r/{pub(biz_check)}").text
 
     def test_only_the_owner_can_publish(self, monkeypatch):
         self._clear_examples()
@@ -4212,8 +4472,15 @@ class TestTierDifferenceAtTheDecisionPoint:
         assert finance_title.lower() in full_part.lower()
 
     def test_summary_follows_the_engine_not_a_copy(self, monkeypatch):
-        """Если в движке появится новая секция, витрина обязана её назвать."""
+        """Если в движке появится новая секция, витрина обязана её назвать.
+
+        Название теперь читается через section_title() (SECTION_SPECS), а не
+        напрямую из ALL_SECTIONS — иначе аудиторный заголовок секции (finance
+        для соцконтракта) не попал бы на витрину. Патчим оба источника."""
         import app.main as m
+        import app.report_engine as re
+        new_spec = {"key": "newthing", "group": "Идея и рынок", "title": "Новая секция"}
+        monkeypatch.setattr(re, "SECTION_SPECS", list(re.SECTION_SPECS) + [new_spec])
         monkeypatch.setattr(m, "ALL_SECTIONS",
                             list(m.ALL_SECTIONS) + [("newthing", "Новая секция")])
         # в полном тарифе секции перечисляются со строчной буквы
@@ -4226,6 +4493,24 @@ class TestTierDifferenceAtTheDecisionPoint:
         assert m.REPORT_PRICES["full"]["label"] in text
         assert f"{m.REPORT_PRICES['full']['price']} ₽" in text
         assert 'id="alt-report"' in text and "__TIER_SUMMARY__" not in text
+
+    def test_tier_breakdown_names_sections_the_way_this_audience_will_see_them(self):
+        """Найдено кастдев-проходом по платному пути 2026-07-29: витрина
+        показывала «Финансовая модель» всем подряд, хотя у соцконтракта
+        та же секция в самом отчёте после оплаты называется «Смета и расчёты
+        для комиссии» (SECTION_SPECS.by_audience). Человек ищет глазами
+        «смету», видит «Финансовую модель» и не узнаёт в ней то, за чем
+        пришёл — витрина и отчёт должны называть секцию одинаково."""
+        import app.main as m
+        from app.report_engine import section_title
+        biz_text = client.get(f"/r/{pub(self._check('business'))}").text.lower()
+        soc_text = client.get(f"/r/{pub(self._check('social_contract'))}").text.lower()
+        biz_title = section_title("finance", "business").lower()
+        soc_title = section_title("finance", "social_contract").lower()
+        assert biz_title != soc_title          # предпосылка теста
+        assert biz_title in biz_text
+        assert soc_title in soc_text
+        assert soc_title not in biz_text
 
     def test_prices_are_still_not_hardcoded_in_static(self):
         """C2 не должна протащить обратно то, что закрыла B5."""
@@ -4538,6 +4823,83 @@ class TestFreeSampleSellsTheReport:
         rid = self._check("social_contract")
         client.get(f"/report/{pub(rid)}")
         assert seen == {"core": "social_contract", "section": "social_contract"}
+
+    def test_sample_regenerates_after_a_switch_then_stays_cached_per_audience(self, monkeypatch):
+        """Образец кэшировался НАВСЕГДА одной записью на проверку — человек,
+        сгенерировавший его под одной оптикой и переключившийся на другую
+        (POST /api/demand/{id}/purpose на /r/), видел на витрине соцконтракта
+        или студента застрявший венчурный образец. Образец существует ровно
+        затем, чтобы убедить купить (принцип 3) -- показывать не ту персону
+        работает против этой же цели."""
+        purposes_seen = []
+        import app.main as m
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            purposes_seen.append(purpose)
+            return {"viability_score": 61, "viability_summary": f"для {purpose}",
+                    "top_risks": [{"title": "т", "body": "б"}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            return {"key": key, "title": "Резюме", "body": f"текст для {purpose}"}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
+
+        rid = self._check("business")
+        assert "для business" in client.get(f"/report/{pub(rid)}").text
+        assert purposes_seen == ["business"]
+
+        client.post(f"/api/demand/{rid}/purpose", json={"purpose": "social_contract"})
+        text = client.get(f"/report/{pub(rid)}").text
+        assert "для social_contract" in text          # новая оптика видна сразу
+        assert "для business" not in text             # старую больше не показываем
+        assert purposes_seen == ["business", "social_contract"]
+
+        # Второй визит под той же (новой) оптикой -- из кэша, не новый вызов.
+        client.get(f"/report/{pub(rid)}")
+        assert purposes_seen == ["business", "social_contract"]
+
+        # Переключение обратно -- бизнес-версия уже была посчитана, повторно
+        # модель не зовём: переключаться туда-обратно не может стоить дороже
+        # одной генерации на каждую из (немногих) аудиторий.
+        client.post(f"/api/demand/{rid}/purpose", json={"purpose": "business"})
+        assert "для business" in client.get(f"/report/{pub(rid)}").text
+        assert purposes_seen == ["business", "social_contract"]
+
+    def test_old_flat_sample_format_degrades_to_a_fresh_one_instead_of_crashing(self, monkeypatch):
+        """До F8 sample_json хранил один плоский объект, а не словарь по
+        аудитории. Записи, посчитанные ДО этой правки, несут именно старый
+        формат — страница не имеет права упасть на разборе чужого прошлого
+        формата (принцип 7), а должна просто пересчитать образец один раз
+        под текущую оптику."""
+        from app.main import DemandCheck, Session, engine
+        purposes_seen = []
+        import app.main as m
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            purposes_seen.append(purpose)
+            return {"viability_score": 61, "viability_summary": "новый образец",
+                    "top_risks": [{"title": "т", "body": "б"}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            return {"key": key, "title": "Резюме", "body": "новый текст"}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
+
+        rid = self._check("business")
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            rec.sample_json = '{"viability_score": 40, "viability_summary": "старый плоский образец", "section": {"key": "summary", "title": "Резюме", "body": "старый текст"}}'
+            s.add(rec); s.commit()
+
+        r = client.get(f"/report/{pub(rid)}")
+        assert r.status_code == 200
+        assert "новый образец" in r.text
+        assert "старый плоский образец" not in r.text
+        assert purposes_seen == ["business"]     # пересчитано ровно один раз
+
+        # Второй визит -- из уже перестроенного кэша, новый вызов не нужен.
+        client.get(f"/report/{pub(rid)}")
+        assert purposes_seen == ["business"]
 
     def test_buyer_does_not_pay_for_a_sample(self, monkeypatch):
         """У покупателя весь разбор открыт — лишний вызов модели ему не нужен."""
@@ -5464,15 +5826,24 @@ class TestTierListIsReadableAtTheDecisionPoint:
     def test_section_without_a_group_still_reaches_the_showcase(self):
         """Раскладка по группам не должна уметь ронять секцию. Молча
         пропасть — это ровно тот разъезд движка и витрины, против которого
-        весь этот блок и написан (принцип 3)."""
+        весь этот блок и написан (принцип 3).
+
+        Название теперь читается через section_title() (SECTION_SPECS), а
+        не напрямую из ALL_SECTIONS — патчим оба источника."""
         import app.main as m
+        import app.report_engine as re_engine
+        new_spec = {"key": "newthing", "group": "Идея и рынок",
+                   "title": "Совершенно новая секция"}
         with_new = list(m.ALL_SECTIONS) + [("newthing", "Совершенно новая секция")]
-        orig = m.ALL_SECTIONS
+        orig_all = m.ALL_SECTIONS
+        orig_specs = re_engine.SECTION_SPECS
         m.ALL_SECTIONS = with_new
+        re_engine.SECTION_SPECS = list(orig_specs) + [new_spec]
         try:
             plain = self._plain(m._tier_summary_html()).lower()
         finally:
-            m.ALL_SECTIONS = orig
+            m.ALL_SECTIONS = orig_all
+            re_engine.SECTION_SPECS = orig_specs
         assert "совершенно новая секция" in plain
 
     def test_count_is_computed_not_written_by_hand(self):

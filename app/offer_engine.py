@@ -20,18 +20,30 @@ import logging
 
 import httpx
 
-from app import llm_adapter
+from app import audiences, llm_adapter
 
 logger = logging.getLogger(__name__)
 
 MAX_IDEA_CHARS = 2000
 MAX_OFFER_TOKENS = 8000
 
-SYSTEM = """Ты — продуктовый стратег Создателя, сервиса проверки стартап-идей.
-Фаундер приносит сырую идею. Твоя работа — заострить её в 3 РАЗНЫХ оффера
+# {who} -- как сам человек говорит о себе (Audience.switch_label): "Проверяю
+# идею для своего дела" / "Готовлю обоснование для соцзащиты" / "Делаю
+# студенческий проект". Раньше здесь везде стояло жёстко "Фаундер приносит
+# сырую идею" -- соцконтракт и студент получали венчурную рамку заострения
+# ровно на том же бесплатном шаге, где остальной сервис уже разводит три
+# аудитории (F1-F3). Проверка спроса и вёрстка объявления не меняются по
+# аудитории -- только то, как модель понимает, для кого пишет.
+#
+# Отдельная строка от остального промпта: тело ниже несёт пример JSON с
+# фигурными скобками, и .format() на всей строке сломался бы об них.
+_SYSTEM_INTRO = """Ты — продуктовый стратег Создателя, сервиса проверки идей.
+Человек — {who} — приносит сырую идею. Твоя работа — заострить её в 3 РАЗНЫХ оффера
 для smoke-теста через Яндекс Директ. Разных — значит с разными акцентами:
 другая грань боли, другая аудитория или другой момент использования.
-Не три пересказа одной фразы.
+Не три пересказа одной фразы."""
+
+_SYSTEM_REST = """
 
 Жёсткие правила:
 1. Оффер обязан отвечать на боль, которую УЖЕ ИЩУТ в поиске. Если идею
@@ -76,10 +88,15 @@ SYSTEM = """Ты — продуктовый стратег Создателя, �
      "demo_right_tag": "...", "demo_right_text": "...",
      "demo_head_right": "...",
      "direct_queries": ["...", "..."],
-     "lead_rate_signal": 0.08, "lead_rate_dead": 0.04, "click_target": 40
+     "lead_rate_signal": 0.04, "lead_rate_dead": 0.02, "click_target": 40
    }, ... ровно 3 оффера ...
  ]
 }"""
+
+
+def _system_prompt(purpose: str) -> str:
+    who = audiences.get(purpose).switch_label or "человек с идеей"
+    return _SYSTEM_INTRO.format(who=who) + _SYSTEM_REST
 
 
 class OfferEngineError(Exception):
@@ -120,20 +137,24 @@ def _validate(data: dict) -> dict:
         o.setdefault("demo_left_meta", "")
         o.setdefault("demo_right_tag", "результат · черновик готов")
         o.setdefault("demo_head_right", "готово за секунды")
-        o.setdefault("lead_rate_signal", 0.08)
-        o.setdefault("lead_rate_dead", 0.04)
+        o.setdefault("lead_rate_signal", 0.04)
+        o.setdefault("lead_rate_dead", 0.02)
         o.setdefault("click_target", 40)
     data.setdefault("sharpened_note", "")
     data.setdefault("warning", "")
     return data
 
 
-async def sharpen_idea(idea: str, *, _post=None, _attempt: int = 1) -> dict:
+async def sharpen_idea(idea: str, *, purpose: str = "business", _post=None, _attempt: int = 1) -> dict:
     """
     Идея → {"sharpened_note", "warning", "offers":[3]}. Бросает
     OfferEngineError с человеческим текстом при любой проблеме.
     _post(provider, payload) -> raw_response_dict — инъекция для тестов,
     прокидывается в llm_adapter.call без изменений.
+
+    purpose определяет, как модель понимает автора идеи (см. _system_prompt) --
+    заострение раньше всегда писалось "за фаундера", даже когда человек пришёл
+    с /social-contract или /students.
     """
     idea = (idea or "").strip()[:MAX_IDEA_CHARS]
     if len(idea) < 20:
@@ -145,7 +166,7 @@ async def sharpen_idea(idea: str, *, _post=None, _attempt: int = 1) -> dict:
         # 8000 токенов ответа могут генерироваться дольше минуты -- таймаут
         # транспорта внутри llm_adapter учитывает это (180s).
         text = await llm_adapter.call(
-            SYSTEM, f"Идея фаундера:\n{idea}", MAX_OFFER_TOKENS, _post=_post,
+            _system_prompt(purpose), f"Идея:\n{idea}", MAX_OFFER_TOKENS, _post=_post,
         )
         text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         return _validate(json.loads(text))
@@ -153,19 +174,19 @@ async def sharpen_idea(idea: str, *, _post=None, _attempt: int = 1) -> dict:
         if exc.tech:
             logger.warning("offer engine: %s (attempt %s)", exc.tech, _attempt)
             if _attempt == 1:
-                return await sharpen_idea(idea, _post=_post, _attempt=2)
+                return await sharpen_idea(idea, purpose=purpose, _post=_post, _attempt=2)
         raise
     except llm_adapter.LLMAdapterError as exc:
         raise OfferEngineError(str(exc))
     except json.JSONDecodeError:
         logger.exception("offer engine: bad JSON (attempt %s)", _attempt)
         if _attempt == 1:
-            return await sharpen_idea(idea, _post=_post, _attempt=2)
+            return await sharpen_idea(idea, purpose=purpose, _post=_post, _attempt=2)
         raise OfferEngineError("ИИ ответил в неожиданном формате. Попробуйте ещё раз.")
     except httpx.TimeoutException:
         logger.warning("offer engine: timeout (attempt %s)", _attempt)
         if _attempt == 1:
-            return await sharpen_idea(idea, _post=_post, _attempt=2)
+            return await sharpen_idea(idea, purpose=purpose, _post=_post, _attempt=2)
         raise OfferEngineError("ИИ думал слишком долго. Подождите минуту и попробуйте ещё раз.")
     except Exception:
         logger.exception("offer engine failed")

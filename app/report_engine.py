@@ -322,7 +322,12 @@ def _core_prompt(tier: str, purpose: str = PURPOSE_BUSINESS) -> str:
     Дальше каждая секция идёт своим запросом."""
     if purpose not in PURPOSES:
         purpose = PURPOSE_BUSINESS
-    return f"""{audiences.get(purpose).persona} Тебе дали идею и РЕАЛЬНЫЕ данные
+    return f"""{audiences.get(purpose).persona}
+
+Твой текст прочитает: {audiences.get(purpose).reader}. Пиши так, чтобы это
+было полезно именно ему, а не абстрактному читателю.
+
+Тебе дали идею и РЕАЛЬНЫЕ данные
 бесплатной проверки спроса: частотность Вордстата, реальные конкуренты из
 выдачи Яндекса, оценка идеи. Используй эти цифры и названия конкурентов
 буквально — не выдумывай другие.
@@ -348,7 +353,12 @@ def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS) -> str
     if purpose not in PURPOSES:
         purpose = PURPOSE_BUSINESS
     spec = _spec(key, purpose)
-    return f"""{audiences.get(purpose).persona} Тебе дали идею и РЕАЛЬНЫЕ данные
+    return f"""{audiences.get(purpose).persona}
+
+Твой текст прочитает: {audiences.get(purpose).reader}. Пиши так, чтобы это
+было полезно именно ему, а не абстрактному читателю.
+
+Тебе дали идею и РЕАЛЬНЫЕ данные
 бесплатной проверки спроса: частотность Вордстата, реальные конкуренты из
 выдачи Яндекса, оценка идеи. Используй эти цифры и названия конкурентов
 буквально — не выдумывай другие.
@@ -411,7 +421,7 @@ async def generate_core(idea: str, demand_data: dict, tier: str = "full",
             return await generate_core(idea, demand_data, tier, chosen_offer, purpose,
                                        _post=_post, _attempt=2)
         raise ReportEngineError("Модель вернула неразборчивый ответ. Попробуйте ещё раз.")
-    except (httpx.HTTPError, httpx.TimeoutException) as e:
+    except (httpx.HTTPError, httpx.TimeoutException, llm_adapter.LLMAdapterError) as e:
         if _attempt == 1:
             return await generate_core(idea, demand_data, tier, chosen_offer, purpose,
                                        _post=_post, _attempt=2)
@@ -456,7 +466,7 @@ async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "
             return await generate_section(key, idea, demand_data, tier, chosen_offer,
                                           purpose, _post=_post, _attempt=2)
         raise ReportEngineError("Модель вернула неразборчивый ответ. Попробуйте ещё раз.")
-    except (httpx.HTTPError, httpx.TimeoutException) as e:
+    except (httpx.HTTPError, httpx.TimeoutException, llm_adapter.LLMAdapterError) as e:
         if _attempt == 1:
             return await generate_section(key, idea, demand_data, tier, chosen_offer,
                                           purpose, _post=_post, _attempt=2)
@@ -465,6 +475,15 @@ async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "
     body = str(data.get("body") or "").strip()
     if not body:
         raise ReportEngineError(_MALFORMED, tech=f"пустой раздел {key}")
+    # Промпт финансового раздела прямо запрещает модели отказаться считать
+    # («недостаточно данных»), но до сих пор это была просьба без проверки:
+    # непустой ответ без единой суммы проходил как валидный. Для аудитории,
+    # где смета — единственное, за чем платят (комиссии соцзащиты она нужна
+    # «до копейки», Audience.estimate_required), непосчитанная смета — это не
+    # раздел похуже, а недоставленная услуга (принцип 3).
+    if (key == "finance" and audiences.get(purpose).estimate_required
+            and "₽" not in body and "руб" not in body.lower()):
+        raise ReportEngineError(_MALFORMED, tech=f"раздел {key}: нет сумм в рублях")
     return {"key": key, "title": section_title(key, purpose), "body": body}
 
 

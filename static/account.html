@@ -179,9 +179,11 @@ function stageBadge(stageIdx, name){
   document.getElementById('known').style.display = 'block';
   document.getElementById('who').textContent = d.contact;
 
-  // Человек с /social-contract пришёл за обоснованием для комиссии -- вести
-  // его за следующей идеей на витрину для фаундеров было бы промахом.
-  const START_URL = d.purpose === 'social_contract' ? '/social-contract' : '/';
+  // Человек пришёл с чужой витрины (соцконтракт, студент) -- вести его за
+  // следующей идеей на витрину для фаундеров было бы промахом. Адрес отдаёт
+  // сервер (реестр аудиторий), а не хардкод здесь: раньше тут был бинарный
+  // выбор из двух витрин, и третья аудитория в него не попадала.
+  const START_URL = d.home || '/';
   document.getElementById('first-cta').href = START_URL;
   document.getElementById('more-cta').href = START_URL;
 

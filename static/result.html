@@ -427,12 +427,20 @@ const sc = DATA.scores || [];
 const hasScores = sc.length > 0;
 if (hasScores) {
   const ov = DATA.overall;
-  if (ov && ov.value !== null) {
+  const hasOverall = !!(ov && ov.value !== null);
+  if (hasOverall) {
     document.getElementById('overall').style.display = '';
     document.getElementById('overall-val').textContent = ov.value + '/10';
     document.getElementById('overall-note').textContent =
       ov.weakest ? 'Слабое место — ' + ov.weakest.toLowerCase() : '';
     document.getElementById('overall-how').textContent = ov.basis || '';
+  } else {
+    // Спрос не измерен (Вордстат недоступен) -- общий балл спрятан
+    // намеренно (A22: иначе он спорил бы с честным вердиктом «данных
+    // нет»), но пустое место под заголовком без объяснения читается как
+    // не дорисованная страница. Говорим словами, чего не хватает.
+    document.getElementById('overall-how').textContent =
+      'Общий балл появится, когда станет известен спрос -- без него сравнивать остальные шкалы не с чем.';
   }
   document.getElementById('scores').innerHTML = sc.map(s => `
     <div class="score-cell">
@@ -444,10 +452,16 @@ if (hasScores) {
     </div>`).join('');
   const scoreToggle = document.getElementById('score-detail-toggle');
   const scoreGrid = document.getElementById('scores');
+  // «Почему ТАКАЯ оценка» предполагает, что оценка уже видна -- без
+  // общего балла (hasOverall=false) вопрос звучит про число, которого
+  // на экране нет вовсе. Подпись кнопки обязана зависеть от того, есть
+  // ли что объяснять, а не быть одной и той же в обоих состояниях.
+  const openLabel = hasOverall ? 'Почему такая оценка? →' : 'Показать оценку по шкалам →';
+  scoreToggle.textContent = openLabel;
   scoreToggle.addEventListener('click', () => {
     const opening = scoreGrid.hidden;
     scoreGrid.hidden = !opening;
-    scoreToggle.textContent = opening ? 'Скрыть разбор ↑' : 'Почему такая оценка? →';
+    scoreToggle.textContent = opening ? 'Скрыть разбор ↑' : openLabel;
   });
 }
 
@@ -705,7 +719,10 @@ sharpenBtn.addEventListener('click', async () => {
   try {
     const r = await fetch('/api/sharpen', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({idea: IDEA})
+      // Без purpose заострение всегда писалось "за фаундера" -- соцконтракт
+      // и студент получали венчурную рамку на этом бесплатном шаге, хотя
+      // остальной сервис давно разводит три аудитории (F1-F3).
+      body: JSON.stringify({idea: IDEA, purpose: PURPOSE})
     });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || 'Не получилось заострить идею. Попробуйте ещё раз.');

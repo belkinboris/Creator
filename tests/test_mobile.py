@@ -186,6 +186,62 @@ with Session(engine) as s:
                       purpose="business", result_json=json.dumps(nodata, ensure_ascii=False))
     s.add(rec); s.commit(); s.refresh(rec)
     out["nodata"] = rec.public_id
+    # A22: Вордстат недоступен (спрос НЕИЗВЕСТЕН -- не пустой scores[], как
+    # у nodata, а конкретно demand=null), но три LLM-шкалы отработали.
+    # Раньше это давало уверенный overall с подписью "по четырём шкалам",
+    # хотя спрос в среднем не участвовал. Здесь -- сценарий уже после фикса:
+    # overall спрятан, а сам шаг "Оценка идеи" не должен выглядеть пустым.
+    demand_unknown = dict(data)
+    demand_unknown["formulations"] = [{"phrase": "пошив штор на заказ", "count": None}]
+    demand_unknown["verdict"] = {"level": "unknown",
+                                 "text": "Данные Яндекса о числе запросов сейчас недоступны."}
+    demand_unknown["competitors"] = {"found": None, "top": []}
+    demand_unknown["scores"] = [
+        {"key": "demand", "label": "Спрос", "value": None, "note": ""},
+        {"key": "competition", "label": "Конкуренция", "value": 7, "note": "ниша не занята"},
+        {"key": "timing", "label": "Своевременность", "value": 8, "note": "момент подходящий"},
+        {"key": "execution", "label": "Реализуемость", "value": 6, "note": "можно запустить одному"}]
+    demand_unknown["overall"] = None
+    rec = DemandCheck(idea="Идея со спросом неизвестным, но с оценкой по трём шкалам",
+                      best_count=None, purpose="business",
+                      result_json=json.dumps(demand_unknown, ensure_ascii=False))
+    s.add(rec); s.commit(); s.refresh(rec)
+    out["demand_unknown"] = rec.public_id
+    # «Скачать PDF» появлялась, как только собирался ПЕРВЫЙ раздел из
+    # QUICK_KEYS (5 штук для "quick", 21 для "full"), а не когда собрались
+    # ВСЕ -- разделы дозаказываются по одному (fillMissing), и человек мог
+    # распечатать документ, где 4 из 5 разделов ещё "Собираем раздел…".
+    # Для соцконтракта это не косметика: лист несут в комиссию НА БУМАГЕ
+    # (C5), и такая распечатка -- недоставленная услуга, а не черновик.
+    quick_partial = dict(data)
+    rec = DemandCheck(idea="Идея с частично собранным быстрым разбором",
+                      best_count=1200, purpose="business",
+                      result_json=json.dumps(quick_partial, ensure_ascii=False))
+    s.add(rec); s.commit(); s.refresh(rec)
+    s.add(ReportPurchase(check_id=rec.id, idea=rec.idea, tier="quick", status="paid",
+                         contact="pdf-partial@example.com", amount=990,
+                         report_json=json.dumps({
+                             "viability_score": 55, "viability_summary": "с",
+                             "top_risks": [{"title": "р", "body": "б"}],
+                             "sections": [{"key": "summary", "title": "Резюме", "body": "Готовый раздел."}]},
+                             ensure_ascii=False)))
+    s.commit()
+    out["pdf_partial"] = rec.public_id
+    rec2 = DemandCheck(idea="Идея с полностью собранным быстрым разбором",
+                       best_count=1200, purpose="business",
+                       result_json=json.dumps(quick_partial, ensure_ascii=False))
+    s.add(rec2); s.commit(); s.refresh(rec2)
+    from app.report_engine import QUICK_KEYS
+    s.add(ReportPurchase(check_id=rec2.id, idea=rec2.idea, tier="quick", status="paid",
+                         contact="pdf-full@example.com", amount=990,
+                         report_json=json.dumps({
+                             "viability_score": 55, "viability_summary": "с",
+                             "top_risks": [{"title": "р", "body": "б"}],
+                             "sections": [{"key": k, "title": k, "body": "Готовый раздел."}
+                                         for k in QUICK_KEYS]},
+                             ensure_ascii=False)))
+    s.commit()
+    out["pdf_full"] = rec2.public_id
     s.commit()
 print(json.dumps(out))
 '''
@@ -630,6 +686,78 @@ def test_unmeasured_demand_stops_selling_in_a_real_browser(site, browser):
         assert not page.locator("#weak-lead").is_visible()
         assert page.evaluate(
             "() => document.getElementById('order').className") == "next"
+    finally:
+        ctx.close()
+
+
+def test_score_step_explains_itself_when_overall_is_hidden(site, browser):
+    """A22 (продолжение живым кастдев-прогоном). Когда Вордстат недоступен,
+    общий балл спрятан намеренно (см. app/demand.py) -- иначе он спорил бы с
+    честным вердиктом «данных нет». Но если спрятать его молча, шаг «Оценка
+    идеи» превращается в голый заголовок с крошечной ссылкой «Почему такая
+    оценка?» -- вопрос про число, которого на экране не видно вовсе. Нашёл
+    это сам кастдев-проходом (фейковые LLM-ответы через живой сервер),
+    удивившись пустому шагу. Смотрим глазами браузера, не подстрокой:
+    разметка шага у всех состояний одна и та же, различает их только скрипт."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['demand_unknown']}")
+    try:
+        # Конкуренты недоступны (Вордстат молчал) -- STEP_ORDER пропускает
+        # этот шаг, и один клик с шага 1 ведёт сразу на «Оценка идеи».
+        # Кликать до конца ленты, как в других тестах, тут нельзя: шаг 3
+        # свернётся, и #score-detail-toggle станет невидим.
+        page.locator(".step-next .btn:visible").first.click()
+        page.wait_for_timeout(400)
+        assert "active" in page.locator("#step-3").get_attribute("class"), \
+            "конкуренты недоступны -- один клик обязан вести сразу на «Оценка идеи»"
+
+        assert not page.locator("#overall").is_visible(), \
+            "общий балл обязан быть скрыт, когда спрос неизвестен (A22)"
+        how = page.inner_text("#overall-how")
+        assert "спрос" in how.lower(), how   # объясняет, ПОЧЕМУ балла нет, а не молчит
+
+        toggle = page.locator("#score-detail-toggle")
+        label = toggle.inner_text()
+        assert "такая оценка" not in label.lower(), \
+            f"вопрос про число, которого не видно: «{label}»"
+        assert "шкал" in label.lower(), label
+
+        toggle.click()
+        page.wait_for_timeout(300)
+        assert page.locator("#scores").is_visible()
+        cells = page.eval_on_selector_all(".score-cell .score-label", "e => e.map(x => x.innerText)")
+        assert "Конкуренция" in cells and "Спрос" in cells
+        _assert_clean(page, "результат, спрос неизвестен но шкалы посчитаны")
+    finally:
+        ctx.close()
+
+
+def test_pdf_button_waits_for_all_sections_not_just_the_first(site, browser):
+    """Найдено живым кастдев-прогоном: собрал реальный отчёт через живой
+    сервер (LLM подменена инъекцией) и увидел кнопку «Скачать PDF» рядом с
+    разбором, где 20 из 21 раздела ещё «Собираем раздел…». Причина —
+    render() в report.html показывал кнопку, как только `done` становился
+    правдой (хотя бы 1 раздел), а не когда `done >= total`. Для соцконтракта
+    это не черновик: лист несут в комиссию НА БУМАГЕ (C5), и распечатка с
+    почти пустыми разделами — недоставленная услуга. Разметку рисует
+    скрипт, подстрокой в шаблоне это не поймать — смотрим глазами браузера
+    на два состояния, собранных руками через сиды (без сети, детерминированно)."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_partial']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        assert not page.locator("#pdf-row").is_visible(), \
+            "готов только 1 раздел из 5 -- кнопку рано показывать"
+        assert page.locator("#build-progress").is_visible()
+        assert "1 из 5" in page.inner_text("#build-progress")
+    finally:
+        ctx.close()
+
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_full']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        assert page.locator("#pdf-row").is_visible(), \
+            "все 5 разделов готовы -- кнопка обязана появиться"
+        assert not page.locator("#build-progress").is_visible()
     finally:
         ctx.close()
 
