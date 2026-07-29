@@ -207,6 +207,41 @@ with Session(engine) as s:
                       result_json=json.dumps(demand_unknown, ensure_ascii=False))
     s.add(rec); s.commit(); s.refresh(rec)
     out["demand_unknown"] = rec.public_id
+    # «Скачать PDF» появлялась, как только собирался ПЕРВЫЙ раздел из
+    # QUICK_KEYS (5 штук для "quick", 21 для "full"), а не когда собрались
+    # ВСЕ -- разделы дозаказываются по одному (fillMissing), и человек мог
+    # распечатать документ, где 4 из 5 разделов ещё "Собираем раздел…".
+    # Для соцконтракта это не косметика: лист несут в комиссию НА БУМАГЕ
+    # (C5), и такая распечатка -- недоставленная услуга, а не черновик.
+    quick_partial = dict(data)
+    rec = DemandCheck(idea="Идея с частично собранным быстрым разбором",
+                      best_count=1200, purpose="business",
+                      result_json=json.dumps(quick_partial, ensure_ascii=False))
+    s.add(rec); s.commit(); s.refresh(rec)
+    s.add(ReportPurchase(check_id=rec.id, idea=rec.idea, tier="quick", status="paid",
+                         contact="pdf-partial@example.com", amount=990,
+                         report_json=json.dumps({
+                             "viability_score": 55, "viability_summary": "с",
+                             "top_risks": [{"title": "р", "body": "б"}],
+                             "sections": [{"key": "summary", "title": "Резюме", "body": "Готовый раздел."}]},
+                             ensure_ascii=False)))
+    s.commit()
+    out["pdf_partial"] = rec.public_id
+    rec2 = DemandCheck(idea="Идея с полностью собранным быстрым разбором",
+                       best_count=1200, purpose="business",
+                       result_json=json.dumps(quick_partial, ensure_ascii=False))
+    s.add(rec2); s.commit(); s.refresh(rec2)
+    from app.report_engine import QUICK_KEYS
+    s.add(ReportPurchase(check_id=rec2.id, idea=rec2.idea, tier="quick", status="paid",
+                         contact="pdf-full@example.com", amount=990,
+                         report_json=json.dumps({
+                             "viability_score": 55, "viability_summary": "с",
+                             "top_risks": [{"title": "р", "body": "б"}],
+                             "sections": [{"key": k, "title": k, "body": "Готовый раздел."}
+                                         for k in QUICK_KEYS]},
+                             ensure_ascii=False)))
+    s.commit()
+    out["pdf_full"] = rec2.public_id
     s.commit()
 print(json.dumps(out))
 '''
@@ -692,6 +727,37 @@ def test_score_step_explains_itself_when_overall_is_hidden(site, browser):
         cells = page.eval_on_selector_all(".score-cell .score-label", "e => e.map(x => x.innerText)")
         assert "Конкуренция" in cells and "Спрос" in cells
         _assert_clean(page, "результат, спрос неизвестен но шкалы посчитаны")
+    finally:
+        ctx.close()
+
+
+def test_pdf_button_waits_for_all_sections_not_just_the_first(site, browser):
+    """Найдено живым кастдев-прогоном: собрал реальный отчёт через живой
+    сервер (LLM подменена инъекцией) и увидел кнопку «Скачать PDF» рядом с
+    разбором, где 20 из 21 раздела ещё «Собираем раздел…». Причина —
+    render() в report.html показывал кнопку, как только `done` становился
+    правдой (хотя бы 1 раздел), а не когда `done >= total`. Для соцконтракта
+    это не черновик: лист несут в комиссию НА БУМАГЕ (C5), и распечатка с
+    почти пустыми разделами — недоставленная услуга. Разметку рисует
+    скрипт, подстрокой в шаблоне это не поймать — смотрим глазами браузера
+    на два состояния, собранных руками через сиды (без сети, детерминированно)."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_partial']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        assert not page.locator("#pdf-row").is_visible(), \
+            "готов только 1 раздел из 5 -- кнопку рано показывать"
+        assert page.locator("#build-progress").is_visible()
+        assert "1 из 5" in page.inner_text("#build-progress")
+    finally:
+        ctx.close()
+
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_full']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        assert page.locator("#pdf-row").is_visible(), \
+            "все 5 разделов готовы -- кнопка обязана появиться"
+        assert not page.locator("#build-progress").is_visible()
     finally:
         ctx.close()
 

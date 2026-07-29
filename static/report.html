@@ -380,10 +380,15 @@ function render(){
   nav.innerHTML = navHtml;
 
   const done = SECTIONS.filter(s => gotMap[s.key]).length;
-  if (done) document.getElementById('pdf-row').style.display = 'block';
+  const total = TIER_KEYS.length;
+  // Разделы дозаказываются по одному (fillMissing) -- показывать «Скачать
+  // PDF», как только готов ПЕРВЫЙ, значит приглашать распечатать документ,
+  // где почти всё ещё «Собираем раздел…». Для соцконтракта это не
+  // черновик, а лист, который несут в комиссию на бумаге (C5) -- кнопка
+  // ждёт, пока готовы ВСЕ разделы тарифа.
+  if (total && done >= total) document.getElementById('pdf-row').style.display = 'block';
   const bar = document.getElementById('build-progress');
   if (bar) {
-    const total = TIER_KEYS.length;
     if (!total || done >= total) { bar.style.display = 'none'; }
     else {
       bar.style.display = 'block';
