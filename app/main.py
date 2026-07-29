@@ -2238,6 +2238,20 @@ def delete_project(idea_id: str, request: Request):
             raise HTTPException(404, "идея не найдена")
         for ev in s.exec(select(SmokeEvent).where(SmokeEvent.idea == idea_id)).all():
             s.delete(ev)
+        # Заявка на живой тест, из которой запущен этот проект, иначе
+        # осталась бы с оборванной ссылкой: /api/orders берёт project_url
+        # прямо из idea_id заявки, не проверяя, жив ли ещё сам проект --
+        # /desk продолжал бы звать «Проект уже запущен → открыть» на
+        # страницу, которая уже отдаёт голый `{"detail": "проект не
+        # найден"}` (тот же класс дефекта, что и A19: техническое сообщение
+        # движка доезжает до человека). Хуже того: в /account эта же заявка
+        # с непустым idea_id вообще перестала бы показываться -- ни
+        # карточкой проекта (SmokeProject уже нет), ни обычной заявкой
+        # (cabinet-запрос отбирает только заявки с idea_id IS NULL) --
+        # человек, оплативший тест, увидел бы, что его заказ просто исчез.
+        for order in s.exec(select(LiveTestOrder).where(LiveTestOrder.idea_id == idea_id)).all():
+            order.idea_id = None
+            s.add(order)
         s.delete(proj)
         s.commit()
     return {"ok": True, "deleted": idea_id}

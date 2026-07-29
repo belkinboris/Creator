@@ -541,6 +541,38 @@ class TestOwnerKey:
     def test_delete_requires_key(self):
         assert client.delete("/api/projects/whatever").status_code == 401
 
+    def test_delete_project_unlinks_its_live_test_order(self):
+        """Найдено живым кастдев-прогоном: удаление проекта не трогало
+        LiveTestOrder.idea_id, из которой этот проект был запущен.
+        `/api/orders` (владелец, /desk) строит `project_url` прямо из
+        `idea_id` заказа, не проверяя, жив ли ещё сам проект -- «Проект уже
+        запущен → открыть» продолжал звать на страницу, которая после
+        удаления отдаёт голый `{"detail": "проект не найден"}` (класс A19).
+        А в /account эта же заявка вообще пропадала бы из вида: не карточка
+        проекта (SmokeProject уже нет) и не обычная заявка (`/api/account/me`
+        отбирает только заказы с idea_id IS NULL) -- оплативший тест человек
+        решил бы, что заказ потерялся."""
+        from app.main import LiveTestOrder, Session, engine
+        client.post("/api/launch", headers=OWNER,
+                    json={"idea_text": "т", "offer": dict(VALID_OFFER, idea_id="unlink_v1")})
+        with Session(engine) as s:
+            order = LiveTestOrder(idea="живой тест для проверки отвязки", contact="unlink@example.com",
+                                  status="paid", amount=1490, idea_id="unlink_v1")
+            s.add(order); s.commit(); s.refresh(order)
+            order_id = order.id
+
+        before = client.get("/api/orders", headers=OWNER).json()["orders"]
+        before_row = next(o for o in before if o["id"] == order_id)
+        assert before_row["project_url"] == "/p/unlink_v1"
+
+        r = client.delete("/api/projects/unlink_v1", headers=OWNER)
+        assert r.status_code == 200
+
+        after = client.get("/api/orders", headers=OWNER).json()["orders"]
+        after_row = next(o for o in after if o["id"] == order_id)
+        assert after_row["project_url"] is None, after_row
+        assert after_row["idea_id"] is None, after_row
+
 
 class TestTimeoutRetry:
     def test_timeout_retried_then_ok(self):
