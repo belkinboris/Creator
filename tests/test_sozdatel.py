@@ -318,6 +318,18 @@ class TestReportEngine:
         assert _section_prompt("summary", "full", "чепуха") == \
                _section_prompt("summary", "full", PURPOSE_BUSINESS)
 
+    def test_reader_reaches_both_core_and_section_prompts(self):
+        """`Audience.reader` описывал, кто на самом деле читает разбор
+        («комиссия соцзащиты», «преподаватель или жюри»), но само поле нигде
+        не читалось -- модель ничего не знала о конкретном читателе, кроме
+        того, что можно было косвенно вывести из persona."""
+        from app.report_engine import _core_prompt, _section_prompt, PURPOSES
+        from app import audiences
+        for purpose in PURPOSES:
+            reader = audiences.get(purpose).reader
+            assert reader in _core_prompt("full", purpose)
+            assert reader in _section_prompt("summary", "full", purpose)
+
     def test_purpose_reaches_the_model_prompt(self):
         from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
         cap = {}

@@ -322,7 +322,12 @@ def _core_prompt(tier: str, purpose: str = PURPOSE_BUSINESS) -> str:
     Дальше каждая секция идёт своим запросом."""
     if purpose not in PURPOSES:
         purpose = PURPOSE_BUSINESS
-    return f"""{audiences.get(purpose).persona} Тебе дали идею и РЕАЛЬНЫЕ данные
+    return f"""{audiences.get(purpose).persona}
+
+Твой текст прочитает: {audiences.get(purpose).reader}. Пиши так, чтобы это
+было полезно именно ему, а не абстрактному читателю.
+
+Тебе дали идею и РЕАЛЬНЫЕ данные
 бесплатной проверки спроса: частотность Вордстата, реальные конкуренты из
 выдачи Яндекса, оценка идеи. Используй эти цифры и названия конкурентов
 буквально — не выдумывай другие.
@@ -348,7 +353,12 @@ def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS) -> str
     if purpose not in PURPOSES:
         purpose = PURPOSE_BUSINESS
     spec = _spec(key, purpose)
-    return f"""{audiences.get(purpose).persona} Тебе дали идею и РЕАЛЬНЫЕ данные
+    return f"""{audiences.get(purpose).persona}
+
+Твой текст прочитает: {audiences.get(purpose).reader}. Пиши так, чтобы это
+было полезно именно ему, а не абстрактному читателю.
+
+Тебе дали идею и РЕАЛЬНЫЕ данные
 бесплатной проверки спроса: частотность Вордстата, реальные конкуренты из
 выдачи Яндекса, оценка идеи. Используй эти цифры и названия конкурентов
 буквально — не выдумывай другие.
