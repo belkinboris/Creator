@@ -823,6 +823,50 @@ class TestPresets:
         assert "★" not in page.replace("★☆☆☆☆", "") or "★☆☆☆☆" not in page  # без звёзд отзывов
 
 
+class TestStartupMigrationOnAStaleSqliteFile:
+    """Реальный баг, найденный в живом прогоне (не в тестах — они всегда
+    берут свежую `sqlite://` в памяти, где ALTER вообще не нужен): миграция
+    при старте использовала `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` —
+    это диалект Postgres, SQLite падает на нём "syntax error" (проверено
+    напрямую sqlite3 3.45, дело не в старой версии движка). На БД, которая
+    пережила хотя бы одно добавление колонки в прошлом запуске (а dev держит
+    файл `sozdatel.db` между запусками ровно за этим), первый же ALTER падал,
+    единственный `except: pass` глушил ВСЮ оставшуюся миграцию разом, и
+    следующее же обращение к новой колонке ронялось 500-й."""
+
+    def test_missing_column_gets_added_without_crashing(self, tmp_path):
+        import sqlite3
+        import subprocess
+        import sys
+        import textwrap
+
+        db_path = tmp_path / "stale.db"
+        con = sqlite3.connect(str(db_path))
+        con.execute("CREATE TABLE demandcheck (id INTEGER PRIMARY KEY, idea VARCHAR)")
+        con.commit()
+        con.close()
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = textwrap.dedent(f"""
+            import os
+            os.environ["DATABASE_URL"] = "sqlite:///{db_path}"
+            os.environ.setdefault("YANDEX_FOLDER_ID", "test-folder")
+            os.environ.setdefault("YANDEX_API_KEY", "test-yandex-key")
+            import app.main  # выполняет миграцию на импорте
+        """)
+        result = subprocess.run([sys.executable, "-c", script], cwd=repo_root,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+
+        con = sqlite3.connect(str(db_path))
+        cols = {row[1] for row in con.execute("PRAGMA table_info(demandcheck)")}
+        con.close()
+        assert "public_id" in cols
+        # Колонки, добавленные ДО той, что уронила бы блок на старом коде --
+        # регрессия того же класса: единственный сбой глушил и их тоже.
+        assert "purpose" in cols and "sample_json" in cols
+
+
 class TestHealthVersion:
     def test_health_reports_real_version(self):
         r = client.get("/health").json()

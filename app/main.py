@@ -298,30 +298,59 @@ class SmokeEvent(SQLModel, table=True):
 
 
 SQLModel.metadata.create_all(engine)
-try:  # create_all не добавляет колонки в существующие таблицы -- добиваем вручную
-    from sqlalchemy import text as _sqltext
+# create_all не добавляет колонки в существующие таблицы -- добиваем вручную.
+# `ADD COLUMN IF NOT EXISTS` -- диалект Postgres; SQLite (dev) на него падает
+# синтаксической ошибкой (проверено: sqlite3 3.45 не понимает эту форму даже
+# в новой версии -- это не вопрос возраста движка). На свежей sqlite-БД это
+# было незаметно: create_all создаёт таблицу сразу со всеми колонками, ALTER
+# просто не нужен. Но на БД, пережившей хотя бы одно добавление колонки в
+# прошлой сессии (ровно то, для чего dev вообще держит файл `sozdatel.db`
+# между запусками, а не только `sqlite://` в памяти, как в тестах) -- первый
+# же ALTER падал с "syntax error", единственный `except: pass` глотал ВСЮ
+# оставшуюся часть списка разом, и следующее же обращение к новой колонке
+# роняло страницу 500-й (принцип 7 требует ровно обратного). Проверяем
+# наличие колонки через инспектор БД (работает одинаково для sqlite и
+# Postgres) и добавляем только то, чего действительно не хватает -- по
+# одной колонке за раз, чтобы сбой одной не глушил остальные.
+_MIGRATIONS = [
+    ("demandcheck", "result_json", "VARCHAR DEFAULT ''"),
+    ("livetestorder", "chosen_offer", "VARCHAR DEFAULT ''"),
+    ("smokeproject", "contact", "VARCHAR DEFAULT ''"),
+    ("livetestorder", "idea_id", "VARCHAR"),
+    ("demandcheck", "contact", "VARCHAR DEFAULT ''"),
+    ("demandcheck", "purpose", "VARCHAR DEFAULT 'business'"),
+    ("reportpurchase", "gen_error", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "fail_notified", "BOOLEAN DEFAULT FALSE"),
+    ("reportpurchase", "paid_notified", "BOOLEAN DEFAULT FALSE"),
+    ("livetestorder", "paid_notified", "BOOLEAN DEFAULT FALSE"),
+    ("demandcheck", "chosen_offer", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "is_example", "BOOLEAN DEFAULT FALSE"),
+    ("demandcheck", "sample_json", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "access_token", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "buyer_notified", "BOOLEAN DEFAULT FALSE"),
+    ("demandcheck", "public_id", "VARCHAR DEFAULT ''"),
+    ("livetestorder", "buyer_notified", "BOOLEAN DEFAULT FALSE"),
+    ("smokeproject", "template_hash", "VARCHAR DEFAULT ''"),
+]
+try:
+    from sqlalchemy import inspect as _sa_inspect, text as _sqltext
+    _inspector = _sa_inspect(engine)
+    _existing_cols = {
+        _table: {c["name"] for c in _inspector.get_columns(_table)}
+        for _table in {m[0] for m in _MIGRATIONS}
+    }
     with engine.connect() as _c:
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS result_json VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS idea_id VARCHAR"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS contact VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS purpose VARCHAR DEFAULT 'business'"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS gen_error VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS fail_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS paid_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS chosen_offer VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS is_example BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS sample_json VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS access_token VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE reportpurchase ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE demandcheck ADD COLUMN IF NOT EXISTS public_id VARCHAR DEFAULT ''"))
-        _c.execute(_sqltext("ALTER TABLE livetestorder ADD COLUMN IF NOT EXISTS buyer_notified BOOLEAN DEFAULT FALSE"))
-        _c.execute(_sqltext("ALTER TABLE smokeproject ADD COLUMN IF NOT EXISTS template_hash VARCHAR DEFAULT ''"))
-        _c.commit()
-except Exception:  # sqlite в тестах создаёт таблицу сразу с колонкой -- это норма
-    pass
+        for _table, _col, _ddl in _MIGRATIONS:
+            if _col in _existing_cols.get(_table, set()):
+                continue
+            try:
+                _c.execute(_sqltext(f"ALTER TABLE {_table} ADD COLUMN {_col} {_ddl}"))
+                _c.commit()
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "миграция не прошла: %s.%s", _table, _col, exc_info=True)
+except Exception:
+    logging.getLogger(__name__).warning("проверка колонок при старте не удалась", exc_info=True)
 
 try:  # Проверки, сделанные до появления неугадываемого адреса, иначе
     # остались бы доступны по порядковому номеру (E6). Досыпаем по строке.
