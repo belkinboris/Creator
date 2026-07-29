@@ -1382,6 +1382,30 @@ class TestOverallAndStats:
         assert out["overall"]["value"] == 1
         assert out["overall"]["weakest"] == "Спрос"
 
+    def test_overall_hidden_when_demand_unknown_not_just_low(self):
+        """Найдено живым прогоном (кастдев-проход, dev без ключей Вордстата,
+        LLM-ответы подменены инъекцией): Вордстат недоступен (demand_value
+        is None -- НЕ то же самое, что "спрос есть и он маленький", тогда
+        было бы demand_value=1), но три LLM-шкалы отработали. Раньше это
+        молча усредняло три оставшиеся шкалы и подписывало результат «среднее
+        по ЧЕТЫРЁМ шкалам», хотя спрос в среднем не участвовал вообще -- рядом
+        с вердиктом "unknown" ("данных нет") эта уверенная семёрка внушала
+        обратное. Спрос -- ворота (см. test_overall_capped_by_weak_demand);
+        если неизвестно, что за воротами, показывать число нельзя."""
+        score_json = json.dumps({"competition": 7, "timing": 8, "execution": 6,
+            "notes": {"competition": "", "timing": "", "execution": ""}}, ensure_ascii=False)
+        async def post(provider, payload):
+            if provider == "yandex":
+                if "шкалам" in payload["instructions"]:
+                    return _yandex_response(score_json)
+                return _yandex_response(json.dumps(["a b", "c d", "e f"]))
+            if provider == "wordstat":
+                raise RuntimeError("Вордстат недоступен")
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Идея с недоступным Вордстатом, но рабочими LLM-шкалами", _post=post))
+        assert out["scores"][0]["value"] is None          # спрос действительно неизвестен
+        assert out["overall"] is None
+
     def test_demand_check_persisted_and_stats(self):
         import app.main as m
         async def fake_check(idea):
