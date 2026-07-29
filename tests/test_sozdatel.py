@@ -4701,6 +4701,42 @@ class TestFreeSampleSellsTheReport:
         assert "для business" in client.get(f"/report/{pub(rid)}").text
         assert purposes_seen == ["business", "social_contract"]
 
+    def test_old_flat_sample_format_degrades_to_a_fresh_one_instead_of_crashing(self, monkeypatch):
+        """До F8 sample_json хранил один плоский объект, а не словарь по
+        аудитории. Записи, посчитанные ДО этой правки, несут именно старый
+        формат — страница не имеет права упасть на разборе чужого прошлого
+        формата (принцип 7), а должна просто пересчитать образец один раз
+        под текущую оптику."""
+        from app.main import DemandCheck, Session, engine
+        purposes_seen = []
+        import app.main as m
+        async def fake_core(idea, demand_data, tier="full", chosen_offer=None,
+                            purpose="business", **kw):
+            purposes_seen.append(purpose)
+            return {"viability_score": 61, "viability_summary": "новый образец",
+                    "top_risks": [{"title": "т", "body": "б"}]}
+        async def fake_section(key, idea, demand_data, tier="full", chosen_offer=None,
+                               purpose="business", **kw):
+            return {"key": key, "title": "Резюме", "body": "новый текст"}
+        monkeypatch.setattr(m, "generate_core", fake_core)
+        monkeypatch.setattr(m, "generate_section", fake_section)
+
+        rid = self._check("business")
+        with Session(engine) as s:
+            rec = s.get(DemandCheck, rid)
+            rec.sample_json = '{"viability_score": 40, "viability_summary": "старый плоский образец", "section": {"key": "summary", "title": "Резюме", "body": "старый текст"}}'
+            s.add(rec); s.commit()
+
+        r = client.get(f"/report/{pub(rid)}")
+        assert r.status_code == 200
+        assert "новый образец" in r.text
+        assert "старый плоский образец" not in r.text
+        assert purposes_seen == ["business"]     # пересчитано ровно один раз
+
+        # Второй визит -- из уже перестроенного кэша, новый вызов не нужен.
+        client.get(f"/report/{pub(rid)}")
+        assert purposes_seen == ["business"]
+
     def test_buyer_does_not_pay_for_a_sample(self, monkeypatch):
         """У покупателя весь разбор открыт — лишний вызов модели ему не нужен."""
         from app.main import ReportPurchase, Session, engine, select
