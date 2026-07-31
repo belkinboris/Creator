@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import statistics
 
 import httpx
 
@@ -430,6 +431,20 @@ async def generate_core(idea: str, demand_data: dict, tier: str = "full",
     score = data.get("viability_score")
     if not isinstance(score, (int, float)) or not (1 <= score <= 100):
         raise ReportEngineError(_MALFORMED, tech="нет корректного viability_score")
+    # A16 (PRODUCT_ROADMAP): без этого viability_score — независимая оценка
+    # модели, которая ничего не знает про потолок "спрос это ворота" из
+    # check_demand -- на экране рядом оказывались два несогласованных числа
+    # по одной идее (напр. "4/10" и "65/100"), без единого слова, почему они
+    # расходятся. Владелец решил: не жёсткий min-потолок (для соцконтракта
+    # устойчивое локальное дело без роста законно получает высокий балл — тот
+    # же A16), а медиана модельной оценки и всех 4 шкал бесплатной проверки
+    # (спрос, конкуренция, своевременность, реализуемость, приведённых к
+    # шкале 0-100) -- сглаживает расхождение, но не даёт независимой оценке
+    # оторваться от того, что реально измерено.
+    component_values = [s.get("value") for s in (demand_data.get("scores") or [])
+                        if isinstance(s.get("value"), (int, float))]
+    if component_values:
+        score = round(statistics.median([v * 10 for v in component_values] + [score]))
     summary = str(data.get("viability_summary") or "").strip()
     if not summary:
         raise ReportEngineError(_MALFORMED, tech="нет viability_summary")

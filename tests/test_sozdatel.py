@@ -167,8 +167,17 @@ DEMAND_DATA_FIXTURE = {
     "formulations": [{"phrase": "ответы на отзывы вайлдберриз", "count": 5200}],
     "verdict": {"level": "strong", "text": "Спрос есть"},
     "competitors": {"found": 15000, "top": [{"title": "Т", "domain": "t.ru"}]},
-    "scores": [{"key": "demand", "label": "Спрос", "value": 8, "note": ""}],
-    "overall": {"value": 8, "weakest": "Спрос"},
+    # Подобраны так, чтобы медиана A16 (см. generate_core) на модельных 62
+    # давала ровно 62 -- пул [40,50,62,70,80], без этого пришлось бы
+    # переписывать assert на "62" во всех остальных тестах этого класса,
+    # которым сама оценка не важна.
+    "scores": [
+        {"key": "demand", "label": "Спрос", "value": 8, "note": ""},
+        {"key": "competition", "label": "Конкуренция", "value": 7, "note": ""},
+        {"key": "timing", "label": "Своевременность", "value": 5, "note": ""},
+        {"key": "execution", "label": "Реализуемость", "value": 4, "note": ""},
+    ],
+    "overall": {"value": 6, "weakest": "Реализуемость"},
 }
 
 
@@ -249,6 +258,32 @@ class TestReportEngine:
         assert len(ALL_SECTIONS) >= 20
         assert len(out["sections"]) == len(ALL_SECTIONS)
         assert len(out["top_risks"]) == 4
+
+    def test_viability_score_is_reconciled_with_free_check_scores(self):
+        """A16 (PRODUCT_ROADMAP): бесплатная проверка и платный отчёт не
+        должны спорить о том, насколько идея хороша, каждый своим числом.
+        Модель судит независимо (тут — 95, идея почти идеальна), но 4 шкалы
+        бесплатной проверки говорят другое (спрос/конкуренция/своевременность/
+        реализуемость по 8-10 из фикстуры "62"-варианта заменены на низкие
+        значения) -- итог должен сесть на медиану, а не остаться сырым
+        мнением модели и не рухнуть до жёсткого минимума."""
+        from app.report_engine import generate_core
+        demand_data = dict(DEMAND_DATA_FIXTURE, scores=[
+            {"key": "demand", "label": "Спрос", "value": 2, "note": ""},
+            {"key": "competition", "label": "Конкуренция", "value": 3, "note": ""},
+            {"key": "timing", "label": "Своевременность", "value": 2, "note": ""},
+            {"key": "execution", "label": "Реализуемость", "value": 3, "note": ""},
+        ])
+
+        async def fake_post(provider, payload):
+            body = {"viability_score": 95, "viability_summary": "с", "top_risks": [
+                {"title": f"Риск {i}", "body": "б"} for i in range(2)]}
+            return _yandex_response(json.dumps(body, ensure_ascii=False))
+
+        out = asyncio.run(generate_core(self.IDEA, demand_data, "quick", _post=fake_post))
+        # Пул на 0-100: [20, 30, 20, 30, 95] -> медиана 30. Не 95 (модель не
+        # оторвана от измеренного) и не 20 (не жёсткий минимум-потолок).
+        assert out["viability_score"] == 30, out["viability_score"]
 
     def test_sections_are_grouped(self):
         """Плоский список из 20 разделов невозможно читать — нужны группы."""
@@ -7645,6 +7680,29 @@ class TestStudentAudience:
         nums = [set(re.findall(r"(\d{3,4}) ₽", client.get(p).text))
                 for p in ("/social-contract", "/students")]
         assert nums[0] == nums[1], nums
+
+    def test_audience_pages_are_tinted_but_share_the_one_accent(self):
+        """Пункт 12 (Борис): вкладки аудиторий должны различаться, но
+        `CLAUDE.md` запрещает больше одного акцентного цвета -- решение
+        владельца: единственный акцент (жёлтый маркер) остаётся, различается
+        только тон рамки/фона карточек в пределах бумажной палитры. CSS живёт
+        в общем шаблоне (обе вкладки получают оба правила) -- меняется только
+        `data-audience` на `<body>`, от него и зависит, какое правило сработает."""
+        import re
+        social_text = client.get("/social-contract").text
+        student_text = client.get("/students").text
+        for text in (social_text, student_text):
+            assert "__AUDIENCE_KEY__" not in text
+            assert "#FFDE59" in text          # маркер остаётся везде
+        assert 'data-audience="social_contract"' in social_text
+        assert 'data-audience="student"' in student_text
+
+        def rule(text, audience):
+            m = re.search(r'\[data-audience="%s"\]\{([^}]+)\}' % audience, text)
+            assert m, f"нет правила для {audience}"
+            return m.group(1)
+        social_rule, student_rule = rule(social_text, "social_contract"), rule(student_text, "student")
+        assert social_rule != student_rule
 
     def test_weak_demand_answer_differs_by_audience(self):
         from app.audiences import get

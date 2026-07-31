@@ -17,6 +17,11 @@
     --btn:#1B1C20; --btn-hover:#000000; --marker:#FFDE59;
     --ok:#2E7D4F; --pad:22px;
   }
+  /* Различие витрин по аудитории (Борис, пункт 12): единственный акцент
+     остаётся жёлтым маркером везде -- различается только тон рамки и фона
+     карточек, в пределах той же бумажной палитры, не новый цвет. */
+  body[data-audience="social_contract"]{--line:#DDE1E6; --box:#F9FAFB}
+  body[data-audience="student"]{--line:#EAD9C7; --box:#FFFBF3}
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:var(--bg);color:var(--ink);
     font:400 16px/1.55 "IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
@@ -98,7 +103,7 @@
   }
 </style>
 </head>
-<body>
+<body data-audience="__AUDIENCE_KEY__">
 
 <header>
   <div class="wrap nav">
