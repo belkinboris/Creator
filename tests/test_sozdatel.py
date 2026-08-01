@@ -5187,6 +5187,43 @@ class TestFunnelMiddleIsMeasured:
             assert re.fullmatch(r"[a-z][a-z0-9_]*", name), name
             assert title and title[0].isupper(), name
 
+    def test_paid_goals_carry_order_value_for_direct_bidding(self):
+        """Перед Директом (D3, владелец 2026-08-01): автостратегии Директа
+        оптимизируются по деньгам, а не по факту клика на «reachGoal» -- без
+        `order_price` цель для них равнозначна пустой галочке. Проверяем
+        именно на подтверждённых оплатах (не на "заказал"/"начал" — там ещё
+        нет гарантии, что деньги реально пришли)."""
+        pages = self._all_static()
+
+        def stmt_for(text, goal):
+            i = text.index(f"'{goal}'")
+            start = text.rfind("sozGoal(", 0, i)
+            return text[start:text.find(";", i) + 1]
+
+        for goal in ("report_paid_quick", "report_paid_full"):
+            stmt = stmt_for(pages["report.html"], goal)
+            assert "order_price" in stmt and "currency" in stmt, f"{goal}: нет суммы для Директа"
+        stmt = stmt_for(pages["result.html"], "live_test_paid")
+        assert "order_price" in stmt and "currency" in stmt, "live_test_paid: нет суммы для Директа"
+
+    def test_live_test_payment_confirmation_is_a_separate_goal_from_order_started(self):
+        """До этой правки после оплаты живого теста Метрика не получала НИ
+        ОДНОЙ цели о подтверждённой оплате — только "live_test_ordered" на
+        старте заказа (который мог и не завершиться оплатой). Для отчёта по
+        деньгам и для value-based bidding в Директе это была дыра."""
+        text = self._all_static()["result.html"]
+        assert "sozGoal('live_test_paid'" in text
+        assert "'live_test_ordered'" in text
+        assert "live_test_paid" != "live_test_ordered"
+
+    def test_live_test_paid_goal_is_deduped(self):
+        """Тот же паттерн, что у report_paid_* -- повторный визит по старой
+        ссылке ?paid=1 не должен задваивать конверсию в Метрике."""
+        text = self._all_static()["result.html"]
+        i = text.index("live_test_paid")
+        around = text[max(0, i - 400):i]
+        assert "localStorage" in around, "нет дедупа через localStorage"
+
 
 class TestOwnerFunnel:
     """D2 + серверная половина D3: у владельца не было вида на воронку —

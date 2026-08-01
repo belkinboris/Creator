@@ -2944,6 +2944,7 @@ METRIKA_GOALS = [
     ("example_viewed", "Посмотрел пример отчёта"),
     ("report_order_started", "Нажал «Получить отчёт»"),
     ("live_test_ordered", "Заказал тест на реальных людях"),
+    ("live_test_paid", "Оплатил тест на реальных людях"),
     ("report_paid_quick", "Оплатил быстрый разбор"),
     ("report_paid_full", "Оплатил бизнес-план"),
 ]

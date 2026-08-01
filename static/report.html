@@ -516,7 +516,7 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
     if (!localStorage.getItem(goalKey)) {
       if (window.sozGoal) window.sozGoal(
         UNLOCKED_TIER === 'full' ? 'report_paid_full' : 'report_paid_quick',
-        {purpose: PURPOSE});
+        {purpose: PURPOSE, order_price: PRICES[UNLOCKED_TIER].price, currency: 'RUB'});
       localStorage.setItem(goalKey, '1');
     }
   } else {

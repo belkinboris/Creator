@@ -482,6 +482,16 @@ if (hasComp) {
 
 if (new URLSearchParams(location.search).get('paid') === '1') {
   document.getElementById('paid-note').classList.add('show');
+  // Возврат после оплаты живого теста -- раньше здесь не было цели вовсе:
+  // "live_test_ordered" шлётся на СТАРТЕ заказа (D3), а подтверждённой
+  // оплаты для Директа не видно совсем. Дедуп через localStorage -- тот же
+  // паттерн, что у report_paid_* в report.html, иначе повторный визит по
+  // старой ссылке ?paid=1 задвоил бы конверсию.
+  const goalKey = `sozdatel_ym_livetest_${CHECK_ID}`;
+  if (!localStorage.getItem(goalKey)) {
+    if (window.sozGoal) window.sozGoal('live_test_paid', {purpose: PURPOSE, order_price: PRICE, currency: 'RUB'});
+    localStorage.setItem(goalKey, '1');
+  }
 }
 
 // --- Лента: один активный фокус, шаги без данных пропускаются целиком ---
