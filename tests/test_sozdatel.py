@@ -2510,6 +2510,53 @@ class TestSocialContractPage:
             assert "Путь от идеи до денег" in text, path
             assert text.count('class="step"') == 7, path
 
+    def test_fast_plan_button_only_on_social_contract(self):
+        """F10: кнопка-обгон «Сразу сделать бизнес-план» — только у
+        соцконтракта (владелец описал именно эту аудиторию), не у бизнеса
+        или студента. Задаётся в реестре (app/audiences.py), не в шаблоне —
+        третья копия разъехалась бы, как разъезжались цены (B5)."""
+        assert 'id="plan-btn"' in client.get("/social-contract").text
+        assert "Сразу сделать бизнес-план" in client.get("/social-contract").text
+        assert 'id="plan-btn"' not in client.get("/students").text
+        assert 'id="plan-btn"' not in client.get("/").text
+
+    def test_fast_plan_button_still_checks_demand_but_skips_to_report(self):
+        """F10: владелец согласился на «обгон» с условием -- проверка спроса
+        всё равно считается в фоне (цифры Вордстата всё так же кормят платный
+        отчёт), просто человек не видит промежуточный /r/. Проверяем именно
+        это в JS-источнике: обе кнопки зовут один и тот же /api/demand, но
+        целятся в разные страницы после."""
+        text = client.get("/social-contract").text
+        assert "submitIdea(btn, planBtn, '/r/')" in text
+        assert "submitIdea(planBtn, btn, '/report/')" in text
+        assert text.count("fetch('/api/demand'") == 1, "должен остаться ОДИН путь проверки спроса, не два разных"
+
+    def test_fast_plan_flow_lands_on_a_working_report_page(self):
+        """Сквозная проверка того, что реально произойдёт по клику: тот же
+        /api/demand с purpose=social_contract, а следующая станица -- уже
+        существующий /report/{id}, который и без этой кнопки умеет показывать
+        тарифы до оплаты (см. app/main.py:report_page). Никакой новой
+        бэкенд-логики не потребовалось, только другой адрес редиректа."""
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест", "count": 100}],
+                    "best_phrase": "тест", "verdict": {"level": "unknown", "text": "Нет данных"},
+                    "competitors": {"found": 0, "top": []},
+                    "scores": [], "overall": {"value": 0, "weakest": ""}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            r = client.post("/api/demand", json={
+                "idea": "Пошив штор и постельного белья на заказ на дому в своём районе",
+                "purpose": "social_contract"})
+        finally:
+            m.check_demand = orig
+        assert r.status_code == 200
+        pub = r.json()["public_id"]
+        report = client.get(f"/report/{pub}")
+        assert report.status_code == 200
+        assert "оффер" not in report.text.lower() and "лендинг" not in report.text.lower()
+
 
 class TestProjectPage:
     """Страница /p/ переведена со старого тёмного «чертёжного» стиля на
@@ -4148,6 +4195,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__PAGE_TITLE__", "__META__", "__FIELD_LABEL__", "__PLACEHOLDER__",
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
+            "__FAST_PLAN_BTN__",
             # страница результата -- audiences.for_page / _optics_html
             "__AUDIENCE_JSON__", "__OPTICS__",
             # страница подтверждения входа -- заполняет _verify_page

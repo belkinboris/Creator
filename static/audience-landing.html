@@ -63,6 +63,11 @@
     padding:11px 18px;text-decoration:none}
   .btn:hover{background:var(--btn-hover)}
   .btn[disabled]{opacity:.55;cursor:wait}
+  .btn-ghost{appearance:none;cursor:pointer;border-radius:6px;display:inline-block;
+    background:transparent;border:1px solid var(--line);color:var(--ink);
+    font:500 15px "IBM Plex Sans",sans-serif;padding:10px 16px}
+  .btn-ghost:hover{border-color:var(--ink)}
+  .btn-ghost[disabled]{opacity:.55;cursor:wait}
   .fine{color:var(--muted);font-size:13px}
   .err{display:none;margin-top:10px;color:#B23A3A;font-size:15px}
   .err.show{display:block}
@@ -114,7 +119,7 @@
     .sub{font-size:16px}
     .checker{padding:15px}
     .checker textarea{min-height:112px}   /* как на главной -- пример идеи в три строки */
-    .checker-foot .btn{width:100%;text-align:center}
+    .checker-foot .btn,.checker-foot .btn-ghost{width:100%;text-align:center}
     .tiers{grid-template-columns:1fr}
   }
 </style>
@@ -139,6 +144,7 @@
       <textarea id="idea" maxlength="300" placeholder="__PLACEHOLDER__"></textarea>
       <div class="checker-foot">
         <button class="btn" id="check-btn" type="button">Проверить спрос — бесплатно</button>
+        __FAST_PLAN_BTN__
         <span class="fine">2 минуты · без регистрации</span>
       </div>
       <p class="err" id="err" role="alert"></p>
@@ -201,21 +207,28 @@
 <script>
 const AUDIENCE = "__AUDIENCE_KEY__";
 const btn = document.getElementById('check-btn');
+const planBtn = document.getElementById('plan-btn');
 const ideaEl = document.getElementById('idea');
 const errEl = document.getElementById('err');
 
 function showErr(msg){ errEl.textContent = msg; errEl.classList.add('show'); }
 
-btn.addEventListener('click', async () => {
+// Кнопка «Сразу сделать бизнес-план» (соцконтракт, F10) ведёт на тот же
+// /api/demand -- проверка спроса идёт в фоне как обычно, цифры Вордстата
+// всё так же кормят платный отчёт (принцип воронки не нарушен), просто
+// человек не видит промежуточный экран результата /r/ и попадает сразу на
+// страницу отчёта с тарифами.
+async function submitIdea(clicked, other, target){
   errEl.classList.remove('show');
   const idea = ideaEl.value.trim();
   if (idea.length < 15) {
     showErr('Опишите идею хотя бы одним предложением: чем будете заниматься.');
     return;
   }
-  btn.disabled = true;
-  const label = btn.textContent;
-  btn.textContent = 'Считаем спрос…';
+  clicked.disabled = true;
+  if (other) other.disabled = true;
+  const label = clicked.textContent;
+  clicked.textContent = 'Считаем спрос…';
   try {
     const r = await fetch('/api/demand', {
       method: 'POST',
@@ -227,17 +240,21 @@ btn.addEventListener('click', async () => {
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || data.detail || 'Сервис сейчас перегружен. Попробуйте через минуту.');
     if (data.id) {
-      if (window.sozGoal) window.sozGoal('demand_started', {purpose: AUDIENCE});
-      location.href = '/r/' + (data.public_id || data.id); return;
+      if (window.sozGoal) window.sozGoal('demand_started', {purpose: AUDIENCE, fast_plan: target === '/report/'});
+      location.href = target + (data.public_id || data.id); return;
     }
     throw new Error('Результат готов, но страница не открылась. Попробуйте ещё раз.');
   } catch (e) {
     showErr(e.message);
   } finally {
-    btn.disabled = false;
-    btn.textContent = label;
+    clicked.disabled = false;
+    clicked.textContent = label;
+    if (other) other.disabled = false;
   }
-});
+}
+
+btn.addEventListener('click', () => submitIdea(btn, planBtn, '/r/'));
+if (planBtn) planBtn.addEventListener('click', () => submitIdea(planBtn, btn, '/report/'));
 </script>
 </body>
 </html>
