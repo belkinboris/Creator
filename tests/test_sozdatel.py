@@ -2384,6 +2384,61 @@ class TestFooterLinks:
         self._assert_footer(client.get("/social-contract").text, "соцконтракт-страницы")
 
 
+class TestAccountLinkEverywhere:
+    """Пункт 2 сырого фидбека владельца (2026-07-31): ссылка в /account была
+    только на главной -- уйдя на любую другую публичную страницу, человек не
+    мог вернуться в кабинет без ручного перехода на `/`."""
+
+    def _assert_account_link(self, text, page_name):
+        assert 'href="/account"' in text, f"Нет ссылки /account на {page_name}"
+
+    def test_index_has_account_link(self):
+        self._assert_account_link(client.get("/").text, "главной")
+
+    def test_social_contract_has_account_link(self):
+        self._assert_account_link(client.get("/social-contract").text, "соцконтракт-витрины")
+
+    def test_students_has_account_link(self):
+        self._assert_account_link(client.get("/students").text, "студенческой витрины")
+
+    def test_guide_direct_has_account_link(self):
+        self._assert_account_link(client.get("/guide/direct").text, "гайда по Директу")
+
+    def test_result_page_has_account_link(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест", "count": 100}],
+                    "best_phrase": "тест", "verdict": {"level": "unknown", "text": "Нет данных"},
+                    "competitors": {"found": 0, "top": []},
+                    "scores": [], "overall": {"value": 0, "weakest": ""}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand",
+                              json={"idea": "Достаточно длинная идея для проверки ссылки в кабинет"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        self._assert_account_link(client.get(f"/r/{pub(rid)}").text, "страницы результата")
+
+    def test_project_page_has_account_link(self):
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="acct_link_proj_v1", product_name="КабинетСсылкаПроект")})
+        self._assert_account_link(client.get("/p/acct_link_proj_v1").text, "страницы проекта")
+
+    def test_homepage_nav_drops_the_redundant_path_link(self):
+        """Пункт 1 сырого фидбека владельца (2026-07-31): «путь 1→7» в шапке
+        главной -- избыточная навигация вида "1→7", отдельная от per-проектной
+        метки «Этап N из 7» на /r/, /p/ и /guide/direct. Убрана только ссылка
+        в шапке -- сам раздел #path (семь ступеней) остаётся на странице как
+        был, просто без дублирующего якоря в nav."""
+        import re
+        text = client.get("/").text
+        header = text[text.index("<header>"):text.index("</header>")]
+        assert "Путь 1→7" not in header
+        assert 'href="#path"' not in header
+        assert re.search(r'id="path"', text), "раздел «Путь от идеи до денег» пропал совсем"
+
+
 class TestSocialContractPage:
     """Отдельная посадочная страница под рекламу на аудиторию социального
     контракта -- не часть общего позиционирования сайта (см. CLAUDE.md),
@@ -2436,6 +2491,24 @@ class TestSocialContractPage:
         assert "IBM Plex" in text
         assert "#FBF6EA" in text
         assert "Manrope" not in text and "Onest" not in text
+
+    def test_business_plan_is_highlighted_in_the_headline(self):
+        """Пункт 13 сырого фидбека владельца (2026-07-31): «Бизнес-план» в
+        заголовке витрины должен быть выделен жёлтым маркером, как остальные
+        акцентные слова на сайте, а не идти обычным текстом."""
+        text = client.get("/social-contract").text
+        assert '<span class="hl">Бизнес-план</span>' in text
+
+    def test_path_map_is_visible_from_this_storefront_too(self):
+        """Часть пункта 14 сырого фидбека владельца (2026-07-31): карта пути
+        0->6 раньше была только на главной -- пришедший через рекламу на
+        /social-contract или /students не видел общую картину сервиса.
+        Секция теперь общая (audience-landing.html), а не главная-only."""
+        for path in ("/social-contract", "/students"):
+            text = client.get(path).text
+            assert 'id="path"' in text, path
+            assert "Путь от идеи до денег" in text, path
+            assert text.count('class="step"') == 7, path
 
 
 class TestProjectPage:

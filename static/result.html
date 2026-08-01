@@ -22,6 +22,7 @@
   .nav{display:flex;align-items:baseline;justify-content:space-between;
     padding-top:14px;padding-bottom:14px;flex-wrap:wrap;gap:6px}
   .logo{font-weight:700;font-size:17px;color:var(--ink);text-decoration:none}
+  .nav nav{display:flex;flex-wrap:wrap;gap:16px}
   .nav a.link{color:var(--muted);text-decoration:none;font-size:14px}
   .nav a.link:hover{color:var(--ink);text-decoration:underline}
 
@@ -239,7 +240,10 @@
 <header>
   <div class="wrap nav">
     <a class="logo" href="/">Созда<span class="hl">тель</span></a>
-    <a class="link" href="/">← Проверить другую идею</a>
+    <nav>
+      <a class="link" href="/">← Проверить другую идею</a>
+      <a class="link" href="/account">Кабинет</a>
+    </nav>
   </div>
 </header>
 
@@ -346,7 +350,7 @@
     </div>
     <div class="next" id="order">
       <h3 id="order-h3">Дальше — соберём страницу и <span class="hl">скажем, приносит ли идея деньги</span></h3>
-      <p id="order-p">Полностью соберём проверочную страницу под вашу идею — дизайн, тексты, форма заявки. Дальше вы сами запускаете рекламу в Яндекс Директе — у нас есть <a href="/guide/direct">пошаговая инструкция</a>, которая обходит типичные ошибки новичков, а мы посчитаем цифры, которые она приведёт. Через пару недель у вас будут не догадки, а реальные цифры: сколько людей готовы оставить заявку на вашу идею.</p>
+      <p id="order-p">Полностью соберём проверочную страницу под вашу идею — дизайн, тексты, форма заявки. Дальше вы сами запускаете рекламу в Яндекс Директе — у нас есть <a href="/guide/direct">пошаговая инструкция</a>, которая убережёт от типичных ошибок новичков, а мы посчитаем цифры, которые она приведёт. Через пару недель у вас будут не догадки, а реальные цифры: сколько людей готовы оставить заявку на вашу идею.</p>
       <p class="chosen-note" id="chosen-note"></p>
       <input id="contact" placeholder="Почта или телефон">
       <button class="btn" id="order-btn" type="button"></button>
@@ -361,7 +365,7 @@
       <p class="okmsg" id="order-ok"></p>
     </div>
     <div class="alt-path" id="alt-report">
-      <h4 id="alt-h4">Или получите <span class="hl">отчёт по идее</span> — без ожидания рекламы</h4>
+      <h4 id="alt-h4">Или получите <span class="hl">отчёт по идее</span>, не дожидаясь рекламы</h4>
       <p id="alt-p">Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни.</p>
       <!-- Состав тарифов — здесь, а не на следующем экране: человек решает
            платить именно тут, и разница между 990 и 2990 для него неочевидна.
