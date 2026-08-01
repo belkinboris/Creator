@@ -8,8 +8,10 @@
    поисковых запроса, как их набрал бы клиент в Яндексе.
 2. Частотность -- ДВА независимых пути, пробуются по очереди (2026-07):
    а) официальный Wordstat API (api.wordstat.yandex.net, Bearer OAuth-токен
-      из приложения на oauth.yandex.ru с доступом «Вордстат» + одобрение
-      Яндекса) -- отдельный продукт, включается через YANDEX_WORDSTAT_OAUTH_TOKEN;
+      из приложения на oauth.yandex.ru с доступом «Вордстат») -- с 18 мая
+      2026 общедоступен всем через Yandex Cloud / AI Studio, отдельного
+      одобрения Яндекса больше не требует; включается через
+      YANDEX_WORDSTAT_OAUTH_TOKEN;
    б) прокси внутри Yandex Cloud Search API v2
       (searchapi.api.cloud.yandex.net/v2/wordstat/topRequests), авторизация
       YANDEX_API_KEY + YANDEX_FOLDER_ID -- прежний путь, оставлен как есть.
