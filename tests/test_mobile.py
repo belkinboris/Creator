@@ -409,6 +409,33 @@ def _open(browser, url, *, width=NARROW, cookies=None):
     return ctx, page
 
 
+def _reach_step(page, n):
+    """Раскрыть шаг ленты, откуда бы ни начали.
+
+    Проверка, по которой уже что-то заказано, открывается СРАЗУ на последнем
+    шаге (см. RESUME в result.html): человек, вернувшийся к купленной идее, не
+    должен прокликивать бесплатные шаги заново. Тесты при этом по-прежнему
+    должны уметь добраться до любого шага — свёрнутый разворачивается кликом
+    по строке итога, недостигнутый берётся кнопками «Дальше».
+    """
+    body = page.locator(f"#step-{n} .step-body")
+    if body.is_visible():
+        return
+    summary = page.locator(f"#step-{n} .step-summary")
+    if summary.count() and summary.is_visible():
+        summary.click()
+        page.wait_for_timeout(250)
+        return
+    for _ in range(6):
+        if body.is_visible():
+            return
+        btns = page.locator(".step-next .btn:visible")
+        if btns.count() == 0:
+            break
+        btns.first.click()
+        page.wait_for_timeout(300)
+
+
 def _login(page, base, token):
     """Вход в кабинет — так, как его проходит человек: страница подтверждения
     и кнопка. GET по ссылке из письма намеренно НЕ пускает внутрь (A15:
@@ -671,8 +698,17 @@ def test_result_script_survives_every_verdict_level(site, browser):
             # Лента действительно раскрылась, а не просто «ошибок нет».
             assert page.locator(".step.active").count() == 1, \
                 f"{key}: ни один шаг не открыт — лента не инициализировалась"
-            assert page.locator(".step-next .btn:visible").count() >= 1, \
-                f"{key}: кнопка перехода к следующему шагу не видна"
+            # Открытый шаг реально виден. Это и есть отличие живой ленты от
+            # мёртвой: без .active правило .step:not(.active):not(.done)
+            # скрывает все шаги разом. Кнопку «Дальше» здесь требовать
+            # нельзя — на последнем шаге её нет по построению, а проверка с
+            # покупкой открывается сразу на нём (RESUME).
+            assert page.locator(".step.active").is_visible(), \
+                f"{key}: открытый шаг не виден на экране"
+            # И на экране есть хоть одно действие воронки, а не пустая рамка.
+            assert (page.locator(".step-next .btn:visible").count()
+                    or page.locator("#order-btn").is_visible()), \
+                f"{key}: на открытом шаге нет ни одного действия"
         finally:
             ctx.close()
 
@@ -832,6 +868,9 @@ def test_frequency_note_follows_the_number_it_explains(site, browser, width):
     ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}",
                       width=width)
     try:
+        # Проверка из фикстуры уже оплачена, поэтому лента открывается на
+        # последнем шаге — частотности надо развернуть обратно.
+        _reach_step(page, 1)
         page.wait_for_selector(".freq-match", timeout=10000)
         note = page.locator(".freq-match").first
         num = page.locator(".freq-num").first
@@ -977,12 +1016,7 @@ def test_sharpen_cards_line_up_row_by_row(site, browser):
             status=200, content_type="application/json",
             body=json.dumps({"ok": True, "sharpened_note": "", "warning": "",
                              "offers": offers}, ensure_ascii=False)))
-        for _ in range(3):
-            btns = page.locator(".step-next .btn:visible")
-            if btns.count() == 0:
-                break
-            btns.first.click()
-            page.wait_for_timeout(300)
+        _reach_step(page, 4)
         page.click("#sharpen-btn")
         page.wait_for_selector(".sharp-pain", timeout=15000)
         page.wait_for_timeout(400)
@@ -1029,12 +1063,7 @@ def test_sharpen_card_reads_as_two_fields_not_one_broken_sentence(site, browser,
             status=200, content_type="application/json",
             body=json.dumps({"ok": True, "sharpened_note": "", "warning": "",
                              "offers": [offer]}, ensure_ascii=False)))
-        for _ in range(3):
-            btns = page.locator(".step-next .btn:visible")
-            if btns.count() == 0:
-                break
-            btns.first.click()
-            page.wait_for_timeout(300)
+        _reach_step(page, 4)
         page.click("#sharpen-btn")
         page.wait_for_selector(".sharp-pain", timeout=15000)
         page.wait_for_timeout(300)

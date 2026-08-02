@@ -3294,6 +3294,115 @@ class TestMailer:
         assert "текст письма" in captured["body"]
 
 
+class TestReturningToAFinishedCheck:
+    """Кастдев 2026-08-02: «нажимаю на идею «открыть», и мне будто заново всё
+    до заострения проходить надо. Это какой-то бред».
+
+    Лента всегда начиналась с первого шага, даже если человек эту проверку
+    уже прошёл и что-то по ней купил.
+    """
+
+    def _check(self, **kw):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        data = {"formulations": [{"phrase": "ф", "count": 4200}], "best_phrase": "ф",
+                "verdict": {"level": "strong", "text": "Спрос есть"},
+                "competitors": {"found": 10, "top": [{"title": "Т", "domain": "t.ru"}],
+                                "info_only": False},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 8, "note": ""}],
+                "overall": {"value": 8, "weakest": "Спрос", "basis": "б"}}
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Идея, к которой человек возвращается",
+                              result_json=json.dumps(data, ensure_ascii=False), **kw)
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id, rec.public_id
+
+    def _resume_flag(self, pid):
+        text = client.get(f"/r/{pid}").text
+        return text.split("const RESUME = ", 1)[1].split(";", 1)[0].strip()
+
+    def test_fresh_check_starts_from_the_first_step(self):
+        """Новичку лента нужна целиком — иначе он не увидит своих же цифр."""
+        _, pid = self._check()
+        assert self._resume_flag(pid) == "false"
+
+    def test_check_with_chosen_offer_resumes_at_the_end(self):
+        _, pid = self._check(chosen_offer=json.dumps({"h1": "Заголовок"}, ensure_ascii=False))
+        assert self._resume_flag(pid) == "true"
+
+    def test_check_with_a_purchase_resumes_at_the_end(self):
+        """Человек уже заплатил по этой идее — прокликивать бесплатные шаги
+        ради возврата к покупке он точно не должен."""
+        from app.main import ReportPurchase, Session, engine
+        rid, pid = self._check()
+        with Session(engine) as s:
+            s.add(ReportPurchase(check_id=rid, idea="и", tier="quick",
+                                 contact="buyer@example.com", status="paid", amount=990))
+            s.commit()
+        assert self._resume_flag(pid) == "true"
+
+    def test_check_with_a_live_test_order_resumes_at_the_end(self):
+        from app.main import LiveTestOrder, Session, engine
+        rid, pid = self._check()
+        with Session(engine) as s:
+            s.add(LiveTestOrder(check_id=rid, idea="и", contact="buyer@example.com",
+                                status="paid", amount=1490))
+            s.commit()
+        assert self._resume_flag(pid) == "true"
+
+    def test_progress_comes_from_the_server_not_the_browser(self):
+        """localStorage не пережил бы ни смену устройства, ни очистку
+        браузера — а возвращаются к проверке как раз спустя время."""
+        text = client.get(f"/r/{self._check()[1]}").text
+        block = text.split("const RESUME = ", 1)[1][:600]
+        assert "localStorage" not in block
+
+    def test_resume_marks_earlier_steps_done_not_hidden(self):
+        """Свернуть — не значит спрятать: человек должен видеть итоги шагов
+        строкой и мочь развернуть любой обратно."""
+        text = client.get(f"/r/{self._check()[1]}").text
+        block = text.split("if (RESUME", 1)[1][:700]
+        assert "classList.add('done')" in block
+        assert "openStep(LAST_STEP)" in block
+
+
+class TestAccountRowsCarryTheirDate:
+    """Кастдев 2026-08-02: «в кабинете каша из идей, нужно написать дату
+    проверки». Пять строк одной идеи выглядели одинаково."""
+
+    def _login(self, contact="dated@example.com"):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_dated", contact=contact)); s.commit()
+        client.post("/account/verify?token=tok_dated", follow_redirects=False)
+        return contact
+
+    def test_every_row_type_reports_when_it_happened(self):
+        from app.main import (DemandCheck, LiveTestOrder, ReportPurchase,
+                              Session, engine)
+        contact = self._login()
+        with Session(engine) as s:
+            s.add(DemandCheck(idea="Идея с датой", contact=contact,
+                              result_json=json.dumps({"overall": {"value": 5}}, ensure_ascii=False)))
+            s.add(ReportPurchase(idea="Отчёт с датой", tier="quick", contact=contact,
+                                 status="paid", amount=990))
+            s.add(LiveTestOrder(idea="Заявка с датой", contact=contact,
+                                status="new", amount=0))
+            s.commit()
+        d = client.get("/api/account/me").json()
+        client.cookies.clear()
+        for section in ("checks", "reports", "orders"):
+            assert d[section], f"раздел {section} пуст — проверять нечего"
+            for row in d[section]:
+                assert row.get("created_at"), f"{section}: строка без даты — {row}"
+
+    def test_cabinet_renders_the_date_in_russian(self):
+        from pathlib import Path
+        text = Path("static/account.html").read_text(encoding="utf-8")
+        assert "toLocaleDateString('ru-RU'" in text
+        assert "created_at" in text
+
+
 class TestAccountCabinet:
     """Личный кабинет покупателя: magic-link на почту вместо пароля."""
 
@@ -4541,8 +4650,8 @@ class TestNoHardcodedServerValuesInStatic:
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
             "__FAST_PLAN_BTN__",
-            # страница результата -- audiences.for_page
-            "__AUDIENCE_JSON__",
+            # страница результата -- audiences.for_page / состояние проверки
+            "__AUDIENCE_JSON__", "__RESUME__", "__CHOSEN_H1_JSON__",
             # страница подтверждения входа -- заполняет _verify_page
             "__HEADING__", "__LEAD__", "__WHO__", "__ACTION__", "__FINE__",
             # заголовок и выходные данные листа -- _doc_title_and_meta

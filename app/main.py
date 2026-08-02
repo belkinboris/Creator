@@ -635,6 +635,25 @@ def result_page(rid: str, request: Request):
     if redirect:
         return RedirectResponse(f"/r/{rec.public_id}", status_code=307)
     tpl = _static("result.html")
+    # Человек уже проходил эту проверку -- лента не должна начинаться заново.
+    # Кастдев 2026-08-02: «нажимаю на идею «открыть», и мне будто заново всё
+    # до заострения проходить надо». Прогресс не в localStorage, а в самих
+    # данных: если позиционирование выбрано или по проверке уже что-то
+    # заказано, шаги до финального человек прошёл наверняка -- на любом его
+    # устройстве и в любом браузере.
+    with Session(engine) as s:
+        resume = bool(rec.chosen_offer) or bool(
+            s.exec(select(ReportPurchase.id).where(ReportPurchase.check_id == rec.id)).first()
+            or s.exec(select(LiveTestOrder.id).where(LiveTestOrder.check_id == rec.id)).first())
+    # Что человек выбрал в прошлый раз -- чтобы свёрнутый шаг заострения при
+    # возврате не был безымянной галочкой. Битый JSON тут не повод ронять
+    # страницу: без подписи, но с лентой (принцип 7).
+    chosen_h1 = ""
+    if rec.chosen_offer:
+        try:
+            chosen_h1 = re.sub(r"<[^>]+>", "", str((json.loads(rec.chosen_offer) or {}).get("h1", "")))[:120]
+        except (ValueError, TypeError, AttributeError):
+            chosen_h1 = ""
     # Подписи шкал приводим к одному виду на выдаче: так чинятся и проверки,
     # сохранённые до этой правки (B9).
     polished = json.dumps(_polish_scores(json.loads(rec.result_json)), ensure_ascii=False)
@@ -654,6 +673,8 @@ def result_page(rid: str, request: Request):
         # не за рекламным тестом -- страница результата разворачивает финальный
         # шаг под него, см. PURPOSE в result.html.
         .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False))
+        .replace("__RESUME__", "true" if resume else "false")
+        .replace("__CHOSEN_H1_JSON__", json.dumps(chosen_h1, ensure_ascii=False).replace("</", "<\\/"))
         .replace("__AUDIENCE_JSON__",
                  json.dumps(audiences.for_page(rec.purpose), ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out, rec.purpose))
@@ -2698,6 +2719,7 @@ def _check_card(c: "DemandCheck") -> dict:
     return {"id": c.id, "idea": c.idea, "result_url": f"/r/{c.public_id}",
             "score": score if isinstance(score, (int, float)) else None,
             "weakest": weakest or "",
+            "created_at": c.created_at.isoformat(),
             "count": count if isinstance(count, int) else None}
 
 
@@ -2771,12 +2793,18 @@ def account_me(request: Request):
         # tier_label приходит с сервера, а не зашит в кабинете: тариф уже
         # переименовывали ("Полный отчёт" -> "Бизнес-план"), и вторая копия
         # названия в статике разъезжается с витриной незаметно.
+        # Дата у каждой строки: без неё пять проверок одной идеи выглядят
+        # одинаковыми, и понять, какая из них свежая, нельзя вообще никак
+        # (кастдев 2026-08-02: «каша из идей»). Отдаём ISO, человеческий вид
+        # собирает кабинет -- формат даты дело представления, не API.
         "reports": [{"check_id": r.check_id, "idea": r.idea, "tier": r.tier,
                      "tier_label": REPORT_PRICES.get(r.tier, {}).get("label", r.tier),
                      "status": _effective_status(r.status, r.created_at),
+                     "created_at": r.created_at.isoformat(),
                      "report_url": _report_link(r)} for r in reports],
         "orders": [{"id": o.id, "idea": o.idea, "check_id": o.check_id,
                     "status": _effective_status(o.status, o.created_at),
+                    "created_at": o.created_at.isoformat(),
                     "continue_url": order_links.get(o.check_id)} for o in orders],
         "checks": check_cards,
     }

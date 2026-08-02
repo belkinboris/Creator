@@ -791,7 +791,30 @@ function reopen(n){
   el.classList.toggle('expanded');
 }
 
-openStep(STEP_ORDER[0]);
+// Возврат к уже пройденной проверке. Начинать ленту с первого шага человеку,
+// который эту идею уже заострил или что-то по ней заказал, — значит заставить
+// его прокликать всё заново ради блока, за которым он и вернулся. Прогресс
+// приходит с сервера (см. result_page), поэтому переживает и смену устройства,
+// и очистку браузера.
+const RESUME = __RESUME__;
+const CHOSEN_H1 = __CHOSEN_H1_JSON__;
+if (RESUME && STEP_ORDER.length > 1) {
+  STEP_ORDER.slice(0, -1).forEach(n => {
+    const el = document.getElementById('step-' + n);
+    el.classList.add('done');
+    const sumEl = document.getElementById('sum-' + n);
+    // У шага заострения автосводки нет: что там выбрали, знает только сервер.
+    // Без подписи свёрнутый шаг был бы безымянной галочкой — человек не понял
+    // бы, надо ли его открывать.
+    const auto = {1: summarizeStep1, 2: summarizeStep2, 3: summarizeStep3}[n];
+    if (!sumEl) return;
+    sumEl.textContent = auto ? auto()
+      : (n === 4 ? (CHOSEN_H1 ? 'Выбрано: ' + CHOSEN_H1 : 'Можно вернуться и заострить') : '');
+  });
+  openStep(LAST_STEP);
+} else {
+  openStep(STEP_ORDER[0]);
+}
 
 // --- Заострение идеи — по кнопке, LLM-вызов тяжёлый и не нужен на каждый визит ---
 

@@ -208,17 +208,38 @@ function stageBadge(stageIdx, name){
       <div class="acts"><a class="btn-ghost" href="${p.project_url}">Открыть проект →</a></div>
     </div>`;
 
+  // Пять проверок одной идеи выглядели одинаковыми строками, и понять, какая
+  // свежая, было нельзя вообще никак (кастдев 2026-08-02: «каша из идей»).
+  // Дата — самое дешёвое, что их различает. Формат короткий: в списке важен
+  // порядок во времени, а не точная минута.
+  const when = iso => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    const now = new Date();
+    return d.toLocaleDateString('ru-RU', {
+      day: 'numeric', month: 'long',
+      ...(d.getFullYear() === now.getFullYear() ? {} : {year: 'numeric'}),
+    });
+  };
+  const withDate = (text, iso) => {
+    const date = when(iso);
+    return date ? `${text ? escapeHtml(text) + ' · ' : ''}${escapeHtml(date)}` : escapeHtml(text || '');
+  };
+
   const orderRow = o => `
     <div class="item">
       <div><div class="name">${escapeHtml(o.idea || 'Без названия')}</div>
-        <div class="sub2">${escapeHtml(STATUS_LABEL[o.status] || o.status)}</div></div>
+        <div class="sub2">${withDate(STATUS_LABEL[o.status] || o.status, o.created_at)}</div></div>
       ${o.continue_url ? `<a class="btn-ghost" href="${o.continue_url}">Открыть →</a>` : ''}
     </div>`;
 
   const reportRow = rp => `
     <div class="item">
       <div><div class="name">${escapeHtml(rp.idea)}</div>
-        <div class="sub2">${escapeHtml(rp.tier_label || '')}${STATUS_LABEL[rp.status] ? ' · ' + escapeHtml(STATUS_LABEL[rp.status]) : ''}</div></div>
+        <div class="sub2">${withDate(
+          (rp.tier_label || '') + (STATUS_LABEL[rp.status] ? ' · ' + STATUS_LABEL[rp.status] : ''),
+          rp.created_at)}</div></div>
       <a class="btn-ghost" href="${rp.report_url}">Открыть →</a>
     </div>`;
 
@@ -236,7 +257,7 @@ function stageBadge(stageIdx, name){
     return `
     <div class="item">
       <div><div class="name">${escapeHtml(c.idea || 'Без названия')}</div>
-        <div class="sub2">Бесплатная проверка спроса</div>
+        <div class="sub2">${withDate('Бесплатная проверка спроса', c.created_at)}</div>
         ${figs.length ? `<div class="figures">${figs.join('')}</div>` : ''}</div>
       <a class="btn-ghost" href="${c.result_url}">Открыть →</a>
     </div>`;
