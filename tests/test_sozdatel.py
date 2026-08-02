@@ -2996,6 +2996,68 @@ class TestYandexMetrika:
         assert "UNLOCKED_TIER !== 'full'" not in text
 
 
+class TestPaidReportIsNotASieve:
+    """Кастдев 2026-08-02, покупка за 990 ₽: «сгенерировались только резюме,
+    проблема, спрос и кто отвечает на запрос, потом куча заблюренных частей».
+
+    До оплаты заблюренные разделы — витрина, они и должны показывать, за что
+    просят деньги. ПОСЛЕ оплаты те же разделы превращают купленный документ
+    в решето: четыре собранных вперемешку с десятком замазанных.
+    """
+
+    def _page(self):
+        from pathlib import Path
+        return Path("static/report.html").read_text(encoding="utf-8")
+
+    def test_paid_flag_separates_showcase_from_document(self):
+        text = self._page()
+        assert "const PAID = TIER_KEYS.length > 0;" in text
+
+    def test_other_tier_sections_are_not_drawn_inside_a_paid_report(self):
+        text = self._page()
+        block = text.split("function sectionHtml(", 1)[1][:900]
+        assert "if (PAID) return '';" in block
+
+    def test_teaser_keeps_its_blurred_sections(self):
+        """Сторож от чрезмерной правки: без оплаты запертые разделы обязаны
+        остаться — это единственное, что объясняет, за что платят."""
+        text = self._page()
+        assert 'class="section locked"' in text
+        assert ".section.locked p{color:var(--muted);filter:blur(3px)" in text
+
+    def test_missing_sections_become_one_honest_line(self):
+        text = self._page()
+        assert "function upsellHtml()" in text
+        block = text.split("function upsellHtml()", 1)[1][:700]
+        assert "if (!PAID || !rest.length) return '';" in block
+        assert "FULL_LABEL" in block
+
+    def test_upsell_names_the_tier_from_the_single_source(self):
+        """Название тарифа уже переименовывали; вторая копия в статике
+        разъезжается с витриной незаметно (B7)."""
+        text = self._page()
+        assert 'const FULL_LABEL = "__FULL_LABEL__";' in text
+
+    def test_empty_groups_disappear_with_their_sections(self):
+        """Заголовок группы над пустотой ничего не сообщает, а место занимает."""
+        text = self._page()
+        block = text.split("function render()", 1)[1][:600]
+        assert "SECTIONS.filter(s => !PAID || inTier(s.key))" in block
+        assert "visible.forEach" in block
+
+    def test_upsell_is_not_printed(self):
+        """Для соцконтракта отчёт несут в комиссию на бумаге — предложение
+        доплатить на этом листе неуместно."""
+        text = self._page()
+        assert "@media print{.upsell{display:none}}" in text
+
+    def test_plural_rule_is_russian(self):
+        """«ещё 1 разделов» в платном документе читается как небрежность."""
+        text = self._page()
+        assert "function plural(" in text
+        assert "m10 >= 2 && m10 <= 4" in text
+
+
 class TestOwnerLearnsAboutOrders:
     """A2 из PRODUCT_ROADMAP: владелец узнавал о деньгах и заявках, только
     открыв /desk глазами. Для продукта с платным рекламным трафиком это
