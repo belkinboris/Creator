@@ -938,6 +938,72 @@ def test_card_grids_stay_even(site, browser, width):
     assert not problems, "\n".join(problems)
 
 
+def test_sharpen_cards_line_up_row_by_row(site, browser):
+    """Кастдев 2026-08-02: «блоки хоть и одного размера, но текст в них не
+    ровно и по-разному, выглядит по-дурацки».
+
+    Три карточки одной ширины, но с текстом разной длины: заголовок в одной
+    занимает две строки, в другой одну — и «Для кого», «Боль» и кнопка едут
+    по вертикали друг относительно друга. Выравнивает subgrid, и проверить
+    это можно только измерением: в CSS-подстроках такое не видно, а
+    сломаться может от любой правки высоты соседнего блока.
+    """
+    offers = [
+        {"angle": "Скорость", "idea_id": "a1", "product_name": "П",
+         "eyebrow": "мастерам", "h1": "Замер за три секунды",
+         "sub": "Наведите камеру.",
+         "pains": [{"h2": "Рулетки нет", "p": "Мерят на глаз."}],
+         "demo_left_label": "л", "demo_left_text": "л", "demo_right_text": "п",
+         "direct_queries": ["а"] * 6},
+        # Намеренно длиннее по всем полям сразу — именно так карточки и разъезжались.
+        {"angle": "Точность в сложных случаях", "idea_id": "a2", "product_name": "П",
+         "eyebrow": "проектировщикам и дизайнерам интерьера, которым нужен точный обмер",
+         "h1": "Измеряет там, где рулетка не достаёт",
+         "sub": "Высокие потолки, узкие ниши, труднодоступные углы — по одной фотографии.",
+         "pains": [{"h2": "Обмер занимает полдня",
+                    "p": "Каждый выезд — час дороги и два часа замеров, а ошибка срывает заказ."}],
+         "demo_left_label": "л", "demo_left_text": "л", "demo_right_text": "п",
+         "direct_queries": ["а"] * 6},
+        {"angle": "Для покупок", "idea_id": "a3", "product_name": "П",
+         "eyebrow": "покупателям мебели", "h1": "Влезет ли диван?",
+         "sub": "Проверьте до заказа.",
+         "pains": [{"h2": "Мебель не входит", "p": "Возврат стоит денег."}],
+         "demo_left_label": "л", "demo_left_text": "л", "demo_right_text": "п",
+         "direct_queries": ["а"] * 6},
+    ]
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}", width=1280)
+    try:
+        page.route("**/api/sharpen", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"ok": True, "sharpened_note": "", "warning": "",
+                             "offers": offers}, ensure_ascii=False)))
+        for _ in range(3):
+            btns = page.locator(".step-next .btn:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+        page.click("#sharpen-btn")
+        page.wait_for_selector(".sharp-pain", timeout=15000)
+        page.wait_for_timeout(400)
+
+        def tops(selector, index=None):
+            return page.evaluate(
+                """([sel, idx]) => [...document.querySelectorAll('.sharp-card')].map(c => {
+                    const els = c.querySelectorAll(sel);
+                    const el = idx === null ? els[0] : els[idx];
+                    return el ? Math.round(el.getBoundingClientRect().top) : null;
+                })""", [selector, index])
+
+        for label, sel, idx in (("«Для кого»", ".sharp-meta-row", 0),
+                                ("«Боль»", ".sharp-meta-row", 1),
+                                ("кнопка выбора", ".sharp-pick", None)):
+            ys = tops(sel, idx)
+            assert len(set(ys)) == 1, f"{label} стоит на разной высоте в карточках: {ys}"
+    finally:
+        ctx.close()
+
+
 @pytest.mark.parametrize("width", [1000, NARROW])
 def test_sharpen_card_reads_as_two_fields_not_one_broken_sentence(site, browser, width):
     """B9. Карточку рисует скрипт, поэтому проверять подстрокой в шаблоне

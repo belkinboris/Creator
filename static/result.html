@@ -173,6 +173,37 @@
     background:transparent;border:1px solid var(--line);color:var(--ink);
     font:500 14px "IBM Plex Sans";padding:9px 14px}
   .sharp-pick:hover{border-color:var(--ink)}
+
+  /* Три карточки одной ширины, но с текстом разной длины: заголовок в одной
+     занимал две строки, в другой одну -- и «Для кого», «Боль» и кнопка ехали
+     по вертикали друг относительно друга. Subgrid выравнивает ОДИНАКОВЫЕ
+     строки во всех трёх карточках: заголовок напротив заголовка, боль
+     напротив боли, кнопки в одну линию.
+
+     Шесть строк: угол, заголовок, подзаголовок, «для кого», «боль», кнопка.
+     Метаданные -- вложенный subgrid на две строки, иначе выровнялись бы
+     только границы блока, а «боль» внутри него всё равно ехала бы вслед за
+     длиной «для кого». Слоты рисуются ВСЕГДА (см. renderSharpen), даже
+     пустыми: span 6 требует одинакового числа детей в каждой карточке.
+     Где subgrid не поддержан -- остаётся прежняя раскладка на flex.
+
+     Блок стоит ПОСЛЕ базовых правил намеренно: у него та же специфичность,
+     и выше по файлу его перебивал бы .sharp-meta{display:flex}. */
+  @supports (grid-template-rows: subgrid){
+    @media (min-width:680px){
+      .sharpen-cards.show{grid-template-rows:repeat(6, auto)}
+      .sharp-card{grid-row:span 6;display:grid;grid-template-rows:subgrid;row-gap:8px}
+      .sharp-meta{grid-row:span 2;display:grid;grid-template-rows:subgrid;row-gap:8px}
+      /* Кнопка уже прижата строкой сетки -- margin-top:auto из flex-раскладки
+         здесь только добавил бы лишний отступ. */
+      .sharp-pick{margin-top:0}
+    }
+  }
+  /* Пустой блок метаданных прячем цветом, а не display:none: убрать его из
+     потока значило бы отнять у карточки строку и сломать выравнивание
+     остальных двух. */
+  .sharp-meta:empty{border-left-color:transparent}
+
   .btn-ghost{appearance:none;cursor:pointer;border-radius:6px;display:inline-block;
     background:transparent;border:1px solid var(--line);color:var(--ink);
     font:500 15px "IBM Plex Sans";padding:10px 16px}
@@ -804,10 +835,13 @@ function renderSharpen(offers){
       <div class="sharp-angle">${escapeHtml(o.angle || '')}</div>
       <h4>${o.h1 || ''}</h4>
       <p>${escapeHtml(o.sub || '')}</p>
-      ${(o.eyebrow || (o.pains && o.pains[0])) ? `<div class="sharp-meta">
-        ${o.eyebrow ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Для кого:</span>${escapeHtml(o.eyebrow)}</div>` : ''}
-        ${o.pains && o.pains[0] ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Боль:</span><span class="sharp-pain">${escapeHtml(o.pains[0].h2 || '')}</span>${escapeHtml(o.pains[0].p || '')}</div>` : ''}
-      </div>` : ''}
+      <!-- Обе строки рисуются ВСЕГДА, даже пустыми: карточек три, выравнивает
+           их subgrid, а он требует одинакового числа слотов в каждой. Пустая
+           строка схлопывается по высоте, но место в сетке держит. -->
+      <div class="sharp-meta">
+        <div class="sharp-meta-row">${o.eyebrow ? `<span class="sharp-meta-tag">Для кого:</span>${escapeHtml(o.eyebrow)}` : ''}</div>
+        <div class="sharp-meta-row">${o.pains && o.pains[0] ? `<span class="sharp-meta-tag">Боль:</span><span class="sharp-pain">${escapeHtml(o.pains[0].h2 || '')}</span>${escapeHtml(o.pains[0].p || '')}` : ''}</div>
+      </div>
       <button class="sharp-pick" type="button">Выбрать этот вариант</button>
     </div>`).join('');
   sharpenCards.classList.add('show');

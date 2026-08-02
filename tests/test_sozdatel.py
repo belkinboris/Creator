@@ -2136,6 +2136,75 @@ class TestPayments:
             assert s.get(LiveTestOrder, oid).status == "paid"
 
 
+class TestSharpenCardsLineUp:
+    """Кастдев 2026-08-02: «блоки хоть и одного размера, но текст в них не
+    ровно и по-разному». Заголовок в одной карточке занимал две строки, в
+    другой одну — и «Для кого», «Боль» и кнопка ехали по вертикали друг
+    относительно друга."""
+
+    def _page(self):
+        from pathlib import Path
+        return Path("static/result.html").read_text(encoding="utf-8")
+
+    def test_cards_share_a_row_grid(self):
+        """Само выравнивание меряет браузерный тест
+        (test_sharpen_cards_line_up_row_by_row в tests/test_mobile.py) — здесь
+        только сторож на механизм: строк шесть и карточка занимает все шесть."""
+        text = self._page()
+        assert "grid-template-rows:subgrid" in text
+        assert "grid-row:span 6" in text
+        assert "repeat(6, auto)" in text
+
+    def test_meta_slots_are_always_rendered(self):
+        """Subgrid выравнивает строки только если слотов в каждой карточке
+        поровну. Карточка без «Для кого» или без «Боли» раньше не рисовала
+        строку вовсе — и сетка разъезжалась именно на ней. Теперь пустеет
+        содержимое строки, а не сама строка."""
+        text = self._page()
+        block = text.split("function renderSharpen(", 1)[1][:1400]
+        assert block.count('<div class="sharp-meta-row">') == 2
+        # Условие осталось ВНУТРИ строки, а не вокруг неё.
+        assert '? `<div class="sharp-meta-row">' not in block
+        assert '${o.eyebrow ? `<span class="sharp-meta-tag">' in block
+
+    def test_empty_meta_keeps_its_place_in_the_grid(self):
+        """`display:none` на пустом блоке отнял бы у карточки строку и сломал
+        бы выравнивание двух остальных — прячем цветом рамки."""
+        text = self._page()
+        assert ".sharp-meta:empty{border-left-color:transparent}" in text
+        assert ".sharp-meta:empty{display:none}" not in text
+
+    def test_fallback_kept_where_subgrid_is_unsupported(self):
+        """Старый браузер не должен получить сломанную сетку вместо
+        неидеальной: subgrid включается только под @supports."""
+        text = self._page()
+        assert "@supports (grid-template-rows: subgrid)" in text
+        assert ".sharp-card{border:1px solid var(--line)" in text  # базовый flex на месте
+
+
+class TestSharpenSpeaksRussian:
+    """Живой прогон: в карточке заострения оказалось английское слово. На
+    русской странице это читается как недоделка."""
+
+    def test_prompt_forbids_latin_in_visible_fields(self):
+        from app.offer_engine import _system_prompt
+        low = _system_prompt("business").lower()
+        assert "только по-русски" in low or "только на русском" in low
+        assert "латиниц" in low
+
+    def test_service_field_is_named_as_the_exception(self):
+        """idea_id — служебное поле и латиницей быть обязано (оно уходит в
+        адрес проекта). Без явного исключения запрет противоречил бы схеме
+        ответа, где рядом стоит «латиницей_v1»."""
+        from app.offer_engine import _system_prompt
+        assert "idea_id" in _system_prompt("business")
+
+    def test_rule_reaches_every_audience(self):
+        from app.offer_engine import _system_prompt
+        for purpose in ("business", "social_contract", "student"):
+            assert "латиниц" in _system_prompt(purpose).lower(), purpose
+
+
 class TestSharpenPublic:
     """Заострение идеи -- бесплатно и без ключа владельца, по кнопке на /r/{id}."""
 
