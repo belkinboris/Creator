@@ -661,9 +661,12 @@ def test_unmeasured_demand_stops_selling_in_a_real_browser(site, browser):
         assert "не состоялась" in lead, lead
         assert "не значит, что спроса нет" in lead
 
-        # напротив фраз — «нет данных», а не вывод о рынке
+        # Напротив фраз — «не удалось измерить», а не вывод о рынке. Причём
+        # именно эта формулировка, а не «не ищут»: последнее теперь означает
+        # честно измеренный ноль (count === 0) и с несостоявшимся замером
+        # (count === null) больше не путается.
         freqs = page.eval_on_selector_all(".freq-num", "e => e.map(x => x.innerText)")
-        assert freqs and all("нет данных" in f for f in freqs), freqs
+        assert freqs and all("не удалось измерить" in f for f in freqs), freqs
         assert not any("почти не ищут" in f for f in freqs), freqs
 
         cls = page.evaluate("""() => ({o: document.getElementById('order').className,

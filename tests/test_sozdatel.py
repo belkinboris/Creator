@@ -1132,8 +1132,8 @@ class TestMorningPass:
 # ---------------------------------------------------------------------------
 
 from app.demand import (  # noqa: E402
-    DemandError, check_demand, generate_formulations, _parse_search_xml, _verdict,
-    wordstat_count, diagnose,
+    DemandError, check_demand, competitors, generate_formulations, _parse_search_xml,
+    _verdict, wordstat_count, diagnose,
 )
 
 
@@ -1157,6 +1157,172 @@ def _demand_post(counts=None, search_xml=None):
             return {"rawData": _b64.b64encode(xml.encode()).decode()}
         raise AssertionError(f"unexpected provider {provider}")
     return fake
+
+
+class TestBroaderFormulations:
+    """Три формулировки промахивались мимо ходового запроса.
+
+    Живой прогон: LLM выдала максимум 941/мес, а реальный массовый запрос
+    той же темы давал 3984/мес — просто в тройку он не попал. Лечится не
+    угадыванием конкретного слова (у каждой ниши оно своё), а размером и
+    разнообразием выборки.
+    """
+
+    def test_model_is_asked_for_six_formulations(self):
+        from app.demand import FORMULATIONS_COUNT
+        assert FORMULATIONS_COUNT == 6
+        from app.demand import _FORMULATIONS_SYSTEM as sysmsg
+        assert "6" in sysmsg
+
+    def test_prompt_demands_different_types_not_just_more_of_the_same(self):
+        """Шесть пересказов одной фразы бесполезны так же, как три: промпт
+        обязан требовать РАЗНЫЕ типы запросов — услуга, широкая категория и
+        описание задачи своими словами."""
+        from app.demand import _FORMULATIONS_SYSTEM as sysmsg
+        low = sysmsg.lower()
+        assert "родовая" in low or "широк" in low
+        assert "задач" in low or "проблем" in low
+
+    def test_all_formulations_are_measured(self):
+        """Шесть фраз — шесть обращений в Вордстат, ни одна не теряется."""
+        asked = []
+        async def post(provider, payload):
+            if provider == "yandex":
+                return _yandex_response(json.dumps(
+                    [f"фраза {i}" for i in range(6)], ensure_ascii=False))
+            if provider == "wordstat":
+                asked.append(payload["phrase"])
+                return {"totalCount": 100}
+            return {"rawData": None}
+        asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
+        assert sorted(asked) == sorted(f"фраза {i}" for i in range(6))
+
+    def test_rows_are_sorted_by_frequency(self):
+        """Порядок, в котором фразы выдала LLM, читателю не значит ничего, а
+        первая строка читается как главная — наверху должна быть самая
+        ходовая формулировка."""
+        async def post(provider, payload):
+            if provider == "yandex":
+                return _yandex_response(json.dumps(["редкая", "ходовая", "средняя"],
+                                                   ensure_ascii=False))
+            if provider == "wordstat":
+                return {"totalCount": {"редкая": 10, "ходовая": 9000, "средняя": 500}[payload["phrase"]]}
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
+        assert [f["phrase"] for f in out["formulations"]] == ["ходовая", "средняя", "редкая"]
+        assert out["best_phrase"] == "ходовая"
+
+    def test_unmeasured_phrases_sink_to_the_bottom(self):
+        """Неизмеренную фразу не с чем сравнивать — она уходит вниз, но со
+        страницы не пропадает."""
+        async def post(provider, payload):
+            if provider == "yandex":
+                return _yandex_response(json.dumps(["есть", "нет данных"], ensure_ascii=False))
+            if provider == "wordstat":
+                if payload["phrase"] == "нет данных":
+                    raise RuntimeError("сбой сети именно на этой фразе")
+                return {"totalCount": 700}
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
+        assert [f["phrase"] for f in out["formulations"]] == ["есть", "нет данных"]
+        assert out["formulations"][-1]["count"] is None
+
+
+class TestMeasuredZeroIsNotAFailure:
+    """«Вордстат ответил, запросов нет» и «Вордстат не ответил» — разные
+    вещи. Раньше и то и другое давало count=None, и нормально измеренный
+    ноль показывался как «нет данных у Яндекса», то есть как поломка."""
+
+    def test_answered_without_total_count_is_zero_not_none(self):
+        async def post(provider, payload):
+            return {"topRequests": []}         # ответ есть, частотности нет
+        assert asyncio.run(wordstat_count("фраза", _post=post)) == 0
+
+    def test_transport_failure_is_still_none(self):
+        async def post(provider, payload):
+            raise RuntimeError("сети нет")
+        assert asyncio.run(wordstat_count("фраза", _post=post)) is None
+
+    def test_measured_zero_reads_as_weak_demand_not_unknown(self):
+        """Ноль — это ответ «не ищут», а не «проверка не состоялась»:
+        вердикт обязан быть weak, иначе страница объявит сбоем то, что
+        сбоем не является."""
+        async def post(provider, payload):
+            if provider == "yandex":
+                return _yandex_response(json.dumps(["а б", "в г"], ensure_ascii=False))
+            if provider == "wordstat":
+                return {"totalCount": 0}
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
+        assert out["verdict"]["level"] == "weak"
+        assert all(f["count"] == 0 for f in out["formulations"])
+
+    def test_result_page_separates_the_two_wordings(self):
+        text = _static_result()
+        assert "не удалось измерить" in text   # count === null
+        assert "не ищут" in text               # count === 0
+        assert "f.count === 0" in text         # ветка есть, а не просто слова в тексте
+        assert "нет данных у Яндекса" not in text   # прежняя склейка двух случаев
+
+
+def _static_result():
+    from pathlib import Path
+    return Path("static/result.html").read_text(encoding="utf-8")
+
+
+class TestCompetitorsAreBusinesses:
+    """Живой прогон показал в блоке «Конкуренты» Википедию, Ленту и женский
+    журнал. Для информационного запроса это правдивая выдача, но человеку
+    обещали тех, кто уже ПРОДАЁТ то же самое."""
+
+    def test_encyclopedias_and_media_are_filtered_out(self):
+        from app.demand import _is_not_competitor
+        for domain in ("ru.wikipedia.org", "lenta.ru", "www.woman.ru",
+                       "dzen.ru", "otvet.mail.ru", "vk.com", "youtube.com",
+                       "forum-mam.ru", "habr.com", "nalog.ru"):
+            assert _is_not_competitor(domain), domain
+
+    def test_real_businesses_survive_the_filter(self):
+        from app.demand import _is_not_competitor
+        for domain in ("ozon.ru", "avito.ru", "my-clinic.ru", "studio22.ru",
+                       "market.merch.ru", "informatika-shop.ru"):
+            assert not _is_not_competitor(domain), domain
+
+    def test_substring_match_does_not_eat_commercial_domains(self):
+        """«t.me» как подстрока живёт внутри «marke(t.me)rch.ru» — фильтр по
+        вхождению вырезал бы настоящего конкурента, поэтому сверяем домен
+        целиком."""
+        from app.demand import _is_not_competitor
+        assert not _is_not_competitor("market.merch.ru")
+        assert _is_not_competitor("t.me")
+
+    def _search_post(self, domains):
+        docs = "".join(f"<doc><url>https://{d}/x</url><title>Заголовок {d}</title></doc>"
+                       for d in domains)
+        xml = f'<y><found priority="all">15000</found>{docs}</y>'
+        async def post(provider, payload):
+            import base64 as _b64
+            return {"rawData": _b64.b64encode(xml.encode()).decode()}
+        return post
+
+    def test_only_businesses_reach_the_page(self):
+        out = asyncio.run(competitors("фраза", _post=self._search_post(
+            ["ru.wikipedia.org", "lenta.ru", "shop-one.ru", "dzen.ru", "shop-two.ru"])))
+        assert [c["domain"] for c in out["top"]] == ["shop-one.ru", "shop-two.ru"]
+        assert out["info_only"] is False
+
+    def test_all_informational_is_reported_as_a_finding(self):
+        """Отфильтровали всё — это не пустой блок, а находка: по запросу
+        читают, а не покупают. Страница обязана суметь это сказать."""
+        out = asyncio.run(competitors("фраза", _post=self._search_post(
+            ["ru.wikipedia.org", "lenta.ru", "www.woman.ru"])))
+        assert out["top"] == []
+        assert out["info_only"] is True
+
+    def test_page_renames_the_block_away_from_competitors(self):
+        text = _static_result()
+        assert "Кто уже продаёт это" in text
+        assert "info_only" in text
 
 
 class TestDemand:
@@ -1226,7 +1392,7 @@ class TestDemand:
         out = asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
         assert all(f["count"] is None for f in out["formulations"])
         assert out["verdict"]["level"] == "unknown"
-        assert out["competitors"] == {"found": None, "top": []}
+        assert out["competitors"] == {"found": None, "top": [], "info_only": False}
 
     def test_verdict_has_no_internal_jargon(self):
         """A4 из PRODUCT_ROADMAP: вердикт видят обе аудитории, включая
@@ -1257,13 +1423,16 @@ class TestDemand:
         assert _verdict(500)["level"] == "niche"
         assert _verdict(5000)["level"] == "strong"
 
-    def test_parse_search_xml_limits_top3(self):
+    def test_parse_search_xml_scans_with_reserve(self):
+        """Разбираем выдачу с запасом, а не ровно три: часть документов
+        отсеется как информационная (_is_not_competitor), и три коммерческих
+        сайта надо ещё из чего-то набрать. Обрезка до трёх — в competitors()."""
         docs = "".join(
             f"<doc><url>https://www.site{i}.ru/p</url><title>T{i}</title></doc>" for i in range(5))
         xml = f'<y><found priority="all">42</found>{docs}</y>'
         out = _parse_search_xml(xml)
         assert out["found"] == 42
-        assert len(out["top"]) == 3
+        assert len(out["top"]) == 5
         assert out["top"][0]["domain"] == "site0.ru"  # www. срезан
 
     def test_api_demand_endpoint_public(self):
@@ -3536,12 +3705,17 @@ class TestCustomerDevPass:
         хоронить живую идею.
 
         Исходная жалоба решается не враньём в другую сторону, а словами:
-        «нет данных у Яндекса» называет источник, поэтому не читается как
-        наша поломка. Плюс рядом теперь есть вердикт и блок «Проверка не
-        состоялась», которых тогда не было.
+        подпись «не удалось измерить» говорит о нашем замере, а не о рынке,
+        и вывода за Вордстат не делает. Плюс рядом есть вердикт и блок
+        «Проверка не состоялась», которых тогда не было.
+
+        Отдельно (2026-08-02): измеренный НОЛЬ больше не попадает в эту
+        ветку вовсе -- он приходит как `count = 0` и подписывается «не
+        ищут». Это честный ответ Вордстата, а не сбой, и раньше он
+        показывался тем же текстом, что и несостоявшийся замер.
         """
         result_text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
-        assert "нет данных у Яндекса" in result_text
+        assert "не удалось измерить" in result_text
         # вывод про рынок на месте отсутствующего числа больше не появляется
         assert "почти не ищут" not in result_text.split("v.level === 'weak'")[0]
         report_text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
@@ -6693,10 +6867,11 @@ class TestUnmeasuredDemandIsNotSoldAsMeasured:
             return rec.public_id
 
     def test_absent_number_is_not_called_a_market_finding(self):
-        """`count = None` означает «Вордстат не дал числа» (см.
-        докстринг wordstat_best), а не «спроса нет»."""
+        """`count = None` означает «Вордстат не дал числа» (см. докстринг
+        wordstat_best), а не «спроса нет». Ноль теперь читается отдельной
+        подписью «не ищут» — это ответ, а не сбой, и путать их нельзя."""
         text = client.get(f"/r/{self._check()}").text
-        assert "нет данных у Яндекса" in text
+        assert "не удалось измерить" in text
         assert "почти не ищут" not in text.split("v.level === 'weak'")[0]
 
     def test_page_says_the_check_did_not_happen(self):

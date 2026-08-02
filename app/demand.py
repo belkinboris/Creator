@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -47,9 +48,19 @@ SEARCH_URL = os.environ.get(
     "YANDEX_SEARCH_URL", "https://searchapi.api.cloud.yandex.net/v2/web/search"
 )
 RUSSIA_REGION = "225"  # geo-код России (строкой -- см. примеры в доке Wordstat API)
+SEARCH_DOCS_SCANNED = 15   # сколько документов выдачи разбираем, чтобы после отсева осталось 3
+COMPETITORS_SHOWN = 3      # сколько коммерческих сайтов показываем человеку
 
 MAX_IDEA_CHARS = 300
-FORMULATIONS_COUNT = 3
+# Сколько формулировок проверяем в Вордстате. Было 3, и этого не хватало:
+# на живом прогоне («приложение для измерения») LLM угадала максимум 941/мес,
+# а реальный ходовой запрос той же темы давал 3984/мес -- просто в тройку он
+# не попал. Дело не в конкретном слове-приставке (оно у каждой ниши своё), а
+# в размере выборки: чем больше РАЗНЫХ по типу формулировок мы проверим, тем
+# выше шанс попасть в ту, которой люди действительно пользуются. Запросы
+# уходят в Вордстат параллельно, поэтому удвоение их числа почти не удлиняет
+# ожидание (см. check_demand).
+FORMULATIONS_COUNT = 6
 
 # Пороги вердикта по суммарной месячной частотности лучшей формулировки.
 # Калибровка: <300/мес -- спроса в поиске почти нет; 300..3000 -- нишевый
@@ -59,15 +70,19 @@ THRESHOLD_STRONG = 3000
 
 _FORMULATIONS_SYSTEM = (
     "Ты помогаешь проверить спрос на бизнес-идею через статистику поиска Яндекса. "
-    "По описанию идеи составь ровно 3 коротких поисковых запроса (2-4 слова каждый), "
-    "которыми потенциальный КЛИЕНТ искал бы такую услугу или товар. "
-    "Это должны быть массовые, ходовые формулировки -- как реально пишут в Яндексе, "
-    "а не точный пересказ идеи: убирай уточнения вроде точного возраста, района, "
-    "состава услуги -- если с ними никто не ищет, пользы в них нет. Если идея узкая, "
-    "хотя бы одну из трёх формулировок сделай более широкой (родовая категория товара "
-    "или услуги), чтобы не мерить спрос на нулевой хвост запросов. Запросы должны быть "
-    "разными по формулировке, без названий брендов, без кавычек, строчными буквами. "
-    "Ответь ТОЛЬКО JSON-массивом из 3 строк, без пояснений."
+    "По описанию идеи составь 6 РАЗНЫХ поисковых запросов, которыми люди реально "
+    "ищут в Яндексе то, о чём эта идея.\n"
+    "Главная цель -- попасть в ХОДОВЫЕ, массовые формулировки. Точный пересказ идеи "
+    "почти всегда даёт нулевую частотность: люди формулируют иначе, чем автор идеи. "
+    "Поэтому обязательно смешивай разные ТИПЫ запросов:\n"
+    "- 2 запроса: как человек назвал бы саму услугу или товар (коротко, 2-4 слова);\n"
+    "- 2 запроса: более широкая, родовая категория, в которую эта идея входит;\n"
+    "- 2 запроса: как человек описывает свою задачу или проблему своими словами, "
+    "даже если он ещё не знает, что такая услуга существует.\n"
+    "Убирай уточнения (точный возраст, район, состав услуги) -- с ними почти не ищут. "
+    "Запросы должны отличаться друг от друга, без названий брендов, без кавычек, "
+    "строчными буквами.\n"
+    "Ответь ТОЛЬКО JSON-массивом из 6 строк, без пояснений."
 )
 
 _IDEA_SYSTEM = (
@@ -198,12 +213,16 @@ async def wordstat_best(phrase: str, *, _post=None) -> dict:
     """Частотность формулировки + при необходимости более популярная похожая
     формулировка от самого Вордстата. Возвращает {"phrase": str, "count":
     int|None} -- phrase в ответе может отличаться от входной, см. _best_related.
-    count=None = Вордстат недоступен/без данных -- штатная деградация, не ошибка."""
+    count=None означает РОВНО одно: Вордстат не ответил (нет ключей, сеть,
+    квота) -- измерение не состоялось. «Ответил, но таких запросов нет» -- это
+    count=0, а НЕ None: для человека на экране это разные вещи («почти не
+    ищут» против «нет данных у Яндекса»), и склеивать их в одно значило
+    объявлять сбоем нормально измеренный ноль (замечено на живом прогоне)."""
     raw = await _wordstat_raw(phrase, _post=_post)
     if raw.get("ok"):
         data = raw.get("data") or {}
         count = data.get("totalCount")
-        count = int(count) if count is not None else None
+        count = int(count) if count is not None else 0
         return _best_related(data, phrase, count)
     if "status" in raw or "error" in raw:
         logger.warning("wordstat path failed for %r: %s", phrase, raw)
@@ -247,9 +266,56 @@ def _parse_search_xml(xml_text: str) -> dict:
         domain = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
         if domain:
             top.append({"title": title[:120], "domain": domain})
-        if len(top) >= 3:
+        # Берём с запасом: часть выдачи отсеется как информационная
+        # (см. _is_not_competitor), и три коммерческих сайта надо ещё набрать.
+        if len(top) >= SEARCH_DOCS_SCANNED:
             break
     return {"found": found, "top": top}
+
+
+# Сайты, которые честно попадают в топ выдачи, но конкурентами НЕ являются:
+# энциклопедии, СМИ, лайфстайл-журналы, вопросы-ответы и форумы, соцсети и
+# видеохостинги, блог-платформы, госресурсы. На живом прогоне блок
+# «Конкуренты» показал Википедию, Ленту и женский журнал -- для
+# информационного запроса это нормальная выдача, но мы-то обещали человеку
+# показать, КТО УЖЕ ПРОДАЁТ то же самое. Список сознательно консервативный:
+# ложно отсеять реальный бизнес хуже, чем пропустить одну статью.
+_NOT_COMPETITOR_BASES = frozenset({
+    # энциклопедии и справочники
+    "wikipedia.org", "wikimedia.org", "academic.ru", "gramota.ru", "bigenc.ru",
+    # СМИ
+    "lenta.ru", "ria.ru", "rbc.ru", "tass.ru", "kommersant.ru", "vedomosti.ru",
+    "gazeta.ru", "iz.ru", "aif.ru", "kp.ru", "mk.ru", "rg.ru", "forbes.ru",
+    "fontanka.ru", "e1.ru", "championat.com", "sport-express.ru", "interfax.ru",
+    # лайфстайл-журналы и порталы «про жизнь»
+    "cosmo.ru", "elle.ru", "woman.ru", "wday.ru", "adme.ru", "the-village.ru",
+    "passion.ru", "marieclaire.ru", "psychologies.ru", "takiedela.ru",
+    # вопросы-ответы, отзывы, форумы
+    "otvet.mail.ru", "reddit.com", "quora.com", "stackoverflow.com",
+    "pikabu.ru", "irecommend.ru", "otzovik.com", "woman.ru",
+    # соцсети, видео, блог-платформы, коллективные блоги
+    "vk.com", "ok.ru", "dzen.ru", "zen.yandex.ru", "youtube.com", "youtu.be",
+    "rutube.ru", "t.me", "telegram.org", "instagram.com", "facebook.com",
+    "tiktok.com", "twitter.com", "x.com", "livejournal.com", "blogspot.com",
+    "wordpress.com", "vc.ru", "habr.com", "journal.tinkoff.ru",
+    # госресурсы и правовые базы
+    "gosuslugi.ru", "nalog.ru", "consultant.ru", "garant.ru", "pravo.gov.ru",
+})
+
+
+def _is_not_competitor(domain: str) -> bool:
+    """Домен из выдачи — информационный, а не бизнес-конкурент?
+
+    Сверяем по базовому домену целиком (совпадение или поддомен), а не по
+    вхождению подстроки: подстрока «t.me» живёт внутри вполне коммерческого
+    «marke**t.me**rch.ru», и такой фильтр вырезал бы настоящих конкурентов.
+    """
+    d = (domain or "").lower().removeprefix("www.")
+    if any(d == base or d.endswith("." + base) for base in _NOT_COMPETITOR_BASES):
+        return True
+    # Форумы называются форумами -- это единственное правило по подстроке, и
+    # оно достаточно длинное, чтобы не задеть обычные слова.
+    return "forum" in d
 
 
 async def competitors(phrase: str, *, _post=None) -> dict:
@@ -257,7 +323,7 @@ async def competitors(phrase: str, *, _post=None) -> dict:
     при любой проблеме -- сервис продолжает работать без блока конкурентов."""
     api_key = os.environ.get("YANDEX_API_KEY")
     folder_id = os.environ.get("YANDEX_FOLDER_ID")
-    empty = {"found": None, "top": []}
+    empty = {"found": None, "top": [], "info_only": False}
     if (_post is None) and (not api_key or not folder_id):
         return empty
     payload = {
@@ -279,7 +345,16 @@ async def competitors(phrase: str, *, _post=None) -> dict:
         raw = data.get("rawData")
         if not raw:
             return empty
-        return _parse_search_xml(base64.b64decode(raw).decode("utf-8", errors="replace"))
+        parsed = _parse_search_xml(base64.b64decode(raw).decode("utf-8", errors="replace"))
+        scanned = parsed.get("top") or []
+        business = [d for d in scanned if not _is_not_competitor(d["domain"])]
+        # Топ занят статьями, а бизнесов в выдаче нет -- это не пустой блок,
+        # а самостоятельная находка: по этому запросу люди ИЩУТ ИНФОРМАЦИЮ,
+        # а не покупают. Показать это честно полезнее, чем выдать Википедию
+        # за конкурента (как было) или молча оставить пустоту.
+        return {"found": parsed.get("found"),
+                "top": business[:COMPETITORS_SHOWN],
+                "info_only": bool(scanned) and not business}
     except Exception:
         logger.warning("competitors failed for %r", phrase, exc_info=True)
         return empty
@@ -315,7 +390,10 @@ async def check_demand(idea: str, *, _post=None) -> dict:
     """Полная бесплатная проверка: формулировки -> частотности -> конкуренты
     по лучшей формулировке -> вердикт."""
     phrases = await generate_formulations(idea, _post=_post)
-    results = [await wordstat_best(p, _post=_post) for p in phrases]
+    # Параллельно, а не по очереди: формулировок теперь вдвое больше
+    # (FORMULATIONS_COUNT), и последовательные вызовы удвоили бы ожидание на
+    # шаге, который человек и так ждёт ~20 секунд. Запросы независимы.
+    results = await asyncio.gather(*(wordstat_best(p, _post=_post) for p in phrases))
     rows = []
     for p, r in zip(phrases, results):
         row = {"phrase": p, "count": r["count"]}
@@ -325,15 +403,18 @@ async def check_demand(idea: str, *, _post=None) -> dict:
             # исходной фразе (см. wordstat_best/_best_related).
             row["matched_phrase"] = r["phrase"]
         rows.append(row)
-    counts = [r["count"] for r in rows]
-    known = [c for c in counts if c is not None]
-    best_idx = counts.index(max(known)) if known else 0
+    # От самой ходовой формулировки к самой редкой. Порядок, в котором их
+    # выдала LLM, для читателя не значит ничего, а первая строка списка
+    # читается как главная -- пусть главной и будет та, которую реально ищут.
+    # Неизмеренные (count=None) уходят вниз: сравнивать их не с чем.
+    rows.sort(key=lambda r: (r["count"] is None, -(r["count"] or 0)))
     # Конкурентов и "лучшую формулировку" ищем по реально ходовой фразе, если
     # Вордстат её подсказал -- иначе искали бы конкурентов не по тому запросу,
     # который на самом деле приносит трафик.
-    search_phrase = rows[best_idx].get("matched_phrase") or phrases[best_idx]
+    top_row = rows[0] if rows else {"phrase": "", "count": None}
+    search_phrase = top_row.get("matched_phrase") or top_row["phrase"]
     comp = await competitors(search_phrase, _post=_post)
-    best = max(known) if known else None
+    best = top_row["count"]
     llm_scores = await score_idea(idea, rows, comp, _post=_post)
     scores = [{"key": "demand", "label": "Спрос", "value": _demand_score(best), "note": ""}]
     scores += llm_scores or []

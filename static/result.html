@@ -296,11 +296,14 @@
 
   <section class="step" data-step="2" id="step-2">
     <div class="step-summary" onclick="reopen(2)">
-      <span class="step-summary-title"><span class="ok-mark">✓</span>Конкуренты</span>
+      <span class="step-summary-title"><span class="ok-mark">✓</span>Кто уже продаёт это</span>
       <span class="step-summary-detail" id="sum-2"></span>
     </div>
     <div class="step-body">
-      <div class="step-title">Конкуренты</div>
+      <!-- Не «Конкуренты»: в выдаче попадаются и статьи. Информационные сайты
+           теперь отсеиваются на сервере (_is_not_competitor), но название
+           всё равно должно обещать ровно то, что показано. -->
+      <div class="step-title">Кто уже продаёт это</div>
       <div id="comps"></div>
       <div class="step-next"><button class="btn" type="button" onclick="advance(2)" id="step2-next"></button></div>
     </div>
@@ -415,9 +418,15 @@ document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
   <div class="freq-item">
     <div class="freq-row">
       <span class="freq-phrase">${escapeHtml(f.phrase)}</span>
+      <!-- Ноль и «не смогли посчитать» -- разные вещи, и подпись обязана их
+           различать. Прежняя общая формулировка про отсутствие данных у
+           Яндекса вставала и на нормально измеренном нуле, где читалась как
+           поломка сервиса, хотя ноль -- это и есть ответ (B10). -->
       <span>${f.count === null
-        ? '<span class="freq-num na">нет данных у Яндекса</span>'
-        : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`}
+        ? '<span class="freq-num na">не удалось измерить</span>'
+        : (f.count === 0
+          ? '<span class="freq-num na">не ищут</span>'
+          : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`)}
       </span>
     </div>
     ${f.matched_phrase ? `<span class="freq-match">Число посчитано по более ходовой формулировке, которую подсказал Вордстат: «${escapeHtml(f.matched_phrase)}»</span>` : ''}
@@ -470,14 +479,25 @@ if (hasScores) {
 }
 
 const comp = DATA.competitors || {};
-const hasComp = !!(comp.top && comp.top.length);
+// Шаг показывается и когда бизнесов не нашлось: «топ занят статьями» —
+// это находка о нише (люди читают, а не покупают), а не пустой блок.
+const hasComp = !!((comp.top && comp.top.length) || comp.info_only);
 if (hasComp) {
-  const found = comp.found ? `<div class="fine" style="margin-bottom:8px">В выдаче по запросу «${escapeHtml(DATA.best_phrase||'')}» — ${fmt(comp.found)} страниц. Топ сейчас занимают:</div>` : '';
-  document.getElementById('comps').innerHTML = found + comp.top.map(c => `
+  const found = comp.found ? `<div class="fine" style="margin-bottom:8px">В выдаче по запросу «${escapeHtml(DATA.best_phrase||'')}» — ${fmt(comp.found)} страниц.</div>` : '';
+  if (comp.top && comp.top.length) {
+    document.getElementById('comps').innerHTML = found
+      + '<div class="fine" style="margin-bottom:8px">Из них продают то же самое:</div>'
+      + comp.top.map(c => `
     <div class="comp-item">
       <a class="comp-name" href="https://${encodeURI(c.domain)}" target="_blank" rel="noopener">${escapeHtml(serviceName(c.domain))} <span class="arrow">↗</span></a>
       <div class="comp-title">${escapeHtml(c.title)}</div>
     </div>`).join('');
+  } else {
+    document.getElementById('comps').innerHTML = found + `
+      <div class="verdict niche">Прямых конкурентов в топе нет: выдачу занимают статьи,
+      энциклопедии и форумы. Это значит, что по этому запросу люди пока ищут информацию,
+      а не покупают, — продавать здесь можно, но спрос придётся создавать самому.</div>`;
+  }
 }
 
 if (new URLSearchParams(location.search).get('paid') === '1') {
@@ -606,7 +626,7 @@ if (v.level === 'weak') {
   document.getElementById('alt-report').className = 'alt-path';
 }
 
-const ARRIVAL = {2: 'конкуренты', 3: 'оценка идеи', 4: 'заострим идею',
+const ARRIVAL = {2: 'кто уже продаёт это', 3: 'оценка идеи', 4: 'заострим идею',
                  5: AUDIENCE.plan_first ? 'бизнес-план' : 'живой тест'};
 const STEP_ORDER = [1, hasComp ? 2 : null, hasScores ? 3 : null, 4, 5].filter(Boolean);
 
@@ -627,8 +647,9 @@ function summarizeStep1(){
 }
 function summarizeStep2(){
   if (!hasComp) return '';
+  if (!comp.top || !comp.top.length) return 'прямых конкурентов в топе нет';
   const names = comp.top.slice(0, 2).map(c => serviceName(c.domain)).join(', ');
-  return comp.found ? `${fmt(comp.found)} страниц, топ — ${names}` : `топ — ${names}`;
+  return comp.found ? `${fmt(comp.found)} страниц, продают — ${names}` : `продают — ${names}`;
 }
 function summarizeStep3(){
   const ov = DATA.overall;
