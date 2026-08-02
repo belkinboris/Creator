@@ -94,7 +94,7 @@ class TestOfferEngine:
         платный отчёт (F1-F3)."""
         for purpose, phrase in (
             ("social_contract", "Готовлю обоснование для соцзащиты"),
-            ("student", "Делаю студенческий проект"),
+            ("student", "Придумал(а) идею, хочу проверить"),
         ):
             payload_capture = {}
             async def fake_post(provider, payload):
@@ -167,8 +167,17 @@ DEMAND_DATA_FIXTURE = {
     "formulations": [{"phrase": "ответы на отзывы вайлдберриз", "count": 5200}],
     "verdict": {"level": "strong", "text": "Спрос есть"},
     "competitors": {"found": 15000, "top": [{"title": "Т", "domain": "t.ru"}]},
-    "scores": [{"key": "demand", "label": "Спрос", "value": 8, "note": ""}],
-    "overall": {"value": 8, "weakest": "Спрос"},
+    # Подобраны так, чтобы медиана A16 (см. generate_core) на модельных 62
+    # давала ровно 62 -- пул [40,50,62,70,80], без этого пришлось бы
+    # переписывать assert на "62" во всех остальных тестах этого класса,
+    # которым сама оценка не важна.
+    "scores": [
+        {"key": "demand", "label": "Спрос", "value": 8, "note": ""},
+        {"key": "competition", "label": "Конкуренция", "value": 7, "note": ""},
+        {"key": "timing", "label": "Своевременность", "value": 5, "note": ""},
+        {"key": "execution", "label": "Реализуемость", "value": 4, "note": ""},
+    ],
+    "overall": {"value": 6, "weakest": "Реализуемость"},
 }
 
 
@@ -181,15 +190,19 @@ def _core_body(risk_count=2) -> dict:
     }
 
 
-def _fake_llm(risk_count=2, body="Абзац один.\n\nАбзац два.", captured=None):
+def _fake_llm(risk_count=2, body="Абзац один.\n\nАбзац два.", captured=None, table=None):
     """Один фейк на оба вида вызова: движок ходит в модель отдельно за ядром
-    (балл + риски) и отдельно за каждым разделом."""
+    (балл + риски) и отдельно за каждым разделом. `table` -- для секций с
+    wants_table (сейчас только "finance"), см. app/report_engine.py."""
     async def fake_post(provider, payload):
         if captured is not None:
             captured.setdefault("calls", []).append(dict(payload))
             captured.update(payload)
         if "Ты пишешь ОДИН раздел" in payload.get("instructions", ""):
-            return _yandex_response(json.dumps({"body": body}, ensure_ascii=False))
+            section_body = {"body": body}
+            if table is not None:
+                section_body["table"] = table
+            return _yandex_response(json.dumps(section_body, ensure_ascii=False))
         return _yandex_response(json.dumps(_core_body(risk_count), ensure_ascii=False))
     return fake_post
 
@@ -249,6 +262,32 @@ class TestReportEngine:
         assert len(ALL_SECTIONS) >= 20
         assert len(out["sections"]) == len(ALL_SECTIONS)
         assert len(out["top_risks"]) == 4
+
+    def test_viability_score_is_reconciled_with_free_check_scores(self):
+        """A16 (PRODUCT_ROADMAP): бесплатная проверка и платный отчёт не
+        должны спорить о том, насколько идея хороша, каждый своим числом.
+        Модель судит независимо (тут — 95, идея почти идеальна), но 4 шкалы
+        бесплатной проверки говорят другое (спрос/конкуренция/своевременность/
+        реализуемость по 8-10 из фикстуры "62"-варианта заменены на низкие
+        значения) -- итог должен сесть на медиану, а не остаться сырым
+        мнением модели и не рухнуть до жёсткого минимума."""
+        from app.report_engine import generate_core
+        demand_data = dict(DEMAND_DATA_FIXTURE, scores=[
+            {"key": "demand", "label": "Спрос", "value": 2, "note": ""},
+            {"key": "competition", "label": "Конкуренция", "value": 3, "note": ""},
+            {"key": "timing", "label": "Своевременность", "value": 2, "note": ""},
+            {"key": "execution", "label": "Реализуемость", "value": 3, "note": ""},
+        ])
+
+        async def fake_post(provider, payload):
+            body = {"viability_score": 95, "viability_summary": "с", "top_risks": [
+                {"title": f"Риск {i}", "body": "б"} for i in range(2)]}
+            return _yandex_response(json.dumps(body, ensure_ascii=False))
+
+        out = asyncio.run(generate_core(self.IDEA, demand_data, "quick", _post=fake_post))
+        # Пул на 0-100: [20, 30, 20, 30, 95] -> медиана 30. Не 95 (модель не
+        # оторвана от измеренного) и не 20 (не жёсткий минимум-потолок).
+        assert out["viability_score"] == 30, out["viability_score"]
 
     def test_sections_are_grouped(self):
         """Плоский список из 20 разделов невозможно читать — нужны группы."""
@@ -320,7 +359,7 @@ class TestReportEngine:
 
     def test_reader_reaches_both_core_and_section_prompts(self):
         """`Audience.reader` описывал, кто на самом деле читает разбор
-        («комиссия соцзащиты», «преподаватель или жюри»), но само поле нигде
+        («комиссия соцзащиты», «сам человек» у student), но само поле нигде
         не читалось -- модель ничего не знала о конкретном читателе, кроме
         того, что можно было косвенно вывести из persona."""
         from app.report_engine import _core_prompt, _section_prompt, PURPOSES
@@ -333,10 +372,12 @@ class TestReportEngine:
     def test_purpose_reaches_the_model_prompt(self):
         from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
         cap = {}
-        asyncio.run(generate_section("finance", "Пошив штор на заказ на дому",
-                                     DEMAND_DATA_FIXTURE, "full",
-                                     purpose=PURPOSE_SOCIAL_CONTRACT,
-                                     _post=_fake_llm(body="Смета: 50 000 ₽.", captured=cap)))
+        asyncio.run(generate_section(
+            "finance", "Пошив штор на заказ на дому",
+            DEMAND_DATA_FIXTURE, "full", purpose=PURPOSE_SOCIAL_CONTRACT,
+            _post=_fake_llm(body="Смета: 50 000 ₽.", captured=cap,
+                            table={"caption": "Смета", "rows": [{"item": "Ткань", "sum": 50000}],
+                                   "total": 50000})))
         flat = " ".join(cap["instructions"].split())
         assert "комиссии по социальному контракту" in flat
 
@@ -373,8 +414,34 @@ class TestReportEngine:
         out = asyncio.run(generate_section(
             "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
             purpose=PURPOSE_SOCIAL_CONTRACT,
-            _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.")))
+            _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.",
+                            table={"caption": "Смета расходов", "rows": [
+                                {"item": "Аренда", "sum": 15000},
+                                {"item": "Материалы", "sum": 10000}], "total": 25000})))
         assert "15 000" in out["body"]
+        assert out["table"]["total"] == 25000
+
+    def test_finance_section_without_table_rejected_for_estimate_required_audience(self):
+        """F: соц-план.рф (владелец, 2026-08-02) -- смета таблицей построчно,
+        не абзацем. Для соцконтракта (Audience.estimate_required) таблица —
+        такая же часть услуги, за которую заплатили, как и суммы в body."""
+        from app.report_engine import generate_section, ReportEngineError, PURPOSE_SOCIAL_CONTRACT
+        with pytest.raises(ReportEngineError):
+            asyncio.run(generate_section(
+                "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+                purpose=PURPOSE_SOCIAL_CONTRACT,
+                _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.")))
+
+    def test_finance_table_optional_for_business(self):
+        """Для фаундера таблица — приятное дополнение, не обязательное
+        условие: смета не единственное, за чем он платит (в отличие от
+        соцконтракта)."""
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="Стартовые затраты около 50 000 ₽.")))
+        assert "table" not in out
 
     def test_finance_section_without_numbers_still_accepted_for_business(self):
         """Проверка узкая для той аудитории, где смета — единственное, за чем
@@ -424,6 +491,51 @@ class TestReportEngine:
         user_content = cap["input"]
         assert "5200" in user_content or "5 200" in user_content
         assert "t.ru" in user_content
+
+    def test_viability_label_is_deterministic_not_llm(self):
+        """F: dimeadozen.ai (владелец, 2026-08-02) -- короткая метка рядом с
+        баллом ("Strong execution path"), но у нас -- код, не LLM: тот же
+        принцип, что у compute_verdict в demand.py, вердикт не должен звучать
+        по-разному от прогона к прогону на один и тот же балл."""
+        from app.report_engine import _viability_label
+        assert _viability_label(96) == "Сильная позиция для запуска"
+        assert _viability_label(80) == "Сильная позиция для запуска"
+        assert _viability_label(79) == "Рабочий вариант, есть слабые места"
+        assert _viability_label(60) == "Рабочий вариант, есть слабые места"
+        assert _viability_label(59) == "Нужна доработка перед запуском"
+        assert _viability_label(40) == "Нужна доработка перед запуском"
+        assert _viability_label(39) == "Рискованно запускать в текущем виде"
+        assert _viability_label(1) == "Рискованно запускать в текущем виде"
+
+    def test_generate_core_includes_viability_label(self):
+        from app.report_engine import generate_core
+        out = asyncio.run(generate_core(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                        _post=_fake_llm()))
+        assert out["viability_label"]
+
+    def test_parse_table_filters_malformed_rows_and_computes_total(self):
+        from app.report_engine import _parse_table
+        table = _parse_table({
+            "caption": "Смета",
+            "rows": [
+                {"item": "Аренда", "sum": 15000},
+                {"item": "", "sum": 5000},          # без названия -- отбросить
+                {"item": "Без суммы"},               # без суммы -- отбросить
+                {"item": "Реклама", "sum": "много"},  # сумма не число -- отбросить
+                {"item": "Материалы", "sum": 10000},
+            ],
+            # total не задан -- должен посчитаться сам из валидных строк
+        })
+        assert table["rows"] == [{"item": "Аренда", "sum": 15000}, {"item": "Материалы", "sum": 10000}]
+        assert table["total"] == 25000
+
+    def test_parse_table_returns_none_for_garbage(self):
+        from app.report_engine import _parse_table
+        assert _parse_table(None) is None
+        assert _parse_table("не таблица") is None
+        assert _parse_table({"rows": "тоже не список"}) is None
+        assert _parse_table({"rows": []}) is None
+        assert _parse_table({"rows": [{"item": "", "sum": 1}]}) is None
 
 
 class TestLandingAndLaunch:
@@ -2349,6 +2461,61 @@ class TestFooterLinks:
         self._assert_footer(client.get("/social-contract").text, "соцконтракт-страницы")
 
 
+class TestAccountLinkEverywhere:
+    """Пункт 2 сырого фидбека владельца (2026-07-31): ссылка в /account была
+    только на главной -- уйдя на любую другую публичную страницу, человек не
+    мог вернуться в кабинет без ручного перехода на `/`."""
+
+    def _assert_account_link(self, text, page_name):
+        assert 'href="/account"' in text, f"Нет ссылки /account на {page_name}"
+
+    def test_index_has_account_link(self):
+        self._assert_account_link(client.get("/").text, "главной")
+
+    def test_social_contract_has_account_link(self):
+        self._assert_account_link(client.get("/social-contract").text, "соцконтракт-витрины")
+
+    def test_students_has_account_link(self):
+        self._assert_account_link(client.get("/students").text, "студенческой витрины")
+
+    def test_guide_direct_has_account_link(self):
+        self._assert_account_link(client.get("/guide/direct").text, "гайда по Директу")
+
+    def test_result_page_has_account_link(self):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест", "count": 100}],
+                    "best_phrase": "тест", "verdict": {"level": "unknown", "text": "Нет данных"},
+                    "competitors": {"found": 0, "top": []},
+                    "scores": [], "overall": {"value": 0, "weakest": ""}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand",
+                              json={"idea": "Достаточно длинная идея для проверки ссылки в кабинет"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        self._assert_account_link(client.get(f"/r/{pub(rid)}").text, "страницы результата")
+
+    def test_project_page_has_account_link(self):
+        client.post("/api/launch", headers=OWNER, json={"idea_text": "т",
+            "offer": dict(VALID_OFFER, idea_id="acct_link_proj_v1", product_name="КабинетСсылкаПроект")})
+        self._assert_account_link(client.get("/p/acct_link_proj_v1").text, "страницы проекта")
+
+    def test_homepage_nav_drops_the_redundant_path_link(self):
+        """Пункт 1 сырого фидбека владельца (2026-07-31): «путь 1→7» в шапке
+        главной -- избыточная навигация вида "1→7", отдельная от per-проектной
+        метки «Этап N из 7» на /r/, /p/ и /guide/direct. Убрана только ссылка
+        в шапке -- сам раздел #path (семь ступеней) остаётся на странице как
+        был, просто без дублирующего якоря в nav."""
+        import re
+        text = client.get("/").text
+        header = text[text.index("<header>"):text.index("</header>")]
+        assert "Путь 1→7" not in header
+        assert 'href="#path"' not in header
+        assert re.search(r'id="path"', text), "раздел «Путь от идеи до денег» пропал совсем"
+
+
 class TestSocialContractPage:
     """Отдельная посадочная страница под рекламу на аудиторию социального
     контракта -- не часть общего позиционирования сайта (см. CLAUDE.md),
@@ -2401,6 +2568,71 @@ class TestSocialContractPage:
         assert "IBM Plex" in text
         assert "#FBF6EA" in text
         assert "Manrope" not in text and "Onest" not in text
+
+    def test_business_plan_is_highlighted_in_the_headline(self):
+        """Пункт 13 сырого фидбека владельца (2026-07-31): «Бизнес-план» в
+        заголовке витрины должен быть выделен жёлтым маркером, как остальные
+        акцентные слова на сайте, а не идти обычным текстом."""
+        text = client.get("/social-contract").text
+        assert '<span class="hl">Бизнес-план</span>' in text
+
+    def test_path_map_is_visible_from_this_storefront_too(self):
+        """Часть пункта 14 сырого фидбека владельца (2026-07-31): карта пути
+        0->6 раньше была только на главной -- пришедший через рекламу на
+        /social-contract или /students не видел общую картину сервиса.
+        Секция теперь общая (audience-landing.html), а не главная-only."""
+        for path in ("/social-contract", "/students"):
+            text = client.get(path).text
+            assert 'id="path"' in text, path
+            assert "Путь от идеи до денег" in text, path
+            assert text.count('class="step"') == 7, path
+
+    def test_fast_plan_button_only_on_social_contract(self):
+        """F10: кнопка-обгон «Сразу сделать бизнес-план» — только у
+        соцконтракта (владелец описал именно эту аудиторию), не у бизнеса
+        или студента. Задаётся в реестре (app/audiences.py), не в шаблоне —
+        третья копия разъехалась бы, как разъезжались цены (B5)."""
+        assert 'id="plan-btn"' in client.get("/social-contract").text
+        assert "Сразу сделать бизнес-план" in client.get("/social-contract").text
+        assert 'id="plan-btn"' not in client.get("/students").text
+        assert 'id="plan-btn"' not in client.get("/").text
+
+    def test_fast_plan_button_still_checks_demand_but_skips_to_report(self):
+        """F10: владелец согласился на «обгон» с условием -- проверка спроса
+        всё равно считается в фоне (цифры Вордстата всё так же кормят платный
+        отчёт), просто человек не видит промежуточный /r/. Проверяем именно
+        это в JS-источнике: обе кнопки зовут один и тот же /api/demand, но
+        целятся в разные страницы после."""
+        text = client.get("/social-contract").text
+        assert "submitIdea(btn, planBtn, '/r/')" in text
+        assert "submitIdea(planBtn, btn, '/report/')" in text
+        assert text.count("fetch('/api/demand'") == 1, "должен остаться ОДИН путь проверки спроса, не два разных"
+
+    def test_fast_plan_flow_lands_on_a_working_report_page(self):
+        """Сквозная проверка того, что реально произойдёт по клику: тот же
+        /api/demand с purpose=social_contract, а следующая станица -- уже
+        существующий /report/{id}, который и без этой кнопки умеет показывать
+        тарифы до оплаты (см. app/main.py:report_page). Никакой новой
+        бэкенд-логики не потребовалось, только другой адрес редиректа."""
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "тест", "count": 100}],
+                    "best_phrase": "тест", "verdict": {"level": "unknown", "text": "Нет данных"},
+                    "competitors": {"found": 0, "top": []},
+                    "scores": [], "overall": {"value": 0, "weakest": ""}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            r = client.post("/api/demand", json={
+                "idea": "Пошив штор и постельного белья на заказ на дому в своём районе",
+                "purpose": "social_contract"})
+        finally:
+            m.check_demand = orig
+        assert r.status_code == 200
+        pub = r.json()["public_id"]
+        report = client.get(f"/report/{pub}")
+        assert report.status_code == 200
+        assert "оффер" not in report.text.lower() and "лендинг" not in report.text.lower()
 
 
 class TestProjectPage:
@@ -4040,6 +4272,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__PAGE_TITLE__", "__META__", "__FIELD_LABEL__", "__PLACEHOLDER__",
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
+            "__FAST_PLAN_BTN__",
             # страница результата -- audiences.for_page / _optics_html
             "__AUDIENCE_JSON__", "__OPTICS__",
             # страница подтверждения входа -- заполняет _verify_page
@@ -5030,6 +5263,43 @@ class TestFunnelMiddleIsMeasured:
         for name, title in m.METRIKA_GOALS:
             assert re.fullmatch(r"[a-z][a-z0-9_]*", name), name
             assert title and title[0].isupper(), name
+
+    def test_paid_goals_carry_order_value_for_direct_bidding(self):
+        """Перед Директом (D3, владелец 2026-08-01): автостратегии Директа
+        оптимизируются по деньгам, а не по факту клика на «reachGoal» -- без
+        `order_price` цель для них равнозначна пустой галочке. Проверяем
+        именно на подтверждённых оплатах (не на "заказал"/"начал" — там ещё
+        нет гарантии, что деньги реально пришли)."""
+        pages = self._all_static()
+
+        def stmt_for(text, goal):
+            i = text.index(f"'{goal}'")
+            start = text.rfind("sozGoal(", 0, i)
+            return text[start:text.find(";", i) + 1]
+
+        for goal in ("report_paid_quick", "report_paid_full"):
+            stmt = stmt_for(pages["report.html"], goal)
+            assert "order_price" in stmt and "currency" in stmt, f"{goal}: нет суммы для Директа"
+        stmt = stmt_for(pages["result.html"], "live_test_paid")
+        assert "order_price" in stmt and "currency" in stmt, "live_test_paid: нет суммы для Директа"
+
+    def test_live_test_payment_confirmation_is_a_separate_goal_from_order_started(self):
+        """До этой правки после оплаты живого теста Метрика не получала НИ
+        ОДНОЙ цели о подтверждённой оплате — только "live_test_ordered" на
+        старте заказа (который мог и не завершиться оплатой). Для отчёта по
+        деньгам и для value-based bidding в Директе это была дыра."""
+        text = self._all_static()["result.html"]
+        assert "sozGoal('live_test_paid'" in text
+        assert "'live_test_ordered'" in text
+        assert "live_test_paid" != "live_test_ordered"
+
+    def test_live_test_paid_goal_is_deduped(self):
+        """Тот же паттерн, что у report_paid_* -- повторный визит по старой
+        ссылке ?paid=1 не должен задваивать конверсию в Метрике."""
+        text = self._all_static()["result.html"]
+        i = text.index("live_test_paid")
+        around = text[max(0, i - 400):i]
+        assert "localStorage" in around, "нет дедупа через localStorage"
 
 
 class TestOwnerFunnel:
@@ -7578,23 +7848,22 @@ class TestVisitorCanFindHisOwnEntrance:
 class TestStudentAudience:
     """F3: третья аудитория — студенты, и общий шаблон витрины.
 
-    Владелец: «я помню, как у меня в студенчестве идеи генерировались
-    фонтаном», и ему самому не хватало способа идею верифицировать. Для
-    защиты студенту сильнее бизнес-плана работает **тест на реальных людях**:
-    на защите он говорит не «я придумал», а «я проверил, вот цифры».
-    Бизнес-план ему продаём другими словами — не венчурный разбор, а «как это
-    запустить и обо что ты споткнёшься». Цены единые для всех аудиторий —
-    решение владельца.
+    **Позиционирование переписано 2026-08-02** (владелец): первая версия
+    строилась на неверном предположении — курсовая/диплом/защита. На деле
+    замысел был другой: молодой человек уверен, что его идея сделает его
+    богатым, и готов заплатить за честную проверку, пока сам не потратил на
+    неё время и деньги. Курсовая тут почти ни при чём. Реальная нужда та же,
+    что у business (проверить идею честно, без поблажек), просто аудитория
+    моложе — поэтому персона и критерий баллов у student теперь намеренно
+    близки к business, не смягчённая академическая версия. Разница — в
+    маркетинге/тоне витрины, не в том, как считается балл. Цены единые для
+    всех аудиторий — решение владельца.
 
-    **Нулевой поисковый спрос — главный вопрос этой аудитории.** У курсовой
-    идеи спроса в Яндексе может не быть вовсе, а воронка на слабом спросе
-    намеренно перестаёт продавать (A11/A12). Прятать вердикт нельзя — принцип
-    1 не обсуждается, и принцип 2 тоже: вердикт имеет право сказать «нет».
-    Но A4 уже установила правило: **вердикт сообщает находку и НЕ предписывает
-    следующий шаг — шаг у аудиторий разный**. Фаундеру при нулевом спросе
-    честно сказать «не тратьте деньги»; студенту тот же ноль — законный
-    материал для работы, и следующий шаг у него другой. Поэтому реакция на
-    слабый спрос переехала в реестр, а не осталась одна на всех.
+    **Нулевой поисковый спрос — тоже общий с business ответ.** У идеи из этой
+    аудитории спроса в Яндексе может не быть вовсе, а воронка на слабом
+    спросе намеренно перестаёт продавать (A11/A12). Прятать вердикт нельзя —
+    принцип 1 не обсуждается, и принцип 2 тоже: вердикт имеет право сказать
+    «нет».
     """
 
     def test_student_is_in_the_registry_with_its_own_optics(self):
@@ -7607,16 +7876,34 @@ class TestStudentAudience:
         assert a.persona != get("business").persona
         assert a.viability != get("business").viability
 
-    def test_student_optics_are_not_venture(self):
-        """Мерить курсовую венчурной линейкой — тот же вред, что мерить ею
-        соцконтракт (принцип 4)."""
+    def test_student_optics_deliberately_match_business_honesty(self):
+        """Перевёрнуто 2026-08-02: раньше тест требовал ОТКАЗ от венчурных
+        критериев для студента (мерить курсовую венчурной линейкой — вред).
+        Теперь наоборот — реальная аудитория хочет ту же честную, без
+        поблажек, оценку, что и фаундер (владелец: «куча студентов думают,
+        что разбогатеют», и наша ценность именно в честной проверке этой
+        веры). Персона student намеренно венчурная, как и у business —
+        не смягчённая версия."""
         from app.audiences import get
         low = get("student").persona.lower()
-        # Слово «венчур» в персоне допустимо — она им как раз ОТКАЗЫВАЕТСЯ
-        # мерить. Проверяем позицию, а не наличие слова.
-        assert "не главное" in low or "не применяй" in low, low
-        assert "защит" in low, low
-        assert "масштабируемость" in low
+        assert "венчурного фонда" in low
+        assert "снисходительности" in low or "не поблажка" in get("student").viability.lower()
+        assert "студенческ" not in low, "старая академическая рамка не должна была вернуться"
+
+    def test_student_landing_drops_coursework_framing(self):
+        """Прежняя витрина обещала помощь с курсовой/защитой — владелец
+        объяснил (2026-08-02), что это не тот человек, который к нам придёт:
+        реальная аудитория верит, что разбогатеет на идее, курсовая почти
+        ни при чём. Проверяем, что старая рамка не вернулась.
+
+        Слово «защит» само по себе не годится: страница легитимно ссылается
+        на витрину соцконтракта («...обоснование для соцзащиты») в общем
+        переключателе аудиторий (F2) — проверяем именно академическую защиту
+        курсовой/диплома, не эту ссылку."""
+        text = client.get("/students").text
+        for bad in ("курсов", "диплом", "кафедр", "жюри", "защиту курсовой",
+                    "на защите"):
+            assert bad not in text.lower(), bad
 
     def test_the_page_opens_and_carries_the_switch(self):
         r = client.get("/students")
@@ -7646,13 +7933,51 @@ class TestStudentAudience:
                 for p in ("/social-contract", "/students")]
         assert nums[0] == nums[1], nums
 
-    def test_weak_demand_answer_differs_by_audience(self):
+    def test_students_pricing_note_does_not_promise_tailoring_the_report_lacks(self):
+        """D4-находка (2026-08-01): витрина обещала «аудитория и когда идею
+        стоит закрыть», а SECTION_SPECS для student не имеет ни одного
+        by_audience-переопределения (в отличие от social_contract) -- те же
+        разделы, что у бизнес-аудитории. Пока это не поменялось, витрина не
+        должна обещать подстройку, которой раздел отчёта не делает."""
+        text = client.get("/students").text
+        assert "когда идею стоит закрыть" not in text
+        assert "рынок, конкуренты, финансы, риски и план запуска" in text
+
+    def test_audience_pages_are_tinted_but_share_the_one_accent(self):
+        """Пункт 12 (Борис): вкладки аудиторий должны различаться, но
+        `CLAUDE.md` запрещает больше одного акцентного цвета -- решение
+        владельца: единственный акцент (жёлтый маркер) остаётся, различается
+        только тон рамки/фона карточек в пределах бумажной палитры. CSS живёт
+        в общем шаблоне (обе вкладки получают оба правила) -- меняется только
+        `data-audience` на `<body>`, от него и зависит, какое правило сработает."""
+        import re
+        social_text = client.get("/social-contract").text
+        student_text = client.get("/students").text
+        for text in (social_text, student_text):
+            assert "__AUDIENCE_KEY__" not in text
+            assert "#FFDE59" in text          # маркер остаётся везде
+        assert 'data-audience="social_contract"' in social_text
+        assert 'data-audience="student"' in student_text
+
+        def rule(text, audience):
+            m = re.search(r'\[data-audience="%s"\]\{([^}]+)\}' % audience, text)
+            assert m, f"нет правила для {audience}"
+            return m.group(1)
+        social_rule, student_rule = rule(social_text, "social_contract"), rule(student_text, "student")
+        assert social_rule != student_rule
+
+    def test_weak_demand_answer_is_worded_separately_but_says_the_same_thing(self):
+        """Перевёрнуто 2026-08-02: раньше студенту при нулевом спросе
+        предлагался другой следующий шаг ("законный материал для работы").
+        Теперь нужда та же, что у business — не тратить время и деньги на
+        идею без спроса, реформулировать. Формулировка своя (у каждой
+        аудитории свой текст в реестре, F1), но совет один и тот же."""
         from app.audiences import get
         founder, student = get("business").weak_demand, get("student").weak_demand
         assert founder and student and founder != student
-        # фаундеру — не тратить деньги; студенту ноль тоже материал для работы
-        assert "переформул" in founder.lower() or "не тратить" in founder.lower()
-        assert "работ" in student.lower() or "защит" in student.lower()
+        for text in (founder, student):
+            assert "переформул" in text.lower()
+            assert "не тратить" in text.lower() or "не тратьте" in text.lower()
 
     def test_result_page_takes_the_weak_answer_from_the_server(self):
         """Ветка `IS_SOCIAL_CONTRACT` в скрипте — это «аудиторий ровно две»."""
@@ -7706,7 +8031,7 @@ class TestOpticsCanBeSwitchedOnTheResultPage:
         _, pid = self._check("student")
         t = client.get(f"/r/{pid}").text
         assert 'id="optics"' in t, "на странице нет блока смены оптики"
-        assert "Делаю студенческий проект" in t
+        assert "Придумал(а) идею, хочу проверить" in t
 
     def test_all_other_audiences_are_offered(self):
         from app.audiences import AUDIENCES
