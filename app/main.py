@@ -1787,10 +1787,10 @@ def owner_funnel(request: Request, days: int = 0):
 
 @app.get("/api/diag/yandex")
 async def diag_yandex(request: Request, phrase: str = "купить слона"):
-    """Owner-only: сырая диагностика интеграции с Яндексом -- оба пути
-    Вордстата (официальный OAuth API и прокси внутри Cloud Search API),
-    без глотания ошибок. Открыть в браузере с ?key=... при жалобе
-    «нет данных», чтобы увидеть точную причину, а не гадать."""
+    """Owner-only: сырая диагностика интеграции с Яндексом -- Вордстат
+    (прокси внутри Cloud Search API), без глотания ошибок. Открыть в
+    браузере с ?key=... при жалобе «нет данных», чтобы увидеть точную
+    причину, а не гадать."""
     _check_owner(request)
     return await diagnose(phrase)
 

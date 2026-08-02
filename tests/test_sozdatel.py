@@ -1182,7 +1182,6 @@ class TestDemand:
         показываем ЕЁ отдельным полем, а не молча приписываем чужой счёт
         исходной фразе (иначе ручная проверка исходной фразы в Вордстате
         покажет другое число и будет выглядеть как обман/баг)."""
-        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
         async def post(provider, payload):
             if provider == "yandex":
                 if "шкалам" in payload["instructions"]:
@@ -1283,45 +1282,16 @@ class TestDemand:
             m.check_demand = orig
 
 
-class TestWordstatDualPath:
-    """Два независимых источника частотности: официальный Wordstat API
-    (Bearer OAuth) и прежний прокси внутри Cloud Search API."""
+class TestWordstatFrequency:
+    """Единственный источник частотности: Wordstat-прокси внутри Yandex
+    Cloud Search API v2, Api-Key сервисного аккаунта (см. докстринг
+    app/demand.py -- старый OAuth-путь через поддержку Директа сознательно
+    не реализован, рабочая self-service альтернатива уже есть)."""
 
-    def test_without_oauth_token_only_cloud_path_is_tried(self, monkeypatch):
-        """Без YANDEX_WORDSTAT_OAUTH_TOKEN oauth-путь не трогает сеть вовсе --
-        существующие тесты/прод без токена ведут себя как раньше."""
-        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
-        async def post(provider, payload):
-            assert provider == "wordstat"   # "wordstat_oauth" никогда не вызовется
-            return {"totalCount": 4200}
-        out = asyncio.run(wordstat_count("тест фраза", _post=post))
-        assert out == 4200
-
-    def test_oauth_path_tried_first_when_token_set(self, monkeypatch):
-        monkeypatch.setenv("YANDEX_WORDSTAT_OAUTH_TOKEN", "test-oauth-token")
-        async def post(provider, payload):
-            if provider == "wordstat_oauth":
-                return {"totalCount": 9000}
-            raise AssertionError("cloud path не должен вызываться, если oauth уже дал ответ")
-        out = asyncio.run(wordstat_count("тест фраза", _post=post))
-        assert out == 9000
-
-    def test_oauth_path_falls_back_to_cloud_on_empty_data(self, monkeypatch):
-        monkeypatch.setenv("YANDEX_WORDSTAT_OAUTH_TOKEN", "test-oauth-token")
-        async def post(provider, payload):
-            if provider == "wordstat_oauth":
-                return {}   # oauth ответил, но без totalCount -- пробуем cloud
-            if provider == "wordstat":
-                return {"totalCount": 700}
-            raise AssertionError(f"unexpected provider {provider}")
-        out = asyncio.run(wordstat_count("тест фраза", _post=post))
-        assert out == 700
-
-    def test_cloud_path_sends_num_phrases_in_valid_range(self, monkeypatch):
+    def test_cloud_path_sends_num_phrases_in_valid_range(self):
         """Регрессия: без num_phrases Cloud Search API отвечал 400 "Value must
         be in the range of 1 to 2000" на КАЖДЫЙ запрос -- частотность никогда
         не считалась, независимо от ключей/токенов (см. живой /api/diag/yandex)."""
-        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
         captured = {}
         async def post(provider, payload):
             captured.update(payload)
@@ -1330,11 +1300,10 @@ class TestWordstatDualPath:
         assert "num_phrases" in captured
         assert 1 <= captured["num_phrases"] <= 2000
 
-    def test_cloud_path_sends_both_num_phrases_spellings(self, monkeypatch):
+    def test_cloud_path_sends_both_num_phrases_spellings(self):
         """Публичные примеры использования этого эндпоинта используют camelCase
         (numPhrases), офдока недоступна для проверки -- шлём оба варианта имени
         поля, чтобы не зависеть от неподтверждённой схемы."""
-        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
         captured = {}
         async def post(provider, payload):
             captured.update(payload)
@@ -1343,12 +1312,11 @@ class TestWordstatDualPath:
         assert captured.get("num_phrases") == captured.get("numPhrases")
         assert captured["numPhrases"] > 1   # не 1 -- иначе похожие формулировки не увидим
 
-    def test_cloud_path_prefers_higher_related_phrase_count(self, monkeypatch):
+    def test_cloud_path_prefers_higher_related_phrase_count(self):
         """Кастдев-находка: LLM угадала «создание рекламного видео» (157/мес),
         а Вордстат сам предлагает рядом реальный ходовой запрос «нейросеть для
         рекламы» (902/мес) в topRequests -- этот сигнал раньше отбрасывался,
         читался только totalCount дословно запрошенной фразы."""
-        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
         async def post(provider, payload):
             return {"totalCount": 157, "topRequests": [
                 {"phrase": "нейросеть для рекламы", "count": 902},
@@ -1357,18 +1325,16 @@ class TestWordstatDualPath:
         out = asyncio.run(wordstat_count("создание рекламного видео", _post=post))
         assert out == 902
 
-    def test_related_phrases_never_lower_the_count(self, monkeypatch):
+    def test_related_phrases_never_lower_the_count(self):
         """Похожие формулировки с меньшей частотностью не должны понижать
         totalCount дословно запрошенной фразы -- берём максимум, не среднее."""
-        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
         async def post(provider, payload):
             return {"totalCount": 5000, "topRequests": [{"phrase": "похожий запрос", "count": 10}]}
         out = asyncio.run(wordstat_count("популярная фраза", _post=post))
         assert out == 5000
 
-    def test_malformed_related_phrases_do_not_crash(self, monkeypatch):
+    def test_malformed_related_phrases_do_not_crash(self):
         """topRequests может прийти в неожиданной форме -- деградация, не 500."""
-        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
         async def post(provider, payload):
             return {"totalCount": 200, "topRequests": ["не словарь", {"phrase": "x"}, {"count": "не число"}]}
         out = asyncio.run(wordstat_count("фраза", _post=post))
@@ -1380,28 +1346,25 @@ class TestDiagYandex:
         r = client.get("/api/diag/yandex")
         assert r.status_code in (401, 403)
 
-    def test_reports_both_paths(self, monkeypatch):
-        monkeypatch.delenv("YANDEX_WORDSTAT_OAUTH_TOKEN", raising=False)
+    def test_reports_wordstat_path(self, monkeypatch):
+        monkeypatch.setenv("YANDEX_API_KEY", "test-key")
         d = asyncio.run(diagnose("тест", _post=lambda provider, payload: _diag_fake(provider)))
-        assert d["env"]["wordstat_oauth_token_set"] is False
-        assert d["wordstat_oauth_api"]["ok"] is False
-        assert "skipped" in d["wordstat_oauth_api"]
-        assert d["wordstat_cloud_api"]["ok"] is True
+        assert d["env"]["yandex_api_key_set"] is True
+        assert d["wordstat_api"]["ok"] is True
+        assert d["wordstat_api"]["data"]["totalCount"] == 10
 
     def test_endpoint_returns_diagnostic_structure(self, monkeypatch):
         import app.main as m
         async def fake_diagnose(phrase):
-            return {"env": {"yandex_api_key_set": True, "yandex_folder_id_set": True,
-                            "wordstat_oauth_token_set": False},
-                    "wordstat_oauth_api": {"ok": False, "skipped": "..."},
-                    "wordstat_cloud_api": {"ok": True, "data": {"totalCount": 10}}}
+            return {"env": {"yandex_api_key_set": True, "yandex_folder_id_set": True},
+                    "wordstat_api": {"ok": True, "data": {"totalCount": 10}}}
         orig = m.diagnose
         m.diagnose = fake_diagnose
         try:
             r = client.get("/api/diag/yandex", headers=OWNER)
             assert r.status_code == 200
             d = r.json()
-            assert "wordstat_oauth_api" in d and "wordstat_cloud_api" in d
+            assert "wordstat_api" in d
         finally:
             m.diagnose = orig
 
@@ -6730,7 +6693,7 @@ class TestUnmeasuredDemandIsNotSoldAsMeasured:
             return rec.public_id
 
     def test_absent_number_is_not_called_a_market_finding(self):
-        """`count = None` означает «оба пути Вордстата не дали числа» (см.
+        """`count = None` означает «Вордстат не дал числа» (см.
         докстринг wordstat_best), а не «спроса нет»."""
         text = client.get(f"/r/{self._check()}").text
         assert "нет данных у Яндекса" in text
