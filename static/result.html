@@ -37,20 +37,12 @@
   .path-bar{display:flex;gap:4px;margin-top:10px}
   .path-bar i{flex:1;height:5px;border-radius:99px;background:var(--line);font-style:normal}
   .path-bar i.done{background:var(--ink)}
-  .path-next{margin-top:10px;padding-left:12px;border-left:3px solid var(--marker);font-size:14px;color:var(--muted)}
-  .path-next-tag{display:block;font:600 12px "IBM Plex Sans";color:var(--muted);margin-bottom:2px}
-
-  /* Чьими глазами читается разбор. Спрос от аудитории не зависит — меняется
-     только оптика, поэтому строка тихая и стоит над заголовком (F3). */
-  .optics{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;
-    padding:12px 0 0;font-size:13.5px;color:var(--muted)}
-  .optics b{color:var(--ink);font-weight:600}
-  .optics-alt{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px}
-  .optics-alt button{appearance:none;background:transparent;border:0;padding:0;
-    cursor:pointer;font:inherit;color:var(--muted);border-bottom:1px solid var(--line)}
-  .optics-alt button:hover{color:var(--ink);border-color:var(--ink)}
-  .optics-alt button[disabled]{opacity:.55;cursor:wait}
   .head{padding:14px 0 6px}
+  .head-top{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+  .icon-btn{appearance:none;flex:none;cursor:pointer;background:transparent;
+    border:1px solid var(--line);border-radius:6px;color:var(--ink);
+    width:34px;height:34px;font-size:15px;line-height:1}
+  .icon-btn:hover{border-color:var(--ink)}
   h1{font-size:clamp(21px,3.8vw,27px);font-weight:600;letter-spacing:-.015em}
   .idea{color:var(--muted);font-size:16px;margin-top:6px;max-width:42em}
   .share{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
@@ -113,7 +105,9 @@
   .freq-match{display:block;color:var(--muted);font-size:12.5px;margin-top:5px}
   .freq-num{font:600 18px/1 "IBM Plex Mono",monospace;white-space:nowrap;
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
-  .freq-num.na{color:var(--muted);font-size:14px;font-weight:500;background:none}
+  /* Моно-шрифт -- только для чисел (см. CLAUDE.md). «не ищут» и «не удалось
+     измерить» -- обычные подписи, и в моно они выглядели разрежённой кашей. */
+  .freq-num.na{color:var(--muted);font:500 14px "IBM Plex Sans";background:none}
   .freq-unit{font-size:12px;color:var(--muted);margin-left:5px}
   .verdict{padding-left:12px;border-left:3px solid var(--line);font-size:16px;margin-top:12px}
   .verdict.strong{border-color:var(--ok)} .verdict.niche{border-color:var(--warn)}
@@ -163,7 +157,7 @@
   .sharp-card h4 em{font-style:normal;background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
   .sharp-card p{color:var(--muted);font-size:14px}
   /* Аудитория и боль -- не жирные вставки внутри текста, а отдельный блок
-     сбоку, как у .path-next выше: сразу видно, что это метаданные, а не
+     сбоку, отдельным блоком: сразу видно, что это метаданные, а не
      продолжение абзаца. */
   .sharp-meta{border-left:2px solid var(--line);padding-left:11px;
     display:flex;flex-direction:column;gap:8px}
@@ -179,6 +173,37 @@
     background:transparent;border:1px solid var(--line);color:var(--ink);
     font:500 14px "IBM Plex Sans";padding:9px 14px}
   .sharp-pick:hover{border-color:var(--ink)}
+
+  /* Три карточки одной ширины, но с текстом разной длины: заголовок в одной
+     занимал две строки, в другой одну -- и «Для кого», «Боль» и кнопка ехали
+     по вертикали друг относительно друга. Subgrid выравнивает ОДИНАКОВЫЕ
+     строки во всех трёх карточках: заголовок напротив заголовка, боль
+     напротив боли, кнопки в одну линию.
+
+     Шесть строк: угол, заголовок, подзаголовок, «для кого», «боль», кнопка.
+     Метаданные -- вложенный subgrid на две строки, иначе выровнялись бы
+     только границы блока, а «боль» внутри него всё равно ехала бы вслед за
+     длиной «для кого». Слоты рисуются ВСЕГДА (см. renderSharpen), даже
+     пустыми: span 6 требует одинакового числа детей в каждой карточке.
+     Где subgrid не поддержан -- остаётся прежняя раскладка на flex.
+
+     Блок стоит ПОСЛЕ базовых правил намеренно: у него та же специфичность,
+     и выше по файлу его перебивал бы .sharp-meta{display:flex}. */
+  @supports (grid-template-rows: subgrid){
+    @media (min-width:680px){
+      .sharpen-cards.show{grid-template-rows:repeat(6, auto)}
+      .sharp-card{grid-row:span 6;display:grid;grid-template-rows:subgrid;row-gap:8px}
+      .sharp-meta{grid-row:span 2;display:grid;grid-template-rows:subgrid;row-gap:8px}
+      /* Кнопка уже прижата строкой сетки -- margin-top:auto из flex-раскладки
+         здесь только добавил бы лишний отступ. */
+      .sharp-pick{margin-top:0}
+    }
+  }
+  /* Пустой блок метаданных прячем цветом, а не display:none: убрать его из
+     потока значило бы отнять у карточки строку и сломать выравнивание
+     остальных двух. */
+  .sharp-meta:empty{border-left-color:transparent}
+
   .btn-ghost{appearance:none;cursor:pointer;border-radius:6px;display:inline-block;
     background:transparent;border:1px solid var(--line);color:var(--ink);
     font:500 15px "IBM Plex Sans";padding:10px 16px}
@@ -219,6 +244,27 @@
   .err.show{display:block}
   .okmsg{display:none;border-left:3px solid var(--ok);padding:2px 0 2px 12px;margin-top:12px;font-size:15px}
   .okmsg.show{display:block}
+
+  /* Липкая полоска с двумя платными действиями. Раньше они появлялись только
+     в самом конце ленты, и человек, уже решившийся на четвёртом шаге, должен
+     был доклацать до пятого; на шаге заострения вместо них стояла ссылка
+     «пропустить», называвшая платный шаг. Полоска тонкая и не разрывает
+     ленту, поэтому не спорит с кнопкой «Дальше →». */
+  .jump{position:sticky;bottom:0;z-index:5;display:none;gap:10px;flex-wrap:wrap;
+    align-items:center;background:var(--box);border-top:1px solid var(--line);
+    padding:10px 0;margin-top:8px}
+  .jump.show{display:flex}
+  .jump-tag{font-size:13px;color:var(--muted);margin-right:auto}
+  .jump a{appearance:none;cursor:pointer;border-radius:6px;text-decoration:none;
+    border:1px solid var(--line);color:var(--ink);font:500 14px "IBM Plex Sans";
+    padding:8px 13px;white-space:nowrap}
+  .jump a:hover{border-color:var(--ink)}
+  .jump a.primary{background:var(--btn);color:#fff;border-color:var(--btn)}
+  @media (max-width:560px){
+    .jump{padding:10px 0 12px}
+    .jump-tag{width:100%;margin:0 0 2px}
+    .jump a{flex:1;text-align:center}
+  }
   @media (max-width:560px){
     :root{--pad:20px}
     .freq-row{flex-direction:column;align-items:flex-start;gap:3px}
@@ -256,16 +302,24 @@
     <div class="path-bar">
       <i class="done"></i><i class="done"></i><i></i><i></i><i></i><i></i><i></i>
     </div>
-    <div class="path-next"><span class="path-next-tag">Дальше</span><span id="path-next-text">Этап 3 — соберём проверочную страницу под вашу идею, рекламу вы запустите сами по инструкции</span></div>
   </div>
-
-  __OPTICS__
+  <!-- Шапка разгружена по кастдеву 2026-08-02. Здесь стояли две вещи, и обе
+       человек встречал ДО результата, ради которого пришёл: обещание
+       следующего этапа под прогресс-баром и переключатель аудитории над
+       заголовком. Первое дублирует финальный шаг ленты; на второе уже
+       ответила витрина, с которой человек пришёл. Сама смена аудитории
+       никуда не делась -- это ручка POST /api/demand/{id}/purpose. -->
 
   <div class="head">
-    <h1>Результат проверки спроса</h1>
+    <div class="head-top">
+      <h1>Результат проверки спроса</h1>
+      <!-- Действие осталось, текстовая кнопка свернулась в иконку: делятся
+           результатом редко, а место у заголовка занимала постоянно. -->
+      <button id="share-btn" type="button" class="icon-btn"
+              title="Поделиться результатом" aria-label="Поделиться результатом">↗</button>
+    </div>
     <p class="idea" id="idea">__IDEA__</p>
     <div class="share">
-      <button id="share-btn" type="button">Поделиться результатом</button>
       <button id="save-btn" type="button">Сохранить в кабинете</button>
     </div>
     <div class="save-form" id="save-form">
@@ -296,11 +350,14 @@
 
   <section class="step" data-step="2" id="step-2">
     <div class="step-summary" onclick="reopen(2)">
-      <span class="step-summary-title"><span class="ok-mark">✓</span>Конкуренты</span>
+      <span class="step-summary-title"><span class="ok-mark">✓</span>Кто уже продаёт это</span>
       <span class="step-summary-detail" id="sum-2"></span>
     </div>
     <div class="step-body">
-      <div class="step-title">Конкуренты</div>
+      <!-- Не «Конкуренты»: в выдаче попадаются и статьи. Информационные сайты
+           теперь отсеиваются на сервере (_is_not_competitor), но название
+           всё равно должно обещать ровно то, что показано. -->
+      <div class="step-title">Кто уже продаёт это</div>
       <div id="comps"></div>
       <div class="step-next"><button class="btn" type="button" onclick="advance(2)" id="step2-next"></button></div>
     </div>
@@ -335,7 +392,11 @@
       <button class="btn-ghost" id="sharpen-btn" type="button">Показать 3 варианта позиционирования</button>
       <p class="err" id="sharpen-err" role="alert"></p>
       <div class="sharpen-cards" id="sharpen-cards"></div>
-      <div><a href="#" class="skip-link" id="skip-sharpen" onclick="skipSharpen();return false">Пропустить — сразу к живому тесту</a></div>
+      <!-- Раньше эта ссылка называла платный шаг и была единственным
+           способом обогнать ленту -- на четвёртом шаге из пяти такое
+           предложение читалось странно. Обгон переехал в липкую полоску
+           #jump, доступную с самого начала; ссылка осталась нейтральной. -->
+      <div><a href="#" class="skip-link" id="skip-sharpen" onclick="skipSharpen();return false">Пропустить этот шаг →</a></div>
     </div>
   </section>
 
@@ -349,8 +410,11 @@
       <a class="btn" id="weak-lead-btn" href="/">Проверить другую формулировку — бесплатно</a>
     </div>
     <div class="next" id="order">
-      <h3 id="order-h3">Дальше — соберём страницу и <span class="hl">скажем, приносит ли идея деньги</span></h3>
-      <p id="order-p">Полностью соберём проверочную страницу под вашу идею — дизайн, тексты, форма заявки. Дальше вы сами запускаете рекламу в Яндекс Директе — у нас есть <a href="/guide/direct">пошаговая инструкция</a>, которая убережёт от типичных ошибок новичков, а мы посчитаем цифры, которые она приведёт. Через пару недель у вас будут не догадки, а реальные цифры: сколько людей готовы оставить заявку на вашу идею.</p>
+      <!-- «Приносит ли идея деньги» мы не измеряем и обещать не вправе: тест
+           показывает готовность людей оставить заявку, а не выручку. «Сайт»
+           вместо «проверочной страницы» -- человек и так понимает, что это. -->
+      <h3 id="order-h3">Дальше — соберём сайт и <span class="hl">покажем, есть ли спрос на вашу идею</span></h3>
+      <p id="order-p">Полностью соберём сайт под вашу идею — дизайн, тексты, форма заявки. Дальше рекламу вы запустите сами в Яндекс Директе: у нас есть <a href="/guide/direct">пошаговая инструкция</a>, которая убережёт от типичных ошибок новичков, а мы посчитаем цифры, которые она приведёт. Через пару недель у вас будут не догадки, а реальные цифры: сколько людей готовы оставить заявку на вашу идею.</p>
       <p class="chosen-note" id="chosen-note"></p>
       <input id="contact" placeholder="Почта или телефон">
       <button class="btn" id="order-btn" type="button"></button>
@@ -365,7 +429,10 @@
       <p class="okmsg" id="order-ok"></p>
     </div>
     <div class="alt-path" id="alt-report">
-      <h4 id="alt-h4">Или получите <span class="hl">отчёт по идее</span>, не дожидаясь рекламы</h4>
+      <!-- «Не дожидаясь рекламы» называло инструмент, а не то, что человек
+           пропускает. Пропускает он ТЕСТ НА РЕАЛЬНЫХ ЛЮДЯХ -- этим именем
+           услуга и названа на главной. -->
+      <h4 id="alt-h4">Или получите <span class="hl">отчёт по идее</span>, без теста на реальных людях</h4>
       <p id="alt-p">Разбор на данных, которые мы уже честно посчитали: рынок, конкуренты, риски, вердикт — за минуты, не дни.</p>
       <!-- Состав тарифов — здесь, а не на следующем экране: человек решает
            платить именно тут, и разница между 990 и 2990 для него неочевидна.
@@ -380,6 +447,15 @@
       <p class="example-link">__EXAMPLE_LINK__</p>
     </div>
   </section>
+
+  <!-- Видна на любом шаге, кроме последнего: там оба действия уже развёрнуты
+       полными блоками, и полоска дублировала бы их. Ссылки, а не кнопки: они
+       просто прокручивают к нужному блоку, ничего не отправляя. -->
+  <div class="jump" id="jump">
+    <span class="jump-tag">Не хотите проходить всё по шагам?</span>
+    <a href="#" id="jump-test">Тест на реальных людях</a>
+    <a href="#" id="jump-report">Бизнес-план</a>
+  </div>
 </main>
 
 <footer>
@@ -415,9 +491,15 @@ document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
   <div class="freq-item">
     <div class="freq-row">
       <span class="freq-phrase">${escapeHtml(f.phrase)}</span>
+      <!-- Ноль и «не смогли посчитать» -- разные вещи, и подпись обязана их
+           различать. Прежняя общая формулировка про отсутствие данных у
+           Яндекса вставала и на нормально измеренном нуле, где читалась как
+           поломка сервиса, хотя ноль -- это и есть ответ (B10). -->
       <span>${f.count === null
-        ? '<span class="freq-num na">нет данных у Яндекса</span>'
-        : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`}
+        ? '<span class="freq-num na">не удалось измерить</span>'
+        : (f.count === 0
+          ? '<span class="freq-num na">не ищут</span>'
+          : `<span class="freq-num">${fmt(f.count)}</span><span class="freq-unit">запросов/мес</span>`)}
       </span>
     </div>
     ${f.matched_phrase ? `<span class="freq-match">Число посчитано по более ходовой формулировке, которую подсказал Вордстат: «${escapeHtml(f.matched_phrase)}»</span>` : ''}
@@ -470,14 +552,25 @@ if (hasScores) {
 }
 
 const comp = DATA.competitors || {};
-const hasComp = !!(comp.top && comp.top.length);
+// Шаг показывается и когда бизнесов не нашлось: «топ занят статьями» —
+// это находка о нише (люди читают, а не покупают), а не пустой блок.
+const hasComp = !!((comp.top && comp.top.length) || comp.info_only);
 if (hasComp) {
-  const found = comp.found ? `<div class="fine" style="margin-bottom:8px">В выдаче по запросу «${escapeHtml(DATA.best_phrase||'')}» — ${fmt(comp.found)} страниц. Топ сейчас занимают:</div>` : '';
-  document.getElementById('comps').innerHTML = found + comp.top.map(c => `
+  const found = comp.found ? `<div class="fine" style="margin-bottom:8px">В выдаче по запросу «${escapeHtml(DATA.best_phrase||'')}» — ${fmt(comp.found)} страниц.</div>` : '';
+  if (comp.top && comp.top.length) {
+    document.getElementById('comps').innerHTML = found
+      + '<div class="fine" style="margin-bottom:8px">Из них продают то же самое:</div>'
+      + comp.top.map(c => `
     <div class="comp-item">
       <a class="comp-name" href="https://${encodeURI(c.domain)}" target="_blank" rel="noopener">${escapeHtml(serviceName(c.domain))} <span class="arrow">↗</span></a>
       <div class="comp-title">${escapeHtml(c.title)}</div>
     </div>`).join('');
+  } else {
+    document.getElementById('comps').innerHTML = found + `
+      <div class="verdict niche">Прямых конкурентов в топе нет: выдачу занимают статьи,
+      энциклопедии и форумы. Это значит, что по этому запросу люди пока ищут информацию,
+      а не покупают, — продавать здесь можно, но спрос придётся создавать самому.</div>`;
+  }
 }
 
 if (new URLSearchParams(location.search).get('paid') === '1') {
@@ -503,9 +596,6 @@ if (new URLSearchParams(location.search).get('paid') === '1') {
 const AUDIENCE = __AUDIENCE_JSON__;
 
 if (AUDIENCE.plan_first) {
-  document.getElementById('path-next-text').textContent =
-    'Этап 3 — соберём бизнес-план с расчётами: смета, план доходов, окупаемость';
-
   const order = document.getElementById('order');
   const alt = document.getElementById('alt-report');
 
@@ -528,8 +618,9 @@ if (AUDIENCE.plan_first) {
     'вы говорите не «думаю, будет спрос», а «столько-то человек уже оставили заявку».';
 
   order.parentNode.insertBefore(alt, order);
-
-  document.getElementById('skip-sharpen').textContent = 'Пропустить — сразу к бизнес-плану';
+  // Подпись ссылки «пропустить» под аудиторию больше не подстраиваем: она
+  // перестала называть платный шаг, а обгон живёт в полоске #jump, где
+  // главное действие и так расставляется по AUDIENCE.plan_first.
 }
 
 // --- Спроса почти нет ---------------------------------------------------
@@ -562,8 +653,6 @@ if (v.level === 'unknown') {
 
   document.getElementById('order').className = 'alt-path';
   document.getElementById('alt-report').className = 'alt-path';
-  document.getElementById('path-next-text').textContent =
-    'Сначала стоит повторить проверку — без цифр спроса следующий этап вслепую';
   // «Разбор на данных, которые мы уже честно посчитали» на экране, где мы
   // ничего не посчитали, -- то же самое противоречие, что и вывод о рынке
   // на месте отсутствующего числа.
@@ -589,12 +678,9 @@ if (v.level === 'weak') {
     'href', AUDIENCE.home);
   document.getElementById('weak-lead').classList.add('show');
 
-  // Шапка обещала следующий этап так, будто вердикта не было. Обещать
-  // проверочную страницу человеку, которому мы только что показали
-  // отсутствие спроса, — то же противоречие, только выше по экрану.
-  document.getElementById('path-next-text').textContent =
-    'Сначала стоит переформулировать идею — при такой частотности следующий этап рано';
-
+  // Обещание следующего этапа стояло в шапке и при слабом спросе спорило с
+  // собственным вердиктом. Строку убрали целиком (см. комментарий в разметке),
+  // поэтому и подменять её больше нечем — противоречия нет по построению.
   const caveat = document.getElementById('weak-caveat');
   caveat.textContent = 'Честно предупреждаем: по нашим же цифрам спроса в поиске ' +
     'почти нет, и этот тест рискует не набрать __CLICK_TARGET__ визитов, ' +
@@ -606,7 +692,7 @@ if (v.level === 'weak') {
   document.getElementById('alt-report').className = 'alt-path';
 }
 
-const ARRIVAL = {2: 'конкуренты', 3: 'оценка идеи', 4: 'заострим идею',
+const ARRIVAL = {2: 'кто уже продаёт это', 3: 'оценка идеи', 4: 'заострим идею',
                  5: AUDIENCE.plan_first ? 'бизнес-план' : 'живой тест'};
 const STEP_ORDER = [1, hasComp ? 2 : null, hasScores ? 3 : null, 4, 5].filter(Boolean);
 
@@ -627,8 +713,9 @@ function summarizeStep1(){
 }
 function summarizeStep2(){
   if (!hasComp) return '';
+  if (!comp.top || !comp.top.length) return 'прямых конкурентов в топе нет';
   const names = comp.top.slice(0, 2).map(c => serviceName(c.domain)).join(', ');
-  return comp.found ? `${fmt(comp.found)} страниц, топ — ${names}` : `топ — ${names}`;
+  return comp.found ? `${fmt(comp.found)} страниц, продают — ${names}` : `продают — ${names}`;
 }
 function summarizeStep3(){
   const ov = DATA.overall;
@@ -641,6 +728,49 @@ function openStep(n){
   });
   const el = document.getElementById('step-' + n);
   if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+  syncJump(n);
+}
+
+// --- Обгон ленты: два платных действия доступны с любого шага -------------
+const LAST_STEP = STEP_ORDER[STEP_ORDER.length - 1];
+const jumpBar = document.getElementById('jump');
+
+function syncJump(current){
+  // На последнем шаге оба действия уже развёрнуты полными блоками —
+  // полоска там только дублировала бы их и закрывала форму контакта.
+  jumpBar.classList.toggle('show', current !== LAST_STEP);
+}
+
+function jumpTo(blockId){
+  // Разворачиваем финальный шаг целиком: человек сознательно обгоняет
+  // ленту, и досматривать промежуточные шаги его никто не заставляет.
+  STEP_ORDER.slice(0, -1).forEach(n => {
+    const el = document.getElementById('step-' + n);
+    if (!el.classList.contains('done')) {
+      el.classList.remove('active');
+      el.classList.add('done');
+      const sumEl = document.getElementById('sum-' + n);
+      const auto = {1: summarizeStep1, 2: summarizeStep2, 3: summarizeStep3}[n];
+      if (sumEl && !sumEl.textContent) sumEl.textContent = auto ? auto() : 'Пропущено';
+    }
+  });
+  openStep(LAST_STEP);
+  const target = document.getElementById(blockId);
+  if (target) target.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+document.getElementById('jump-test').addEventListener('click', e => {
+  e.preventDefault(); jumpTo('order');
+});
+document.getElementById('jump-report').addEventListener('click', e => {
+  e.preventDefault(); jumpTo('alt-report');
+});
+// Названия действий — те же, что стоят в развёрнутых блоках, и зависят от
+// аудитории: получателю соцконтракта главное бизнес-план, а не тест.
+if (AUDIENCE.plan_first) {
+  document.getElementById('jump-report').classList.add('primary');
+} else {
+  document.getElementById('jump-test').classList.add('primary');
 }
 
 function advance(fromStep, summaryHtml){
@@ -661,7 +791,30 @@ function reopen(n){
   el.classList.toggle('expanded');
 }
 
-openStep(STEP_ORDER[0]);
+// Возврат к уже пройденной проверке. Начинать ленту с первого шага человеку,
+// который эту идею уже заострил или что-то по ней заказал, — значит заставить
+// его прокликать всё заново ради блока, за которым он и вернулся. Прогресс
+// приходит с сервера (см. result_page), поэтому переживает и смену устройства,
+// и очистку браузера.
+const RESUME = __RESUME__;
+const CHOSEN_H1 = __CHOSEN_H1_JSON__;
+if (RESUME && STEP_ORDER.length > 1) {
+  STEP_ORDER.slice(0, -1).forEach(n => {
+    const el = document.getElementById('step-' + n);
+    el.classList.add('done');
+    const sumEl = document.getElementById('sum-' + n);
+    // У шага заострения автосводки нет: что там выбрали, знает только сервер.
+    // Без подписи свёрнутый шаг был бы безымянной галочкой — человек не понял
+    // бы, надо ли его открывать.
+    const auto = {1: summarizeStep1, 2: summarizeStep2, 3: summarizeStep3}[n];
+    if (!sumEl) return;
+    sumEl.textContent = auto ? auto()
+      : (n === 4 ? (CHOSEN_H1 ? 'Выбрано: ' + CHOSEN_H1 : 'Можно вернуться и заострить') : '');
+  });
+  openStep(LAST_STEP);
+} else {
+  openStep(STEP_ORDER[0]);
+}
 
 // --- Заострение идеи — по кнопке, LLM-вызов тяжёлый и не нужен на каждый визит ---
 
@@ -705,10 +858,13 @@ function renderSharpen(offers){
       <div class="sharp-angle">${escapeHtml(o.angle || '')}</div>
       <h4>${o.h1 || ''}</h4>
       <p>${escapeHtml(o.sub || '')}</p>
-      ${(o.eyebrow || (o.pains && o.pains[0])) ? `<div class="sharp-meta">
-        ${o.eyebrow ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Для кого:</span>${escapeHtml(o.eyebrow)}</div>` : ''}
-        ${o.pains && o.pains[0] ? `<div class="sharp-meta-row"><span class="sharp-meta-tag">Боль:</span><span class="sharp-pain">${escapeHtml(o.pains[0].h2 || '')}</span>${escapeHtml(o.pains[0].p || '')}</div>` : ''}
-      </div>` : ''}
+      <!-- Обе строки рисуются ВСЕГДА, даже пустыми: карточек три, выравнивает
+           их subgrid, а он требует одинакового числа слотов в каждой. Пустая
+           строка схлопывается по высоте, но место в сетке держит. -->
+      <div class="sharp-meta">
+        <div class="sharp-meta-row">${o.eyebrow ? `<span class="sharp-meta-tag">Для кого:</span>${escapeHtml(o.eyebrow)}` : ''}</div>
+        <div class="sharp-meta-row">${o.pains && o.pains[0] ? `<span class="sharp-meta-tag">Боль:</span><span class="sharp-pain">${escapeHtml(o.pains[0].h2 || '')}</span>${escapeHtml(o.pains[0].p || '')}` : ''}</div>
+      </div>
       <button class="sharp-pick" type="button">Выбрать этот вариант</button>
     </div>`).join('');
   sharpenCards.classList.add('show');

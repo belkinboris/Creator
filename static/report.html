@@ -112,6 +112,13 @@
   .cost-table td.sum{font:600 14px "IBM Plex Mono",monospace;text-align:right;white-space:nowrap}
   .cost-table tfoot td{border-top:1px solid var(--ink);font-weight:600}
 
+  /* Что осталось за пределами купленного тарифа -- одной строкой внизу
+     документа, а не решетом из замазанных заголовков по всему тексту. */
+  .upsell{border-top:1px solid var(--line);margin-top:26px;padding-top:20px}
+  .upsell h3{font-size:16px;font-weight:600;margin-bottom:6px}
+  .upsell p{color:var(--muted);font-size:14px;max-width:46em;margin-bottom:14px}
+  @media print{.upsell{display:none}}
+
   .pricing{border:1px solid var(--ink);background:var(--box);border-radius:8px;padding:22px;margin:22px 0 40px}
   .pricing h3{font-size:18px;font-weight:600;margin-bottom:6px}
   .pricing > p{color:var(--muted);font-size:15px;margin-bottom:16px;max-width:44em}
@@ -248,6 +255,10 @@ const PRICES = __PRICES_JSON__;
 const SECTIONS = __SECTIONS_JSON__;
 const QUICK_KEYS = __QUICK_KEYS_JSON__;
 const TIER_KEYS = __TIER_KEYS_JSON__;
+// Название полного тарифа берём из единственного источника (REPORT_PRICES),
+// а не пишем вторую копию: тариф уже переименовывали, и зашитая в статике
+// копия разъезжается с витриной незаметно (B7).
+const FULL_LABEL = "__FULL_LABEL__";
 
 function fmt(n){ return n.toLocaleString('ru-RU'); }
 function escapeHtml(s){
@@ -350,6 +361,12 @@ const nav = document.getElementById('section-nav');
 const sectionsEl = document.getElementById('sections');
 
 function inTier(key){ return TIER_KEYS.indexOf(key) !== -1; }
+// Куплен ли уже какой-то тариф. До оплаты заблюренные разделы -- это витрина,
+// они и должны показывать, за что просят деньги. ПОСЛЕ оплаты они же
+// превращают купленный документ в решето: человек заплатил и получил четыре
+// собранных раздела вперемешку с десятком замазанных (кастдев 2026-08-02).
+// Внутри оплаченного отчёта чужой тариф сворачивается в одну строку внизу.
+const PAID = TIER_KEYS.length > 0;
 
 // Смета построчно (F: соц-план.рф, владелец 2026-08-02) -- не у каждого
 // раздела есть table, только у тех, где wants_table (см. report_engine.py).
@@ -377,6 +394,7 @@ function sectionHtml(s){
       <p class="pending-note" id="pending-${s.key}">Собираем раздел…</p>
     </section>`;
   }
+  if (PAID) return '';   // чужой тариф внутри купленного документа не рисуем
   return `<section class="section locked" id="sec-${s.key}">
     <h2>${escapeHtml(s.title)}</h2>
     <div class="teaser">${escapeHtml(s.ask || '')}</div>
@@ -384,20 +402,54 @@ function sectionHtml(s){
   </section>`;
 }
 
+// Что осталось за пределами купленного тарифа -- одной честной строкой внизу,
+// а не решетом из замазанных заголовков по всему документу.
+function upsellHtml(){
+  const rest = SECTIONS.filter(s => !inTier(s.key));
+  if (!PAID || !rest.length) return '';
+  const names = rest.slice(0, 4).map(s => s.title).join(', ');
+  const more = rest.length > 4 ? ` и ещё ${rest.length - 4}` : '';
+  return `<div class="upsell">
+    <h3>В тарифе «${escapeHtml(FULL_LABEL)}» — ещё ${rest.length} ${plural(rest.length, 'раздел', 'раздела', 'разделов')}</h3>
+    <p>${escapeHtml(names)}${escapeHtml(more)}.</p>
+    <!-- Название тарифа стоит в заголовке выше, а сюда его подставлять
+         нельзя: после «дополнить до» нужен родительный падеж, а склонять
+         произвольную строку из REPORT_PRICES нечем. Кнопка о тарифе молчит. -->
+    <button class="btn" type="button" id="upsell-btn">Дополнить отчёт</button>
+  </div>`;
+}
+
+function plural(n, one, few, many){
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
 function render(){
+  // В купленном отчёте показываем только разделы своего тарифа -- и в тексте,
+  // и в оглавлении. Группа, из которой не осталось ни одного раздела, тоже не
+  // рисуется: заголовок над пустотой ничего не сообщает.
+  const visible = SECTIONS.filter(s => !PAID || inTier(s.key));
+
   let html = '', lastGroup = null;
-  SECTIONS.forEach(s => {
+  visible.forEach(s => {
     if (s.group !== lastGroup) {
       html += `<div class="group-title">${escapeHtml(s.group)}</div>`;
       lastGroup = s.group;
     }
     html += sectionHtml(s);
   });
-  sectionsEl.innerHTML = html;
+  sectionsEl.innerHTML = html + upsellHtml();
+  const upsellBtn = document.getElementById('upsell-btn');
+  if (upsellBtn) upsellBtn.addEventListener('click', () => {
+    const target = document.getElementById('pricing-top');
+    if (target) target.scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
 
   let navHtml = '';
   lastGroup = null;
-  SECTIONS.forEach(s => {
+  visible.forEach(s => {
     if (s.group !== lastGroup) {
       navHtml += `<li class="nav-group">${escapeHtml(s.group)}</li>`;
       lastGroup = s.group;

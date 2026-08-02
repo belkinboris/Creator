@@ -369,6 +369,41 @@ class TestReportEngine:
             assert reader in _core_prompt("full", purpose)
             assert reader in _section_prompt("summary", "full", purpose)
 
+    def test_model_knows_the_reader_already_saw_the_free_check(self):
+        """Вопрос владельца 2026-08-02 после покупки за 990 ₽: «нужно
+        убедиться, что быстрый разбор не показывает только информацию,
+        которую пользователь уже бесплатно увидел».
+
+        Корень был в промпте: модели давали цифры бесплатной проверки и
+        велели «использовать буквально», но НЕ говорили, что читатель эти
+        же цифры уже видел на /r/. Пересказ был самым естественным ответом
+        на такие вводные и ничем не наказывался.
+        """
+        from app.report_engine import _core_prompt, _section_prompt, PURPOSES
+        for purpose in PURPOSES:
+            for prompt in (_core_prompt("quick", purpose),
+                           _section_prompt("market", "quick", purpose)):
+                low = prompt.lower()
+                assert "уже видел" in low, purpose
+                assert "пересказ" in low, purpose
+
+    def test_the_rule_reaches_the_section_most_at_risk(self):
+        """Раздел «Спрос и рынок» опаснее прочих: его вводные — ровно та
+        таблица частотностей, которую человек уже прочитал бесплатно."""
+        from app.report_engine import _section_prompt
+        p = _section_prompt("market", "quick", "business")
+        assert "частотностями" in p
+        assert "без потери смысла" in p   # критерий, по которому резать
+
+    def test_rule_does_not_ban_the_numbers_themselves(self):
+        """Сторож от чрезмерной правки: цифры Вордстата — единственное, чем
+        разбор отличается от бесплатных ИИ-генераторов (см. докстринг
+        report_engine). Запретить их значило бы убить смысл продукта."""
+        from app.report_engine import _section_prompt
+        p = _section_prompt("market", "quick", "business")
+        assert "Цифры называй" in p
+        assert "буквально — не выдумывай другие" in p
+
     def test_purpose_reaches_the_model_prompt(self):
         from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
         cap = {}
@@ -1132,8 +1167,8 @@ class TestMorningPass:
 # ---------------------------------------------------------------------------
 
 from app.demand import (  # noqa: E402
-    DemandError, check_demand, generate_formulations, _parse_search_xml, _verdict,
-    wordstat_count, diagnose,
+    DemandError, check_demand, competitors, generate_formulations, _parse_search_xml,
+    _verdict, wordstat_count, diagnose,
 )
 
 
@@ -1157,6 +1192,172 @@ def _demand_post(counts=None, search_xml=None):
             return {"rawData": _b64.b64encode(xml.encode()).decode()}
         raise AssertionError(f"unexpected provider {provider}")
     return fake
+
+
+class TestBroaderFormulations:
+    """Три формулировки промахивались мимо ходового запроса.
+
+    Живой прогон: LLM выдала максимум 941/мес, а реальный массовый запрос
+    той же темы давал 3984/мес — просто в тройку он не попал. Лечится не
+    угадыванием конкретного слова (у каждой ниши оно своё), а размером и
+    разнообразием выборки.
+    """
+
+    def test_model_is_asked_for_six_formulations(self):
+        from app.demand import FORMULATIONS_COUNT
+        assert FORMULATIONS_COUNT == 6
+        from app.demand import _FORMULATIONS_SYSTEM as sysmsg
+        assert "6" in sysmsg
+
+    def test_prompt_demands_different_types_not_just_more_of_the_same(self):
+        """Шесть пересказов одной фразы бесполезны так же, как три: промпт
+        обязан требовать РАЗНЫЕ типы запросов — услуга, широкая категория и
+        описание задачи своими словами."""
+        from app.demand import _FORMULATIONS_SYSTEM as sysmsg
+        low = sysmsg.lower()
+        assert "родовая" in low or "широк" in low
+        assert "задач" in low or "проблем" in low
+
+    def test_all_formulations_are_measured(self):
+        """Шесть фраз — шесть обращений в Вордстат, ни одна не теряется."""
+        asked = []
+        async def post(provider, payload):
+            if provider == "yandex":
+                return _yandex_response(json.dumps(
+                    [f"фраза {i}" for i in range(6)], ensure_ascii=False))
+            if provider == "wordstat":
+                asked.append(payload["phrase"])
+                return {"totalCount": 100}
+            return {"rawData": None}
+        asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
+        assert sorted(asked) == sorted(f"фраза {i}" for i in range(6))
+
+    def test_rows_are_sorted_by_frequency(self):
+        """Порядок, в котором фразы выдала LLM, читателю не значит ничего, а
+        первая строка читается как главная — наверху должна быть самая
+        ходовая формулировка."""
+        async def post(provider, payload):
+            if provider == "yandex":
+                return _yandex_response(json.dumps(["редкая", "ходовая", "средняя"],
+                                                   ensure_ascii=False))
+            if provider == "wordstat":
+                return {"totalCount": {"редкая": 10, "ходовая": 9000, "средняя": 500}[payload["phrase"]]}
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
+        assert [f["phrase"] for f in out["formulations"]] == ["ходовая", "средняя", "редкая"]
+        assert out["best_phrase"] == "ходовая"
+
+    def test_unmeasured_phrases_sink_to_the_bottom(self):
+        """Неизмеренную фразу не с чем сравнивать — она уходит вниз, но со
+        страницы не пропадает."""
+        async def post(provider, payload):
+            if provider == "yandex":
+                return _yandex_response(json.dumps(["есть", "нет данных"], ensure_ascii=False))
+            if provider == "wordstat":
+                if payload["phrase"] == "нет данных":
+                    raise RuntimeError("сбой сети именно на этой фразе")
+                return {"totalCount": 700}
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
+        assert [f["phrase"] for f in out["formulations"]] == ["есть", "нет данных"]
+        assert out["formulations"][-1]["count"] is None
+
+
+class TestMeasuredZeroIsNotAFailure:
+    """«Вордстат ответил, запросов нет» и «Вордстат не ответил» — разные
+    вещи. Раньше и то и другое давало count=None, и нормально измеренный
+    ноль показывался как «нет данных у Яндекса», то есть как поломка."""
+
+    def test_answered_without_total_count_is_zero_not_none(self):
+        async def post(provider, payload):
+            return {"topRequests": []}         # ответ есть, частотности нет
+        assert asyncio.run(wordstat_count("фраза", _post=post)) == 0
+
+    def test_transport_failure_is_still_none(self):
+        async def post(provider, payload):
+            raise RuntimeError("сети нет")
+        assert asyncio.run(wordstat_count("фраза", _post=post)) is None
+
+    def test_measured_zero_reads_as_weak_demand_not_unknown(self):
+        """Ноль — это ответ «не ищут», а не «проверка не состоялась»:
+        вердикт обязан быть weak, иначе страница объявит сбоем то, что
+        сбоем не является."""
+        async def post(provider, payload):
+            if provider == "yandex":
+                return _yandex_response(json.dumps(["а б", "в г"], ensure_ascii=False))
+            if provider == "wordstat":
+                return {"totalCount": 0}
+            return {"rawData": None}
+        out = asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
+        assert out["verdict"]["level"] == "weak"
+        assert all(f["count"] == 0 for f in out["formulations"])
+
+    def test_result_page_separates_the_two_wordings(self):
+        text = _static_result()
+        assert "не удалось измерить" in text   # count === null
+        assert "не ищут" in text               # count === 0
+        assert "f.count === 0" in text         # ветка есть, а не просто слова в тексте
+        assert "нет данных у Яндекса" not in text   # прежняя склейка двух случаев
+
+
+def _static_result():
+    from pathlib import Path
+    return Path("static/result.html").read_text(encoding="utf-8")
+
+
+class TestCompetitorsAreBusinesses:
+    """Живой прогон показал в блоке «Конкуренты» Википедию, Ленту и женский
+    журнал. Для информационного запроса это правдивая выдача, но человеку
+    обещали тех, кто уже ПРОДАЁТ то же самое."""
+
+    def test_encyclopedias_and_media_are_filtered_out(self):
+        from app.demand import _is_not_competitor
+        for domain in ("ru.wikipedia.org", "lenta.ru", "www.woman.ru",
+                       "dzen.ru", "otvet.mail.ru", "vk.com", "youtube.com",
+                       "forum-mam.ru", "habr.com", "nalog.ru"):
+            assert _is_not_competitor(domain), domain
+
+    def test_real_businesses_survive_the_filter(self):
+        from app.demand import _is_not_competitor
+        for domain in ("ozon.ru", "avito.ru", "my-clinic.ru", "studio22.ru",
+                       "market.merch.ru", "informatika-shop.ru"):
+            assert not _is_not_competitor(domain), domain
+
+    def test_substring_match_does_not_eat_commercial_domains(self):
+        """«t.me» как подстрока живёт внутри «marke(t.me)rch.ru» — фильтр по
+        вхождению вырезал бы настоящего конкурента, поэтому сверяем домен
+        целиком."""
+        from app.demand import _is_not_competitor
+        assert not _is_not_competitor("market.merch.ru")
+        assert _is_not_competitor("t.me")
+
+    def _search_post(self, domains):
+        docs = "".join(f"<doc><url>https://{d}/x</url><title>Заголовок {d}</title></doc>"
+                       for d in domains)
+        xml = f'<y><found priority="all">15000</found>{docs}</y>'
+        async def post(provider, payload):
+            import base64 as _b64
+            return {"rawData": _b64.b64encode(xml.encode()).decode()}
+        return post
+
+    def test_only_businesses_reach_the_page(self):
+        out = asyncio.run(competitors("фраза", _post=self._search_post(
+            ["ru.wikipedia.org", "lenta.ru", "shop-one.ru", "dzen.ru", "shop-two.ru"])))
+        assert [c["domain"] for c in out["top"]] == ["shop-one.ru", "shop-two.ru"]
+        assert out["info_only"] is False
+
+    def test_all_informational_is_reported_as_a_finding(self):
+        """Отфильтровали всё — это не пустой блок, а находка: по запросу
+        читают, а не покупают. Страница обязана суметь это сказать."""
+        out = asyncio.run(competitors("фраза", _post=self._search_post(
+            ["ru.wikipedia.org", "lenta.ru", "www.woman.ru"])))
+        assert out["top"] == []
+        assert out["info_only"] is True
+
+    def test_page_renames_the_block_away_from_competitors(self):
+        text = _static_result()
+        assert "Кто уже продаёт это" in text
+        assert "info_only" in text
 
 
 class TestDemand:
@@ -1226,7 +1427,7 @@ class TestDemand:
         out = asyncio.run(check_demand("Достаточно длинное описание идеи для проверки", _post=post))
         assert all(f["count"] is None for f in out["formulations"])
         assert out["verdict"]["level"] == "unknown"
-        assert out["competitors"] == {"found": None, "top": []}
+        assert out["competitors"] == {"found": None, "top": [], "info_only": False}
 
     def test_verdict_has_no_internal_jargon(self):
         """A4 из PRODUCT_ROADMAP: вердикт видят обе аудитории, включая
@@ -1257,13 +1458,16 @@ class TestDemand:
         assert _verdict(500)["level"] == "niche"
         assert _verdict(5000)["level"] == "strong"
 
-    def test_parse_search_xml_limits_top3(self):
+    def test_parse_search_xml_scans_with_reserve(self):
+        """Разбираем выдачу с запасом, а не ровно три: часть документов
+        отсеется как информационная (_is_not_competitor), и три коммерческих
+        сайта надо ещё из чего-то набрать. Обрезка до трёх — в competitors()."""
         docs = "".join(
             f"<doc><url>https://www.site{i}.ru/p</url><title>T{i}</title></doc>" for i in range(5))
         xml = f'<y><found priority="all">42</found>{docs}</y>'
         out = _parse_search_xml(xml)
         assert out["found"] == 42
-        assert len(out["top"]) == 3
+        assert len(out["top"]) == 5
         assert out["top"][0]["domain"] == "site0.ru"  # www. срезан
 
     def test_api_demand_endpoint_public(self):
@@ -1570,7 +1774,11 @@ class TestResultPageAndOrders:
         assert rid is not None
         page = client.get(f"/r/{pub(rid)}")
         assert page.status_code == 200
-        assert "Этап 2 из 7" in page.text and "Этап 3" in page.text  # преемственность, без жаргона
+        # Преемственность осталась меткой этапа и прогресс-баром. Обещание
+        # «Этап 3 — …» из шапки убрано: человек встречал его раньше, чем
+        # собственно результат, за которым пришёл (кастдев 2026-08-02).
+        assert "Этап 2 из 7" in page.text
+        assert "Результат проверки спроса" in page.text
         assert "Ступень" not in page.text
         assert "без ям" not in page.text
         assert "тест фраза" in page.text          # результат вшит в страницу
@@ -1694,6 +1902,57 @@ class TestResultFunnel:
     def test_skip_link_present_for_sharpen_step(self):
         text = client.get(f"/r/{pub(self._make_check())}").text
         assert "Пропустить" in text and "skipSharpen" in text
+
+    def test_skip_link_no_longer_names_the_paid_step(self):
+        """«Пропустить — сразу к живому тесту» на четвёртом шаге из пяти
+        читалось странно: человек не «пропускает» проверку ради покупки, он
+        просто не хочет заострять идею. Обгон переехал в липкую полоску."""
+        text = client.get(f"/r/{pub(self._make_check())}").text
+        assert "Пропустить — сразу к живому тесту" not in text
+        assert "Пропустить — сразу к бизнес-плану" not in text
+
+    def test_paid_actions_are_reachable_from_any_step(self):
+        """Оба платных действия жили только в конце ленты, и решившийся на
+        втором шаге должен был доклацать до пятого (кастдев 2026-08-02)."""
+        text = client.get(f"/r/{pub(self._make_check())}").text
+        assert 'id="jump"' in text
+        assert 'id="jump-test"' in text and 'id="jump-report"' in text
+        assert "function jumpTo(" in text
+
+    def test_jump_bar_hides_itself_on_the_last_step(self):
+        """На финальном шаге оба действия уже развёрнуты полными блоками —
+        полоска дублировала бы их и закрывала форму контакта."""
+        text = client.get(f"/r/{pub(self._make_check())}").text
+        assert "function syncJump(" in text
+        assert "current !== LAST_STEP" in text
+
+    def test_jump_marks_skipped_steps_done_instead_of_leaving_them_open(self):
+        """Обгон обязан свернуть пропущенные шаги: иначе лента остаётся
+        наполовину раскрытой и финальный блок теряется среди неё."""
+        text = client.get(f"/r/{pub(self._make_check())}").text
+        block = text.split("function jumpTo(", 1)[1][:900]
+        assert "classList.add('done')" in block
+
+    def test_header_is_stripped_of_pre_result_clutter(self):
+        """До результата, за которым человек пришёл, стояли переключатель
+        оптики и обещание следующего этапа. Оба убраны."""
+        text = client.get(f"/r/{pub(self._make_check())}").text
+        assert 'id="optics"' not in text
+        assert 'class="path-next"' not in text
+        assert "Результат проверки спроса" in text     # то, за чем пришли, на месте
+
+    def test_share_is_an_icon_but_still_works(self):
+        """Кнопку свернули в иконку, а не выбросили: делятся редко, но
+        возможность нужна."""
+        text = client.get(f"/r/{pub(self._make_check())}").text
+        assert 'id="share-btn"' in text and 'class="icon-btn"' in text
+        assert 'aria-label="Поделиться результатом"' in text
+
+    def test_save_to_account_survived_the_cleanup(self):
+        """Единственный способ для анонимной проверки попасть в кабинет —
+        эту кнопку убирать было нельзя, как бы ни чистили шапку."""
+        text = client.get(f"/r/{pub(self._make_check())}").text
+        assert 'id="save-btn"' in text and "Сохранить в кабинете" in text
 
     def test_steps_without_data_excluded_from_order(self):
         """Пустые scores/competitors не рисуют шаг вовсе -- STEP_ORDER их не включает."""
@@ -1910,6 +2169,75 @@ class TestPayments:
         assert r.status_code == 200
         with Session(engine) as s:
             assert s.get(LiveTestOrder, oid).status == "paid"
+
+
+class TestSharpenCardsLineUp:
+    """Кастдев 2026-08-02: «блоки хоть и одного размера, но текст в них не
+    ровно и по-разному». Заголовок в одной карточке занимал две строки, в
+    другой одну — и «Для кого», «Боль» и кнопка ехали по вертикали друг
+    относительно друга."""
+
+    def _page(self):
+        from pathlib import Path
+        return Path("static/result.html").read_text(encoding="utf-8")
+
+    def test_cards_share_a_row_grid(self):
+        """Само выравнивание меряет браузерный тест
+        (test_sharpen_cards_line_up_row_by_row в tests/test_mobile.py) — здесь
+        только сторож на механизм: строк шесть и карточка занимает все шесть."""
+        text = self._page()
+        assert "grid-template-rows:subgrid" in text
+        assert "grid-row:span 6" in text
+        assert "repeat(6, auto)" in text
+
+    def test_meta_slots_are_always_rendered(self):
+        """Subgrid выравнивает строки только если слотов в каждой карточке
+        поровну. Карточка без «Для кого» или без «Боли» раньше не рисовала
+        строку вовсе — и сетка разъезжалась именно на ней. Теперь пустеет
+        содержимое строки, а не сама строка."""
+        text = self._page()
+        block = text.split("function renderSharpen(", 1)[1][:1400]
+        assert block.count('<div class="sharp-meta-row">') == 2
+        # Условие осталось ВНУТРИ строки, а не вокруг неё.
+        assert '? `<div class="sharp-meta-row">' not in block
+        assert '${o.eyebrow ? `<span class="sharp-meta-tag">' in block
+
+    def test_empty_meta_keeps_its_place_in_the_grid(self):
+        """`display:none` на пустом блоке отнял бы у карточки строку и сломал
+        бы выравнивание двух остальных — прячем цветом рамки."""
+        text = self._page()
+        assert ".sharp-meta:empty{border-left-color:transparent}" in text
+        assert ".sharp-meta:empty{display:none}" not in text
+
+    def test_fallback_kept_where_subgrid_is_unsupported(self):
+        """Старый браузер не должен получить сломанную сетку вместо
+        неидеальной: subgrid включается только под @supports."""
+        text = self._page()
+        assert "@supports (grid-template-rows: subgrid)" in text
+        assert ".sharp-card{border:1px solid var(--line)" in text  # базовый flex на месте
+
+
+class TestSharpenSpeaksRussian:
+    """Живой прогон: в карточке заострения оказалось английское слово. На
+    русской странице это читается как недоделка."""
+
+    def test_prompt_forbids_latin_in_visible_fields(self):
+        from app.offer_engine import _system_prompt
+        low = _system_prompt("business").lower()
+        assert "только по-русски" in low or "только на русском" in low
+        assert "латиниц" in low
+
+    def test_service_field_is_named_as_the_exception(self):
+        """idea_id — служебное поле и латиницей быть обязано (оно уходит в
+        адрес проекта). Без явного исключения запрет противоречил бы схеме
+        ответа, где рядом стоит «латиницей_v1»."""
+        from app.offer_engine import _system_prompt
+        assert "idea_id" in _system_prompt("business")
+
+    def test_rule_reaches_every_audience(self):
+        from app.offer_engine import _system_prompt
+        for purpose in ("business", "social_contract", "student"):
+            assert "латиниц" in _system_prompt(purpose).lower(), purpose
 
 
 class TestSharpenPublic:
@@ -2307,10 +2635,17 @@ class TestSocialContractPurpose:
 
     def test_social_contract_copy_avoids_internal_jargon(self):
         """«Живой тест» -- наше внутреннее имя услуги, человеку из соцконтракта
-        оно ничего не говорит."""
+        оно ничего не говорит.
+
+        Раньше это чинилось подменой подписи ссылки «пропустить» под
+        аудиторию. Теперь ссылка нейтральна для всех и платный шаг не
+        называет вовсе -- гарантия та же, но без развилки, которую надо
+        было помнить при каждой правке текста.
+        """
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
         assert "Оставить заявку на проверку идеи" in text
-        assert "сразу к бизнес-плану" in text
+        skip = text.split('id="skip-sharpen"', 1)[1].split("</a>", 1)[0]
+        assert "живому тесту" not in skip and "живой тест" not in skip
 
     def test_swapped_blocks_keep_input_styling(self):
         """Блоки меняются ролями -- поле контакта не должно терять оформление
@@ -2696,6 +3031,68 @@ class TestYandexMetrika:
         assert "UNLOCKED_TIER !== 'full'" not in text
 
 
+class TestPaidReportIsNotASieve:
+    """Кастдев 2026-08-02, покупка за 990 ₽: «сгенерировались только резюме,
+    проблема, спрос и кто отвечает на запрос, потом куча заблюренных частей».
+
+    До оплаты заблюренные разделы — витрина, они и должны показывать, за что
+    просят деньги. ПОСЛЕ оплаты те же разделы превращают купленный документ
+    в решето: четыре собранных вперемешку с десятком замазанных.
+    """
+
+    def _page(self):
+        from pathlib import Path
+        return Path("static/report.html").read_text(encoding="utf-8")
+
+    def test_paid_flag_separates_showcase_from_document(self):
+        text = self._page()
+        assert "const PAID = TIER_KEYS.length > 0;" in text
+
+    def test_other_tier_sections_are_not_drawn_inside_a_paid_report(self):
+        text = self._page()
+        block = text.split("function sectionHtml(", 1)[1][:900]
+        assert "if (PAID) return '';" in block
+
+    def test_teaser_keeps_its_blurred_sections(self):
+        """Сторож от чрезмерной правки: без оплаты запертые разделы обязаны
+        остаться — это единственное, что объясняет, за что платят."""
+        text = self._page()
+        assert 'class="section locked"' in text
+        assert ".section.locked p{color:var(--muted);filter:blur(3px)" in text
+
+    def test_missing_sections_become_one_honest_line(self):
+        text = self._page()
+        assert "function upsellHtml()" in text
+        block = text.split("function upsellHtml()", 1)[1][:700]
+        assert "if (!PAID || !rest.length) return '';" in block
+        assert "FULL_LABEL" in block
+
+    def test_upsell_names_the_tier_from_the_single_source(self):
+        """Название тарифа уже переименовывали; вторая копия в статике
+        разъезжается с витриной незаметно (B7)."""
+        text = self._page()
+        assert 'const FULL_LABEL = "__FULL_LABEL__";' in text
+
+    def test_empty_groups_disappear_with_their_sections(self):
+        """Заголовок группы над пустотой ничего не сообщает, а место занимает."""
+        text = self._page()
+        block = text.split("function render()", 1)[1][:600]
+        assert "SECTIONS.filter(s => !PAID || inTier(s.key))" in block
+        assert "visible.forEach" in block
+
+    def test_upsell_is_not_printed(self):
+        """Для соцконтракта отчёт несут в комиссию на бумаге — предложение
+        доплатить на этом листе неуместно."""
+        text = self._page()
+        assert "@media print{.upsell{display:none}}" in text
+
+    def test_plural_rule_is_russian(self):
+        """«ещё 1 разделов» в платном документе читается как небрежность."""
+        text = self._page()
+        assert "function plural(" in text
+        assert "m10 >= 2 && m10 <= 4" in text
+
+
 class TestOwnerLearnsAboutOrders:
     """A2 из PRODUCT_ROADMAP: владелец узнавал о деньгах и заявках, только
     открыв /desk глазами. Для продукта с платным рекламным трафиком это
@@ -2992,6 +3389,115 @@ class TestMailer:
         assert captured["to"] == "user@example.com"
         assert captured["subject"] == "Вход"
         assert "текст письма" in captured["body"]
+
+
+class TestReturningToAFinishedCheck:
+    """Кастдев 2026-08-02: «нажимаю на идею «открыть», и мне будто заново всё
+    до заострения проходить надо. Это какой-то бред».
+
+    Лента всегда начиналась с первого шага, даже если человек эту проверку
+    уже прошёл и что-то по ней купил.
+    """
+
+    def _check(self, **kw):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        data = {"formulations": [{"phrase": "ф", "count": 4200}], "best_phrase": "ф",
+                "verdict": {"level": "strong", "text": "Спрос есть"},
+                "competitors": {"found": 10, "top": [{"title": "Т", "domain": "t.ru"}],
+                                "info_only": False},
+                "scores": [{"key": "demand", "label": "Спрос", "value": 8, "note": ""}],
+                "overall": {"value": 8, "weakest": "Спрос", "basis": "б"}}
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Идея, к которой человек возвращается",
+                              result_json=json.dumps(data, ensure_ascii=False), **kw)
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec.id, rec.public_id
+
+    def _resume_flag(self, pid):
+        text = client.get(f"/r/{pid}").text
+        return text.split("const RESUME = ", 1)[1].split(";", 1)[0].strip()
+
+    def test_fresh_check_starts_from_the_first_step(self):
+        """Новичку лента нужна целиком — иначе он не увидит своих же цифр."""
+        _, pid = self._check()
+        assert self._resume_flag(pid) == "false"
+
+    def test_check_with_chosen_offer_resumes_at_the_end(self):
+        _, pid = self._check(chosen_offer=json.dumps({"h1": "Заголовок"}, ensure_ascii=False))
+        assert self._resume_flag(pid) == "true"
+
+    def test_check_with_a_purchase_resumes_at_the_end(self):
+        """Человек уже заплатил по этой идее — прокликивать бесплатные шаги
+        ради возврата к покупке он точно не должен."""
+        from app.main import ReportPurchase, Session, engine
+        rid, pid = self._check()
+        with Session(engine) as s:
+            s.add(ReportPurchase(check_id=rid, idea="и", tier="quick",
+                                 contact="buyer@example.com", status="paid", amount=990))
+            s.commit()
+        assert self._resume_flag(pid) == "true"
+
+    def test_check_with_a_live_test_order_resumes_at_the_end(self):
+        from app.main import LiveTestOrder, Session, engine
+        rid, pid = self._check()
+        with Session(engine) as s:
+            s.add(LiveTestOrder(check_id=rid, idea="и", contact="buyer@example.com",
+                                status="paid", amount=1490))
+            s.commit()
+        assert self._resume_flag(pid) == "true"
+
+    def test_progress_comes_from_the_server_not_the_browser(self):
+        """localStorage не пережил бы ни смену устройства, ни очистку
+        браузера — а возвращаются к проверке как раз спустя время."""
+        text = client.get(f"/r/{self._check()[1]}").text
+        block = text.split("const RESUME = ", 1)[1][:600]
+        assert "localStorage" not in block
+
+    def test_resume_marks_earlier_steps_done_not_hidden(self):
+        """Свернуть — не значит спрятать: человек должен видеть итоги шагов
+        строкой и мочь развернуть любой обратно."""
+        text = client.get(f"/r/{self._check()[1]}").text
+        block = text.split("if (RESUME", 1)[1][:700]
+        assert "classList.add('done')" in block
+        assert "openStep(LAST_STEP)" in block
+
+
+class TestAccountRowsCarryTheirDate:
+    """Кастдев 2026-08-02: «в кабинете каша из идей, нужно написать дату
+    проверки». Пять строк одной идеи выглядели одинаково."""
+
+    def _login(self, contact="dated@example.com"):
+        from app.main import MagicLinkToken, Session, engine
+        with Session(engine) as s:
+            s.add(MagicLinkToken(token="tok_dated", contact=contact)); s.commit()
+        client.post("/account/verify?token=tok_dated", follow_redirects=False)
+        return contact
+
+    def test_every_row_type_reports_when_it_happened(self):
+        from app.main import (DemandCheck, LiveTestOrder, ReportPurchase,
+                              Session, engine)
+        contact = self._login()
+        with Session(engine) as s:
+            s.add(DemandCheck(idea="Идея с датой", contact=contact,
+                              result_json=json.dumps({"overall": {"value": 5}}, ensure_ascii=False)))
+            s.add(ReportPurchase(idea="Отчёт с датой", tier="quick", contact=contact,
+                                 status="paid", amount=990))
+            s.add(LiveTestOrder(idea="Заявка с датой", contact=contact,
+                                status="new", amount=0))
+            s.commit()
+        d = client.get("/api/account/me").json()
+        client.cookies.clear()
+        for section in ("checks", "reports", "orders"):
+            assert d[section], f"раздел {section} пуст — проверять нечего"
+            for row in d[section]:
+                assert row.get("created_at"), f"{section}: строка без даты — {row}"
+
+    def test_cabinet_renders_the_date_in_russian(self):
+        from pathlib import Path
+        text = Path("static/account.html").read_text(encoding="utf-8")
+        assert "toLocaleDateString('ru-RU'" in text
+        assert "created_at" in text
 
 
 class TestAccountCabinet:
@@ -3536,12 +4042,17 @@ class TestCustomerDevPass:
         хоронить живую идею.
 
         Исходная жалоба решается не враньём в другую сторону, а словами:
-        «нет данных у Яндекса» называет источник, поэтому не читается как
-        наша поломка. Плюс рядом теперь есть вердикт и блок «Проверка не
-        состоялась», которых тогда не было.
+        подпись «не удалось измерить» говорит о нашем замере, а не о рынке,
+        и вывода за Вордстат не делает. Плюс рядом есть вердикт и блок
+        «Проверка не состоялась», которых тогда не было.
+
+        Отдельно (2026-08-02): измеренный НОЛЬ больше не попадает в эту
+        ветку вовсе -- он приходит как `count = 0` и подписывается «не
+        ищут». Это честный ответ Вордстата, а не сбой, и раньше он
+        показывался тем же текстом, что и несостоявшийся замер.
         """
         result_text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
-        assert "нет данных у Яндекса" in result_text
+        assert "не удалось измерить" in result_text
         # вывод про рынок на месте отсутствующего числа больше не появляется
         assert "почти не ищут" not in result_text.split("v.level === 'weak'")[0]
         report_text = (main_module.BASE_DIR.parent / "static" / "report.html").read_text()
@@ -4236,8 +4747,8 @@ class TestNoHardcodedServerValuesInStatic:
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
             "__FAST_PLAN_BTN__",
-            # страница результата -- audiences.for_page / _optics_html
-            "__AUDIENCE_JSON__", "__OPTICS__",
+            # страница результата -- audiences.for_page / состояние проверки
+            "__AUDIENCE_JSON__", "__RESUME__", "__CHOSEN_H1_JSON__",
             # страница подтверждения входа -- заполняет _verify_page
             "__HEADING__", "__LEAD__", "__WHO__", "__ACTION__", "__FINE__",
             # заголовок и выходные данные листа -- _doc_title_and_meta
@@ -5980,12 +6491,21 @@ class TestWeakDemandStopsSelling:
         assert f"{m.CLICK_TARGET} визитов" in text
 
     def test_header_stops_promising_the_next_stage(self):
-        """Шапка обещала «Этап 3 — соберём проверочную страницу» так, будто
-        вердикта не было."""
+        """Шапка обещала следующий этап так, будто вердикта не было.
+
+        Чинилось подменой текста в строке «Дальше — …». При разгрузке шапки
+        (кастдев 2026-08-02) строку убрали целиком, поэтому обещать нечем по
+        построению — а совет «переформулировать» остался там, где он и
+        полезен: в блоке при слабом спросе.
+        """
         text = (main_module.BASE_DIR.parent / "static" / "result.html").read_text()
+        assert 'id="path-next-text"' not in text
+        # А совет остался там, где человек его читает: в самом блоке при
+        # слабом спросе. Слово «переформулировать» жило ТОЛЬКО в удалённой
+        # строке шапки, поэтому проверяем смысл, а не его.
         block = text.split("v.level === 'weak'")[1][:2000]
-        assert "path-next-text" in block
-        assert "переформулировать" in block
+        assert "люди ищут то же самое, но называют иначе" in block
+        assert "weak-lead" in block
 
     def test_free_action_leads_to_the_right_showcase(self):
         """Получателя соцконтракта нельзя возвращать на витрину для
@@ -6693,10 +7213,11 @@ class TestUnmeasuredDemandIsNotSoldAsMeasured:
             return rec.public_id
 
     def test_absent_number_is_not_called_a_market_finding(self):
-        """`count = None` означает «Вордстат не дал числа» (см.
-        докстринг wordstat_best), а не «спроса нет»."""
+        """`count = None` означает «Вордстат не дал числа» (см. докстринг
+        wordstat_best), а не «спроса нет». Ноль теперь читается отдельной
+        подписью «не ищут» — это ответ, а не сбой, и путать их нельзя."""
         text = client.get(f"/r/{self._check()}").text
-        assert "нет данных у Яндекса" in text
+        assert "не удалось измерить" in text
         assert "почти не ищут" not in text.split("v.level === 'weak'")[0]
 
     def test_page_says_the_check_did_not_happen(self):
@@ -6728,9 +7249,14 @@ class TestUnmeasuredDemandIsNotSoldAsMeasured:
         assert "цифр спроса" in block
 
     def test_header_stops_promising_the_next_stage(self):
+        """Строку «Дальше — …» убрали из шапки целиком (кастдев 2026-08-02),
+        поэтому обещать следующий этап поверх честного «проверка не
+        состоялась» больше нечем. Совет повторить проверку остался в самом
+        блоке — там, где человек его и читает."""
         text = client.get(f"/r/{self._check()}").text
+        assert 'id="path-next-text"' not in text
         block = text.split("v.level === 'unknown'")[1][:2200]
-        assert "path-next-text" in block and "повторить проверку" in block
+        assert "Проверить ещё раз" in block
 
     def test_retry_leads_to_the_right_showcase(self):
         """Получателя соцконтракта нельзя возвращать на витрину фаундеров."""
@@ -7990,20 +8516,16 @@ class TestOpticsCanBeSwitchedOnTheResultPage:
             s.add(rec); s.commit(); s.refresh(rec)
             return rec.id, rec.public_id
 
-    def test_page_says_whose_eyes_you_are_reading_with(self):
+    def test_optics_switcher_is_gone_from_the_result_page(self):
+        """Кастдев 2026-08-02: переключатель оптики стоял НАД заголовком, то
+        есть человек упирался в вопрос «под какую вы задачу?» раньше, чем
+        видел результат, за которым пришёл. Витрина, с которой он пришёл, уже
+        ответила на этот вопрос. Ручка POST /api/demand/{id}/purpose осталась
+        — убран только блок со страницы результата."""
         _, pid = self._check("student")
         t = client.get(f"/r/{pid}").text
-        assert 'id="optics"' in t, "на странице нет блока смены оптики"
-        assert "Придумал(а) идею, хочу проверить" in t
-
-    def test_all_other_audiences_are_offered(self):
-        from app.audiences import AUDIENCES
-        _, pid = self._check("business")
-        t = client.get(f"/r/{pid}").text
-        block = t[t.index('id="optics"'):]
-        block = block[:block.index("</div>")]
-        for a in AUDIENCES.values():
-            assert a.switch_label in block, a.key
+        assert 'id="optics"' not in t
+        assert "Разбор под задачу" not in t
 
     def test_switching_keeps_the_numbers(self):
         """Спрос от аудитории не зависит — это цифры Яндекса, а не мнение."""
@@ -8040,11 +8562,11 @@ class TestOpticsCanBeSwitchedOnTheResultPage:
         prompt = _core_prompt("full", purpose)
         assert get("student").persona[:40] in prompt
 
-    def test_switch_is_not_offered_when_there_is_only_one_audience(self, monkeypatch):
-        """Сторож от бессмысленного блока: если аудитория одна, выбирать не из
-        чего и строка только мешает."""
-        import app.main as m
-        from app.audiences import BUSINESS
-        monkeypatch.setattr(m.audiences, "AUDIENCES", {"business": BUSINESS})
-        _, pid = self._check("business")
-        assert 'id="optics"' not in client.get(f"/r/{pid}").text
+    def test_audience_still_reaches_the_page_after_the_switcher_is_gone(self):
+        """Блок убран, но САМА оптика по-прежнему разворачивает финальный шаг:
+        это то, ради чего аудитории и разведены. Проверяем, что настройка
+        доезжает до страницы, а не ушла вместе с переключателем."""
+        _, pid = self._check("social_contract")
+        t = client.get(f"/r/{pid}").text
+        aud = json.loads(t.split("const AUDIENCE = ", 1)[1].split(";\n", 1)[0])
+        assert aud["plan_first"] is True

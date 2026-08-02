@@ -409,6 +409,33 @@ def _open(browser, url, *, width=NARROW, cookies=None):
     return ctx, page
 
 
+def _reach_step(page, n):
+    """Раскрыть шаг ленты, откуда бы ни начали.
+
+    Проверка, по которой уже что-то заказано, открывается СРАЗУ на последнем
+    шаге (см. RESUME в result.html): человек, вернувшийся к купленной идее, не
+    должен прокликивать бесплатные шаги заново. Тесты при этом по-прежнему
+    должны уметь добраться до любого шага — свёрнутый разворачивается кликом
+    по строке итога, недостигнутый берётся кнопками «Дальше».
+    """
+    body = page.locator(f"#step-{n} .step-body")
+    if body.is_visible():
+        return
+    summary = page.locator(f"#step-{n} .step-summary")
+    if summary.count() and summary.is_visible():
+        summary.click()
+        page.wait_for_timeout(250)
+        return
+    for _ in range(6):
+        if body.is_visible():
+            return
+        btns = page.locator(".step-next .btn:visible")
+        if btns.count() == 0:
+            break
+        btns.first.click()
+        page.wait_for_timeout(300)
+
+
 def _login(page, base, token):
     """Вход в кабинет — так, как его проходит человек: страница подтверждения
     и кнопка. GET по ссылке из письма намеренно НЕ пускает внутрь (A15:
@@ -564,8 +591,11 @@ def test_weak_demand_stops_selling_in_a_real_browser(site, browser):
         assert page.locator("#order-btn").is_visible()
         assert page.locator("#alt-report .btn").is_visible()
 
-        # и шапка больше не обещает следующий этап
-        assert "переформулировать" in page.locator("#path-next-text").inner_text()
+        # И шапка больше не обещает следующий этап. Раньше это чинилось
+        # подменой текста в строке «Дальше — …»; теперь строки нет вовсе
+        # (шапку разгрузили по кастдеву 2026-08-02), поэтому обещать нечем
+        # по построению — проверяем именно отсутствие элемента.
+        assert page.locator("#path-next-text").count() == 0
         _assert_clean(page, "результат со слабым спросом")
     finally:
         ctx.close()
@@ -642,6 +672,47 @@ def test_cabinet_ranks_ideas_so_they_can_be_compared(site, browser):
         ctx.close()
 
 
+def test_result_script_survives_every_verdict_level(site, browser):
+    """Лента целиком держится на скрипте: если он падает, НИ ОДИН шаг не
+    получает класс .active, а `.step:not(.active):not(.done){display:none}`
+    прячет всё — человек видит только шапку и подпись идеи.
+
+    Поймано живьём 2026-08-02: при разгрузке шапки был удалён элемент
+    `#path-next-text`, но три присваивания в него остались. Разметка при
+    этом валидна, страница отдаётся с кодом 200, и все проверки по
+    подстрокам HTML проходят — ломается только исполнение, и только на
+    вердиктах weak/unknown, то есть у части посетителей. Поэтому проверка
+    именно браузерная и именно по всем уровням вердикта сразу.
+    """
+    for key in ("business", "weak", "nodata", "demand_unknown"):
+        if key not in site["ids"]:
+            continue
+        errors = []
+        ctx = _context(browser, NARROW)
+        page = ctx.new_page()
+        page.on("pageerror", lambda e, k=key: errors.append(f"{k}: {e}"))
+        try:
+            _goto(page, f"{site['base']}/r/{site['ids'][key]}")
+            page.wait_for_timeout(300)
+            assert not errors, "скрипт упал: " + "; ".join(errors)
+            # Лента действительно раскрылась, а не просто «ошибок нет».
+            assert page.locator(".step.active").count() == 1, \
+                f"{key}: ни один шаг не открыт — лента не инициализировалась"
+            # Открытый шаг реально виден. Это и есть отличие живой ленты от
+            # мёртвой: без .active правило .step:not(.active):not(.done)
+            # скрывает все шаги разом. Кнопку «Дальше» здесь требовать
+            # нельзя — на последнем шаге её нет по построению, а проверка с
+            # покупкой открывается сразу на нём (RESUME).
+            assert page.locator(".step.active").is_visible(), \
+                f"{key}: открытый шаг не виден на экране"
+            # И на экране есть хоть одно действие воронки, а не пустая рамка.
+            assert (page.locator(".step-next .btn:visible").count()
+                    or page.locator("#order-btn").is_visible()), \
+                f"{key}: на открытом шаге нет ни одного действия"
+        finally:
+            ctx.close()
+
+
 def test_unmeasured_demand_stops_selling_in_a_real_browser(site, browser):
     """A12. Блок включает скрипт по уровню вердикта — подстроками в HTML это
     не проверить. Смотрим, что видно на экране, когда Вордстат не дал цифр,
@@ -661,9 +732,12 @@ def test_unmeasured_demand_stops_selling_in_a_real_browser(site, browser):
         assert "не состоялась" in lead, lead
         assert "не значит, что спроса нет" in lead
 
-        # напротив фраз — «нет данных», а не вывод о рынке
+        # Напротив фраз — «не удалось измерить», а не вывод о рынке. Причём
+        # именно эта формулировка, а не «не ищут»: последнее теперь означает
+        # честно измеренный ноль (count === 0) и с несостоявшимся замером
+        # (count === null) больше не путается.
         freqs = page.eval_on_selector_all(".freq-num", "e => e.map(x => x.innerText)")
-        assert freqs and all("нет данных" in f for f in freqs), freqs
+        assert freqs and all("не удалось измерить" in f for f in freqs), freqs
         assert not any("почти не ищут" in f for f in freqs), freqs
 
         cls = page.evaluate("""() => ({o: document.getElementById('order').className,
@@ -794,6 +868,9 @@ def test_frequency_note_follows_the_number_it_explains(site, browser, width):
     ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}",
                       width=width)
     try:
+        # Проверка из фикстуры уже оплачена, поэтому лента открывается на
+        # последнем шаге — частотности надо развернуть обратно.
+        _reach_step(page, 1)
         page.wait_for_selector(".freq-match", timeout=10000)
         note = page.locator(".freq-match").first
         num = page.locator(".freq-num").first
@@ -900,6 +977,67 @@ def test_card_grids_stay_even(site, browser, width):
     assert not problems, "\n".join(problems)
 
 
+def test_sharpen_cards_line_up_row_by_row(site, browser):
+    """Кастдев 2026-08-02: «блоки хоть и одного размера, но текст в них не
+    ровно и по-разному, выглядит по-дурацки».
+
+    Три карточки одной ширины, но с текстом разной длины: заголовок в одной
+    занимает две строки, в другой одну — и «Для кого», «Боль» и кнопка едут
+    по вертикали друг относительно друга. Выравнивает subgrid, и проверить
+    это можно только измерением: в CSS-подстроках такое не видно, а
+    сломаться может от любой правки высоты соседнего блока.
+    """
+    offers = [
+        {"angle": "Скорость", "idea_id": "a1", "product_name": "П",
+         "eyebrow": "мастерам", "h1": "Замер за три секунды",
+         "sub": "Наведите камеру.",
+         "pains": [{"h2": "Рулетки нет", "p": "Мерят на глаз."}],
+         "demo_left_label": "л", "demo_left_text": "л", "demo_right_text": "п",
+         "direct_queries": ["а"] * 6},
+        # Намеренно длиннее по всем полям сразу — именно так карточки и разъезжались.
+        {"angle": "Точность в сложных случаях", "idea_id": "a2", "product_name": "П",
+         "eyebrow": "проектировщикам и дизайнерам интерьера, которым нужен точный обмер",
+         "h1": "Измеряет там, где рулетка не достаёт",
+         "sub": "Высокие потолки, узкие ниши, труднодоступные углы — по одной фотографии.",
+         "pains": [{"h2": "Обмер занимает полдня",
+                    "p": "Каждый выезд — час дороги и два часа замеров, а ошибка срывает заказ."}],
+         "demo_left_label": "л", "demo_left_text": "л", "demo_right_text": "п",
+         "direct_queries": ["а"] * 6},
+        {"angle": "Для покупок", "idea_id": "a3", "product_name": "П",
+         "eyebrow": "покупателям мебели", "h1": "Влезет ли диван?",
+         "sub": "Проверьте до заказа.",
+         "pains": [{"h2": "Мебель не входит", "p": "Возврат стоит денег."}],
+         "demo_left_label": "л", "demo_left_text": "л", "demo_right_text": "п",
+         "direct_queries": ["а"] * 6},
+    ]
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}", width=1280)
+    try:
+        page.route("**/api/sharpen", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"ok": True, "sharpened_note": "", "warning": "",
+                             "offers": offers}, ensure_ascii=False)))
+        _reach_step(page, 4)
+        page.click("#sharpen-btn")
+        page.wait_for_selector(".sharp-pain", timeout=15000)
+        page.wait_for_timeout(400)
+
+        def tops(selector, index=None):
+            return page.evaluate(
+                """([sel, idx]) => [...document.querySelectorAll('.sharp-card')].map(c => {
+                    const els = c.querySelectorAll(sel);
+                    const el = idx === null ? els[0] : els[idx];
+                    return el ? Math.round(el.getBoundingClientRect().top) : null;
+                })""", [selector, index])
+
+        for label, sel, idx in (("«Для кого»", ".sharp-meta-row", 0),
+                                ("«Боль»", ".sharp-meta-row", 1),
+                                ("кнопка выбора", ".sharp-pick", None)):
+            ys = tops(sel, idx)
+            assert len(set(ys)) == 1, f"{label} стоит на разной высоте в карточках: {ys}"
+    finally:
+        ctx.close()
+
+
 @pytest.mark.parametrize("width", [1000, NARROW])
 def test_sharpen_card_reads_as_two_fields_not_one_broken_sentence(site, browser, width):
     """B9. Карточку рисует скрипт, поэтому проверять подстрокой в шаблоне
@@ -925,12 +1063,7 @@ def test_sharpen_card_reads_as_two_fields_not_one_broken_sentence(site, browser,
             status=200, content_type="application/json",
             body=json.dumps({"ok": True, "sharpened_note": "", "warning": "",
                              "offers": [offer]}, ensure_ascii=False)))
-        for _ in range(3):
-            btns = page.locator(".step-next .btn:visible")
-            if btns.count() == 0:
-                break
-            btns.first.click()
-            page.wait_for_timeout(300)
+        _reach_step(page, 4)
         page.click("#sharpen-btn")
         page.wait_for_selector(".sharp-pain", timeout=15000)
         page.wait_for_timeout(300)
