@@ -369,6 +369,41 @@ class TestReportEngine:
             assert reader in _core_prompt("full", purpose)
             assert reader in _section_prompt("summary", "full", purpose)
 
+    def test_model_knows_the_reader_already_saw_the_free_check(self):
+        """Вопрос владельца 2026-08-02 после покупки за 990 ₽: «нужно
+        убедиться, что быстрый разбор не показывает только информацию,
+        которую пользователь уже бесплатно увидел».
+
+        Корень был в промпте: модели давали цифры бесплатной проверки и
+        велели «использовать буквально», но НЕ говорили, что читатель эти
+        же цифры уже видел на /r/. Пересказ был самым естественным ответом
+        на такие вводные и ничем не наказывался.
+        """
+        from app.report_engine import _core_prompt, _section_prompt, PURPOSES
+        for purpose in PURPOSES:
+            for prompt in (_core_prompt("quick", purpose),
+                           _section_prompt("market", "quick", purpose)):
+                low = prompt.lower()
+                assert "уже видел" in low, purpose
+                assert "пересказ" in low, purpose
+
+    def test_the_rule_reaches_the_section_most_at_risk(self):
+        """Раздел «Спрос и рынок» опаснее прочих: его вводные — ровно та
+        таблица частотностей, которую человек уже прочитал бесплатно."""
+        from app.report_engine import _section_prompt
+        p = _section_prompt("market", "quick", "business")
+        assert "частотностями" in p
+        assert "без потери смысла" in p   # критерий, по которому резать
+
+    def test_rule_does_not_ban_the_numbers_themselves(self):
+        """Сторож от чрезмерной правки: цифры Вордстата — единственное, чем
+        разбор отличается от бесплатных ИИ-генераторов (см. докстринг
+        report_engine). Запретить их значило бы убить смысл продукта."""
+        from app.report_engine import _section_prompt
+        p = _section_prompt("market", "quick", "business")
+        assert "Цифры называй" in p
+        assert "буквально — не выдумывай другие" in p
+
     def test_purpose_reaches_the_model_prompt(self):
         from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
         cap = {}
