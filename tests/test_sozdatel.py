@@ -190,15 +190,19 @@ def _core_body(risk_count=2) -> dict:
     }
 
 
-def _fake_llm(risk_count=2, body="Абзац один.\n\nАбзац два.", captured=None):
+def _fake_llm(risk_count=2, body="Абзац один.\n\nАбзац два.", captured=None, table=None):
     """Один фейк на оба вида вызова: движок ходит в модель отдельно за ядром
-    (балл + риски) и отдельно за каждым разделом."""
+    (балл + риски) и отдельно за каждым разделом. `table` -- для секций с
+    wants_table (сейчас только "finance"), см. app/report_engine.py."""
     async def fake_post(provider, payload):
         if captured is not None:
             captured.setdefault("calls", []).append(dict(payload))
             captured.update(payload)
         if "Ты пишешь ОДИН раздел" in payload.get("instructions", ""):
-            return _yandex_response(json.dumps({"body": body}, ensure_ascii=False))
+            section_body = {"body": body}
+            if table is not None:
+                section_body["table"] = table
+            return _yandex_response(json.dumps(section_body, ensure_ascii=False))
         return _yandex_response(json.dumps(_core_body(risk_count), ensure_ascii=False))
     return fake_post
 
@@ -368,10 +372,12 @@ class TestReportEngine:
     def test_purpose_reaches_the_model_prompt(self):
         from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
         cap = {}
-        asyncio.run(generate_section("finance", "Пошив штор на заказ на дому",
-                                     DEMAND_DATA_FIXTURE, "full",
-                                     purpose=PURPOSE_SOCIAL_CONTRACT,
-                                     _post=_fake_llm(body="Смета: 50 000 ₽.", captured=cap)))
+        asyncio.run(generate_section(
+            "finance", "Пошив штор на заказ на дому",
+            DEMAND_DATA_FIXTURE, "full", purpose=PURPOSE_SOCIAL_CONTRACT,
+            _post=_fake_llm(body="Смета: 50 000 ₽.", captured=cap,
+                            table={"caption": "Смета", "rows": [{"item": "Ткань", "sum": 50000}],
+                                   "total": 50000})))
         flat = " ".join(cap["instructions"].split())
         assert "комиссии по социальному контракту" in flat
 
@@ -408,8 +414,34 @@ class TestReportEngine:
         out = asyncio.run(generate_section(
             "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
             purpose=PURPOSE_SOCIAL_CONTRACT,
-            _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.")))
+            _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.",
+                            table={"caption": "Смета расходов", "rows": [
+                                {"item": "Аренда", "sum": 15000},
+                                {"item": "Материалы", "sum": 10000}], "total": 25000})))
         assert "15 000" in out["body"]
+        assert out["table"]["total"] == 25000
+
+    def test_finance_section_without_table_rejected_for_estimate_required_audience(self):
+        """F: соц-план.рф (владелец, 2026-08-02) -- смета таблицей построчно,
+        не абзацем. Для соцконтракта (Audience.estimate_required) таблица —
+        такая же часть услуги, за которую заплатили, как и суммы в body."""
+        from app.report_engine import generate_section, ReportEngineError, PURPOSE_SOCIAL_CONTRACT
+        with pytest.raises(ReportEngineError):
+            asyncio.run(generate_section(
+                "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+                purpose=PURPOSE_SOCIAL_CONTRACT,
+                _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.")))
+
+    def test_finance_table_optional_for_business(self):
+        """Для фаундера таблица — приятное дополнение, не обязательное
+        условие: смета не единственное, за чем он платит (в отличие от
+        соцконтракта)."""
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="Стартовые затраты около 50 000 ₽.")))
+        assert "table" not in out
 
     def test_finance_section_without_numbers_still_accepted_for_business(self):
         """Проверка узкая для той аудитории, где смета — единственное, за чем
@@ -459,6 +491,51 @@ class TestReportEngine:
         user_content = cap["input"]
         assert "5200" in user_content or "5 200" in user_content
         assert "t.ru" in user_content
+
+    def test_viability_label_is_deterministic_not_llm(self):
+        """F: dimeadozen.ai (владелец, 2026-08-02) -- короткая метка рядом с
+        баллом ("Strong execution path"), но у нас -- код, не LLM: тот же
+        принцип, что у compute_verdict в demand.py, вердикт не должен звучать
+        по-разному от прогона к прогону на один и тот же балл."""
+        from app.report_engine import _viability_label
+        assert _viability_label(96) == "Сильная позиция для запуска"
+        assert _viability_label(80) == "Сильная позиция для запуска"
+        assert _viability_label(79) == "Рабочий вариант, есть слабые места"
+        assert _viability_label(60) == "Рабочий вариант, есть слабые места"
+        assert _viability_label(59) == "Нужна доработка перед запуском"
+        assert _viability_label(40) == "Нужна доработка перед запуском"
+        assert _viability_label(39) == "Рискованно запускать в текущем виде"
+        assert _viability_label(1) == "Рискованно запускать в текущем виде"
+
+    def test_generate_core_includes_viability_label(self):
+        from app.report_engine import generate_core
+        out = asyncio.run(generate_core(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                        _post=_fake_llm()))
+        assert out["viability_label"]
+
+    def test_parse_table_filters_malformed_rows_and_computes_total(self):
+        from app.report_engine import _parse_table
+        table = _parse_table({
+            "caption": "Смета",
+            "rows": [
+                {"item": "Аренда", "sum": 15000},
+                {"item": "", "sum": 5000},          # без названия -- отбросить
+                {"item": "Без суммы"},               # без суммы -- отбросить
+                {"item": "Реклама", "sum": "много"},  # сумма не число -- отбросить
+                {"item": "Материалы", "sum": 10000},
+            ],
+            # total не задан -- должен посчитаться сам из валидных строк
+        })
+        assert table["rows"] == [{"item": "Аренда", "sum": 15000}, {"item": "Материалы", "sum": 10000}]
+        assert table["total"] == 25000
+
+    def test_parse_table_returns_none_for_garbage(self):
+        from app.report_engine import _parse_table
+        assert _parse_table(None) is None
+        assert _parse_table("не таблица") is None
+        assert _parse_table({"rows": "тоже не список"}) is None
+        assert _parse_table({"rows": []}) is None
+        assert _parse_table({"rows": [{"item": "", "sum": 1}]}) is None
 
 
 class TestLandingAndLaunch:
@@ -7838,6 +7915,16 @@ class TestStudentAudience:
         nums = [set(re.findall(r"(\d{3,4}) ₽", client.get(p).text))
                 for p in ("/social-contract", "/students")]
         assert nums[0] == nums[1], nums
+
+    def test_students_pricing_note_does_not_promise_tailoring_the_report_lacks(self):
+        """D4-находка (2026-08-01): витрина обещала «аудитория и когда идею
+        стоит закрыть», а SECTION_SPECS для student не имеет ни одного
+        by_audience-переопределения (в отличие от social_contract) -- те же
+        разделы, что у бизнес-аудитории. Пока это не поменялось, витрина не
+        должна обещать подстройку, которой раздел отчёта не делает."""
+        text = client.get("/students").text
+        assert "когда идею стоит закрыть" not in text
+        assert "рынок, конкуренты, финансы, риски и план запуска" in text
 
     def test_audience_pages_are_tinted_but_share_the_one_accent(self):
         """Пункт 12 (Борис): вкладки аудиторий должны различаться, но

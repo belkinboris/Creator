@@ -64,7 +64,8 @@
   .score-card.bad{border-left-color:var(--bad)}
   .score-card .num{font:600 44px "IBM Plex Mono",monospace;white-space:nowrap}
   .score-card .num small{font-size:.4em;color:var(--muted)}
-  .score-card .note{color:var(--muted);font-size:15px;max-width:40em}
+  .score-card .label{font:600 16px "IBM Plex Sans",sans-serif;white-space:nowrap}
+  .score-card .note{color:var(--muted);font-size:15px;max-width:40em;flex-basis:100%}
   .risks{display:grid;gap:14px;margin:0 0 22px}
   /* Ровно две колонки, а не auto-fit: рисков всегда 2 (быстрый разбор) или 4
      (бизнес-план), см. report_engine._risk_count — значит два столбца дают
@@ -100,6 +101,16 @@
   .section.locked p{color:var(--muted);filter:blur(3px);user-select:none;margin-top:8px}
   .section.locked h2::after{content:"— в отчёте";font-size:13px;font-weight:500;color:var(--muted);margin-left:8px}
   .section .teaser{color:var(--ink);font-size:15px;margin-top:10px;filter:none !important}
+
+  /* Смета построчно рядом с текстом раздела (F: соц-план.рф, 2026-08-02) --
+     не абзац цифр, а таблица, которую видно одним взглядом. */
+  .cost-table{width:100%;max-width:52em;margin-top:16px;border-collapse:collapse;font-size:14px}
+  .cost-table caption{text-align:left;font-size:13px;font-weight:600;color:var(--muted);
+    margin-bottom:6px;caption-side:top}
+  .cost-table td{padding:8px 10px;border-top:1px solid var(--line)}
+  .cost-table td:first-child{color:var(--ink)}
+  .cost-table td.sum{font:600 14px "IBM Plex Mono",monospace;text-align:right;white-space:nowrap}
+  .cost-table tfoot td{border-top:1px solid var(--ink);font-weight:600}
 
   .pricing{border:1px solid var(--ink);background:var(--box);border-radius:8px;padding:22px;margin:22px 0 40px}
   .pricing h3{font-size:18px;font-weight:600;margin-bottom:6px}
@@ -290,6 +301,7 @@ if (REPORT && typeof REPORT.viability_score === 'number') {
   document.getElementById('score-section').innerHTML = `
     <div class="score-card ${cls}">
       <div class="num">${score}<small>/100</small></div>
+      <div class="label">${escapeHtml(REPORT.viability_label || '')}</div>
       <div class="note">${escapeHtml(REPORT.viability_summary || '')}</div>
     </div>
     <div class="risks">${(REPORT.top_risks || []).map(r => `
@@ -310,6 +322,7 @@ if (!REPORT && SAMPLE) {
     <div class="sample-tag">Часть разбора — бесплатно</div>
     <div class="score-card ${cls}">
       <div class="num">${SAMPLE.viability_score}<small>/100</small></div>
+      <div class="label">${escapeHtml(SAMPLE.viability_label || '')}</div>
       <div class="note">${escapeHtml(SAMPLE.viability_summary || '')}</div>
     </div>
     <div class="risks">${(SAMPLE.top_risks || []).map(r => `
@@ -338,12 +351,25 @@ const sectionsEl = document.getElementById('sections');
 
 function inTier(key){ return TIER_KEYS.indexOf(key) !== -1; }
 
+// Смета построчно (F: соц-план.рф, владелец 2026-08-02) -- не у каждого
+// раздела есть table, только у тех, где wants_table (см. report_engine.py).
+function tableHtml(t){
+  if (!t || !t.rows || !t.rows.length) return '';
+  const rows = t.rows.map(r => `
+      <tr><td>${escapeHtml(r.item)}</td><td class="sum">${fmt(r.sum)} ₽</td></tr>`).join('');
+  return `<table class="cost-table">
+    <caption>${escapeHtml(t.caption || 'Смета')}</caption>
+    <tbody>${rows}</tbody>
+    <tfoot><tr><td>Итого</td><td class="sum">${fmt(t.total)} ₽</td></tr></tfoot>
+  </table>`;
+}
+
 function sectionHtml(s){
   const got = gotMap[s.key];
   if (got) {
     const paragraphs = String(got.body || '').split(/\n\n+/)
       .filter(p => p.trim()).map(p => `<p>${escapeHtml(p)}</p>`).join('');
-    return `<section class="section" id="sec-${s.key}"><h2>${escapeHtml(s.title)}</h2>${paragraphs}</section>`;
+    return `<section class="section" id="sec-${s.key}"><h2>${escapeHtml(s.title)}</h2>${paragraphs}${tableHtml(got.table)}</section>`;
   }
   if (inTier(s.key)) {
     return `<section class="section pending" id="sec-${s.key}">

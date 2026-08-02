@@ -163,6 +163,11 @@ SECTION_SPECS = [
              "для России и этой ниши допущения и назови их прямо: «считаю при среднем "
              "чеке N ₽, конверсии M%, аренде K ₽/мес». Отдельной фразой пометь, что это "
              "оценка по допущениям, а не гарантия.",
+     # F: соц-план.рф (владелец, 2026-08-02) — смета там таблицей построчно с
+     # суммами и итогом, не абзацем текста. Абзац это тоже даёт числа, но
+     # читатель (и тем более комиссия соцзащиты) не может свести его в смету
+     # одним взглядом -- см. table-инструкции в _section_prompt.
+     "wants_table": True,
      "by_audience": {"social_contract": {"title": "Смета и расчёты для комиссии",
                 "ask": "На что пойдут деньги выплаты и когда дело выйдет в плюс?",
                 "must": "Это главная секция, комиссия читает её внимательнее всего. "
@@ -350,10 +355,26 @@ def _core_prompt(tier: str, purpose: str = PURPOSE_BUSINESS) -> str:
 такие ниши обычно), а не общие фразы вида «может не быть спроса»."""
 
 
+_TABLE_ASK = """
+Дополнительно к тексту верни ТУ ЖЕ смету/расчёт ЕЩЁ И ТАБЛИЦЕЙ, построчно —
+не заставляй читателя сводить абзац в таблицу самому. От 3 до 8 строк, ровно
+столько, сколько нужно именно этой идее (не переноси чужой шаблон
+«оборудование» и «сырьё» на идею, где расходы совсем другие — это может
+быть реклама, аренда, комплектующие, что угодно, что реально нужно на старт
+ИМЕННО ЭТОЙ идее). У каждой строки — короткое название статьи расходов и
+сумма в рублях. Итог — сумма всех строк."""
+
+_TABLE_SCHEMA_FIELD = ''',
+ "table": {"caption": "короткое название таблицы, например \\"Смета расходов на старт\\"",
+   "rows": [{"item": "название статьи расхода", "sum": число_рублей_без_текста}],
+   "total": число_рублей_без_текста}'''
+
+
 def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS) -> str:
     if purpose not in PURPOSES:
         purpose = PURPOSE_BUSINESS
     spec = _spec(key, purpose)
+    wants_table = bool(spec.get("wants_table"))
     return f"""{audiences.get(purpose).persona}
 
 Твой текст прочитает: {audiences.get(purpose).reader}. Пиши так, чтобы это
@@ -371,13 +392,14 @@ def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS) -> str
 
 Требования к этому разделу:
 {spec['must']}
+{_TABLE_ASK if wants_table else ""}
 
 {_HOW_TO_WRITE}
 
-Объём: 3-6 содержательных абзацев. Пиши только этот раздел, без заголовка.
+Объём текста body: 3-6 содержательных абзацев. Пиши только этот раздел, без заголовка.
 
 Ответь ТОЛЬКО валидным JSON без markdown-обёртки:
-{{"body": "текст раздела"}}"""
+{{"body": "текст раздела"{_TABLE_SCHEMA_FIELD if wants_table else ""}}}"""
 
 
 def _user_message(idea: str, demand_data: dict, chosen_offer: dict | None = None) -> str:
@@ -461,7 +483,24 @@ async def generate_core(idea: str, demand_data: dict, tier: str = "full",
             raise ReportEngineError(_MALFORMED, tech="риск без title/body")
         risks.append({"title": title, "body": body})
 
-    return {"viability_score": int(score), "viability_summary": summary, "top_risks": risks}
+    return {"viability_score": int(score), "viability_summary": summary,
+            "viability_label": _viability_label(int(score)), "top_risks": risks}
+
+
+def _viability_label(score: int) -> str:
+    """Короткая словесная метка рядом с баллом — так же, как у dimeadozen.ai
+    ("Strong execution path", владелец прислал референс 2026-08-02). Балл сам
+    по себе плохо читается без контекста ("62 из 100 — это много или мало?"),
+    а метка объясняет за секунду. Детерминированная функция, не LLM — тот же
+    принцип, что и у compute_verdict в demand.py: вердикт не должен зависеть
+    от того, как модель сформулирует его в этот раз."""
+    if score >= 80:
+        return "Сильная позиция для запуска"
+    if score >= 60:
+        return "Рабочий вариант, есть слабые места"
+    if score >= 40:
+        return "Нужна доработка перед запуском"
+    return "Рискованно запускать в текущем виде"
 
 
 async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "full",
@@ -499,7 +538,44 @@ async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "
     if (key == "finance" and audiences.get(purpose).estimate_required
             and "₽" not in body and "руб" not in body.lower()):
         raise ReportEngineError(_MALFORMED, tech=f"раздел {key}: нет сумм в рублях")
-    return {"key": key, "title": section_title(key, purpose), "body": body}
+
+    result = {"key": key, "title": section_title(key, purpose), "body": body}
+    if _spec(key, purpose).get("wants_table"):
+        table = _parse_table(data.get("table"))
+        if table:
+            result["table"] = table
+        elif audiences.get(purpose).estimate_required:
+            # Соцзащита читает смету построчно (F: соц-план.рф, 2026-08-02) —
+            # для этой аудитории таблица не украшение, а часть услуги, за
+            # которую заплатили, как и суммы в body чуть выше.
+            raise ReportEngineError(_MALFORMED, tech=f"раздел {key}: нет таблицы сметы")
+    return result
+
+
+def _parse_table(raw: object) -> dict | None:
+    """Смета построчно, не абзацем -- см. wants_table в SECTION_SPECS.
+    Мягко деградирует до None при любой кривизне: таблица — дополнение к
+    body, а не замена, отчёт не должен падать из-за одной лишней строки."""
+    if not isinstance(raw, dict):
+        return None
+    rows_raw = raw.get("rows")
+    if not isinstance(rows_raw, list):
+        return None
+    rows = []
+    for row in rows_raw:
+        if not isinstance(row, dict):
+            continue
+        item = str(row.get("item") or "").strip()
+        amount = row.get("sum")
+        if item and isinstance(amount, (int, float)) and not isinstance(amount, bool):
+            rows.append({"item": item, "sum": amount})
+    if not rows:
+        return None
+    total = raw.get("total")
+    if not isinstance(total, (int, float)) or isinstance(total, bool):
+        total = sum(r["sum"] for r in rows)
+    caption = str(raw.get("caption") or "").strip() or "Смета"
+    return {"caption": caption, "rows": rows, "total": total}
 
 
 async def generate_report(idea: str, demand_data: dict, tier: str = "quick",
