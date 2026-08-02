@@ -655,8 +655,7 @@ def result_page(rid: str, request: Request):
         # шаг под него, см. PURPOSE в result.html.
         .replace("__PURPOSE_JSON__", json.dumps(rec.purpose, ensure_ascii=False))
         .replace("__AUDIENCE_JSON__",
-                 json.dumps(audiences.for_page(rec.purpose), ensure_ascii=False))
-        .replace("__OPTICS__", _optics_html(rec.purpose)))
+                 json.dumps(audiences.for_page(rec.purpose), ensure_ascii=False)))
     return HTMLResponse(_fill_server_values(html_out, rec.purpose))
 
 
@@ -3018,29 +3017,6 @@ def project_page(idea_id: str):
     tpl = _static("project.html")
     return HTMLResponse(tpl.replace("{{IDEA_ID}}", idea_id)
                            .replace("{{PRODUCT_NAME}}", proj.product_name))
-
-
-def _optics_html(current: str) -> str:
-    """Чьими глазами человек читает разбор — и как это поменять.
-
-    Ручка `POST /api/demand/{id}/purpose` появилась раньше кнопки: человек,
-    попавший не на ту витрину, видел результат чужой оптикой и мог только
-    начать всё сначала. Витрин три, находят нас и поиском, и по ссылке от
-    знакомого. Спрос при смене не пересчитывается — цифры Яндекса от
-    аудитории не зависят; меняется только то, что стоит главным действием,
-    что мы отвечаем при слабом спросе и какой персоной пишется платный разбор.
-
-    Если аудитория одна, выбирать не из чего — блока нет вовсе.
-    """
-    if len(audiences.AUDIENCES) < 2:
-        return ""
-    cur = audiences.get(current)
-    others = "".join(
-        f'<button type="button" data-purpose="{a.key}">{html.escape(a.switch_label)}</button>'
-        for a in audiences.AUDIENCES.values() if a.key != cur.key)
-    return ('<div class="optics" id="optics">'
-            f'<span class="optics-cur">Разбор под задачу: <b>{html.escape(cur.switch_label)}</b></span>'
-            f'<span class="optics-alt">Не то? {others}</span></div>')
 
 
 def _audience_switch_html(current: str) -> str:

@@ -564,8 +564,11 @@ def test_weak_demand_stops_selling_in_a_real_browser(site, browser):
         assert page.locator("#order-btn").is_visible()
         assert page.locator("#alt-report .btn").is_visible()
 
-        # и шапка больше не обещает следующий этап
-        assert "переформулировать" in page.locator("#path-next-text").inner_text()
+        # И шапка больше не обещает следующий этап. Раньше это чинилось
+        # подменой текста в строке «Дальше — …»; теперь строки нет вовсе
+        # (шапку разгрузили по кастдеву 2026-08-02), поэтому обещать нечем
+        # по построению — проверяем именно отсутствие элемента.
+        assert page.locator("#path-next-text").count() == 0
         _assert_clean(page, "результат со слабым спросом")
     finally:
         ctx.close()
@@ -640,6 +643,38 @@ def test_cabinet_ranks_ideas_so_they_can_be_compared(site, browser):
         _assert_clean(page, "кабинет со сравнением идей")
     finally:
         ctx.close()
+
+
+def test_result_script_survives_every_verdict_level(site, browser):
+    """Лента целиком держится на скрипте: если он падает, НИ ОДИН шаг не
+    получает класс .active, а `.step:not(.active):not(.done){display:none}`
+    прячет всё — человек видит только шапку и подпись идеи.
+
+    Поймано живьём 2026-08-02: при разгрузке шапки был удалён элемент
+    `#path-next-text`, но три присваивания в него остались. Разметка при
+    этом валидна, страница отдаётся с кодом 200, и все проверки по
+    подстрокам HTML проходят — ломается только исполнение, и только на
+    вердиктах weak/unknown, то есть у части посетителей. Поэтому проверка
+    именно браузерная и именно по всем уровням вердикта сразу.
+    """
+    for key in ("business", "weak", "nodata", "demand_unknown"):
+        if key not in site["ids"]:
+            continue
+        errors = []
+        ctx = _context(browser, NARROW)
+        page = ctx.new_page()
+        page.on("pageerror", lambda e, k=key: errors.append(f"{k}: {e}"))
+        try:
+            _goto(page, f"{site['base']}/r/{site['ids'][key]}")
+            page.wait_for_timeout(300)
+            assert not errors, "скрипт упал: " + "; ".join(errors)
+            # Лента действительно раскрылась, а не просто «ошибок нет».
+            assert page.locator(".step.active").count() == 1, \
+                f"{key}: ни один шаг не открыт — лента не инициализировалась"
+            assert page.locator(".step-next .btn:visible").count() >= 1, \
+                f"{key}: кнопка перехода к следующему шагу не видна"
+        finally:
+            ctx.close()
 
 
 def test_unmeasured_demand_stops_selling_in_a_real_browser(site, browser):
