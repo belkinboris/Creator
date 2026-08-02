@@ -1435,18 +1435,28 @@ async def report_section(rid: int, request: Request, key: str):
 
 
 @app.post("/api/example/publish")
-def example_publish(request: Request, check_id: int, tier: str = "full"):
+def example_publish(request: Request, check_id: str, tier: str = "full"):
     """Пометить уже собранный отчёт публичным примером (/example).
 
     Пример обязан быть НАСТОЯЩИМ выводом движка: написанный руками текст
     всегда получается глаже, и человек заплатит за одно, а получит другое.
     Поэтому публикуется только уже сгенерированный отчёт -- собрать его
     можно тем же владельческим прогоном, /report/{id}?key=...&preview=full.
+
+    check_id принимает то же, что видно в адресной строке, -- public_id
+    проверки спроса (буквы из /r/<...>). Числовой id тоже работает (только у
+    владельца, см. _find_check), но добывать его отдельным запросом к базе
+    незачем: весь остальной проект уже адресуется public_id, эта ручка была
+    единственным исключением.
     """
     _check_owner(request)
     with Session(engine) as s:
+        rec, _ = _find_check(s, check_id, request)
+        if not rec:
+            return JSONResponse({"ok": False, "error": "Проверка с таким адресом не найдена."},
+                                status_code=404)
         target = s.exec(select(ReportPurchase).where(
-            ReportPurchase.check_id == check_id, ReportPurchase.tier == tier
+            ReportPurchase.check_id == rec.id, ReportPurchase.tier == tier
         ).order_by(ReportPurchase.created_at.desc())).first()
         if not target:
             return JSONResponse({"ok": False, "error": "Отчёт по этой проверке ещё не собран."},

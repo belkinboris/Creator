@@ -2814,6 +2814,104 @@ class TestAccountLinkEverywhere:
         assert re.search(r'id="path"', text), "раздел «Путь от идеи до денег» пропал совсем"
 
 
+class TestSocialContractPlanFollowsTheLegalStructure:
+    """Решение владельца 2026-08-02: не переделывать каждый раздел под каждую
+    аудиторию, но полный бизнес-план (2990 ₽) для соцконтракта обязан по
+    структуре отвечать на то, что реально спрашивает комиссия соцзащиты —
+    а не читаться венчурным разбором с заменённым названием. Обычный
+    бизнес-план (business/student) остаётся как был."""
+
+    # Ключи, для которых венчурная формулировка ломает саму суть вопроса под
+    # соцконтракт: "почему сейчас на рынке момент" никто у заявителя не
+    # спрашивает, "MVP без вложений" прямо противоречит тому, что деньги на
+    # старт даёт государство, "проверить дёшево гипотезу" — заявитель не
+    # тестирует гипотезу, а исполняет уже одобренный план.
+    OVERRIDDEN_KEYS = ["problem", "audience", "why_now", "competitors", "positioning",
+                       "monetization", "pricing", "unit", "mvp", "channels",
+                       "first_clients", "legal", "risks", "validation",
+                       # уже было сделано раньше (D1, первый заход) — сторож,
+                       # чтобы не потерять при следующей правке промптов.
+                       "summary", "moat", "finance", "launch", "kill_criteria"]
+
+    def test_every_full_tier_section_has_a_social_contract_reading(self):
+        from app.report_engine import SECTION_SPECS, QUICK_KEYS
+        full_only = [s["key"] for s in SECTION_SPECS if s["key"] not in QUICK_KEYS]
+        missing = [k for k in full_only if k not in self.OVERRIDDEN_KEYS]
+        assert not missing, f"разделы без соцконтрактной оптики: {missing}"
+        for s in SECTION_SPECS:
+            if s["key"] in self.OVERRIDDEN_KEYS:
+                assert "social_contract" in (s.get("by_audience") or {}), s["key"]
+
+    def test_business_plan_keeps_the_default_venture_reading(self):
+        """«Другой бизнес-план чтобы был обычный» — business/student не
+        переопределены веткой by_audience и получают исходный венчурный
+        текст без изменений."""
+        from app.report_engine import _spec
+        for key in ("why_now", "mvp", "validation", "positioning"):
+            business = _spec(key, "business")
+            student = _spec(key, "student")
+            assert business == student, key
+            assert business["ask"] not in ("", None)
+
+    def test_lean_startup_language_is_gone_from_the_social_contract_plan(self):
+        """MVP «без вложений» противоречит самой сути социального контракта
+        (деньги на старт даёт государство), а «проверить дёшево гипотезу» —
+        заявитель исполняет уже одобренный план, а не тестирует допущение."""
+        from app.report_engine import _spec
+        mvp = _spec("mvp", "social_contract")
+        validation = _spec("validation", "social_contract")
+        for spec in (mvp, validation):
+            low = (spec["ask"] + spec["must"]).lower()
+            assert "без вложени" not in low
+            assert "гипотез" not in low
+
+    def test_why_now_becomes_applicant_readiness_not_market_timing(self):
+        """Комиссию не интересует рыночный тайминг — её интересует, готов ли
+        именно этот человек вести именно это дело."""
+        from app.report_engine import _spec
+        s = _spec("why_now", "social_contract")
+        low = (s["ask"] + s["must"]).lower()
+        assert "заявител" in low
+        assert "рынок" not in low and "рыноч" not in low
+
+    def test_marketing_positioning_becomes_a_concrete_service_list(self):
+        from app.report_engine import _spec
+        s = _spec("positioning", "social_contract")
+        low = (s["ask"] + s["must"]).lower()
+        assert "конкурент" not in low   # это уже отдельный раздел
+        assert "списком" in low or "конкретн" in low
+
+    def test_advertising_budget_is_not_suggested_for_client_channels(self):
+        """Рекламный бюджет не входит в смету социального контракта (см.
+        landing/result.html) — раздел о привлечении клиентов не должен молча
+        предполагать деньги на рекламу."""
+        from app.report_engine import _spec
+        s = _spec("channels", "social_contract")
+        assert "бюджет" in s["must"].lower()
+
+    def test_unit_economics_are_told_to_match_the_estimate(self):
+        """Смета, план доходов и цена — разные секции; для соцконтракта они
+        обязаны сходиться, иначе комиссия увидит нестыковку между разделами."""
+        from app.report_engine import _spec
+        for key in ("pricing", "unit"):
+            s = _spec(key, "social_contract")
+            assert "смет" in s["must"].lower() or "план доход" in s["must"].lower()
+
+    def test_registration_status_ties_to_the_program_deadline(self):
+        from app.report_engine import _spec
+        s = _spec("legal", "social_contract")
+        assert "срок" in (s["ask"] + s["must"]).lower()
+
+    def test_section_titles_read_naturally_for_a_commission(self):
+        """Заголовки, которые видит комиссия в отчёте, а не только промпт."""
+        from app.report_engine import section_title
+        assert section_title("mvp", "social_contract") == "Что уже есть, а что покупается по смете"
+        assert section_title("positioning", "social_contract") == "Что именно входит в услугу"
+        assert section_title("why_now", "social_contract") == "Опыт и ресурсы заявителя"
+        assert section_title("first_clients", "social_contract") == "Когда появятся первые клиенты"
+        assert section_title("validation", "social_contract") == "Как заявитель поймёт, что план выполняется"
+
+
 class TestSocialContractPage:
     """Отдельная посадочная страница под рекламу на аудиторию социального
     контракта -- не часть общего позиционирования сайта (см. CLAUDE.md),
@@ -5034,6 +5132,22 @@ class TestPublicReportExample:
         assert page.status_code == 200
         assert "Смета расходов построчно." in page.text          # текст виден без оплаты
         assert "Это настоящий отчёт, собранный сервисом" in page.text
+
+    def test_publish_accepts_the_public_id_from_the_address_bar(self, monkeypatch):
+        """Раньше ручка принимала только числовой id, и владельцу пришлось бы
+        отдельно лезть в базу за ним — единственное исключение из правила
+        «весь проект адресуется public_id». Теперь то же значение, что видно
+        в /r/<...>, работает и здесь."""
+        self._clear_examples()
+        rid = self._built_report(monkeypatch)
+        r = client.post(f"/api/example/publish?check_id={pub(rid)}&tier=full", headers=OWNER)
+        assert r.status_code == 200 and r.json()["url"] == "/example"
+        assert client.get("/example").status_code == 200
+
+    def test_publish_reports_unknown_address_instead_of_crashing(self):
+        self._clear_examples()
+        r = client.post("/api/example/publish?check_id=not-a-real-id&tier=full", headers=OWNER)
+        assert r.status_code == 404
 
     def test_example_page_has_no_leaked_template_placeholders(self, monkeypatch):
         """Найдено живым кастдев-прогоном: `example_page` собирала HTML из
