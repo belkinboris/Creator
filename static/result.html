@@ -503,6 +503,12 @@ document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
       </span>
     </div>
     ${f.matched_phrase ? `<span class="freq-match">Число посчитано по более ходовой формулировке, которую подсказал Вордстат: «${escapeHtml(f.matched_phrase)}»</span>` : ''}
+    <!-- Родовой запрос честно помечен: его ищут в том числе те, кому нужно
+         совсем другое внутри той же категории, и в балл он не входит. Без
+         пометки строка с самым большим числом читалась как главная цифра
+         проверки — на живом прогоне 400 978 по слову «шиномонтаж» затмили
+         23 123 по «выездному», хотя клиент у идеи именно во втором. -->
+    ${f.kind === 'category' ? '<span class="freq-match">Категория целиком: сюда входят и те, кому нужна не ваша услуга. В оценку спроса не идёт.</span>' : ''}
   </div>`).join('');
 
 const v = DATA.verdict || {};
@@ -706,7 +712,12 @@ if (hasComp) document.getElementById('step2-next').textContent = nextLabel(2);
 if (hasScores) document.getElementById('step3-next').textContent = nextLabel(3);
 
 function summarizeStep1(){
-  const known = (DATA.formulations||[]).filter(f => f.count !== null);
+  // Считаем по ЦЕЛЕВЫМ фразам, как и вердикт с баллом (см. check_demand).
+  // Максимум по всем строкам взял бы родовую категорию — и свёрнутый шаг
+  // показывал бы число, которое к идее относится лишь косвенно.
+  const all = DATA.formulations || [];
+  const target = all.filter(f => f.kind !== 'category' && f.count !== null);
+  const known = target.length ? target : all.filter(f => f.count !== null);
   const top = known.length ? Math.max(...known.map(f => f.count)) : null;
   const label = {strong:'спрос есть', niche:'нишевый спрос', weak:'спроса почти нет', unknown:'частотность недоступна'}[v.level] || '';
   return top !== null ? `${fmt(top)} запросов/мес — ${label}` : label;

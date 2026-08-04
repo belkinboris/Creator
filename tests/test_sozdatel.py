@@ -1305,6 +1305,101 @@ def _static_result():
     return Path("static/result.html").read_text(encoding="utf-8")
 
 
+class TestCategoryDemandIsNotIdeaDemand:
+    """Живой прогон 2026-08-04, идея «мобильный шиномонтаж с выездом».
+
+    Родовое «шиномонтаж» дало 400 978/мес и как максимум ушло и в вердикт
+    («Спрос есть: ищут 400 978 раз в месяц»), и в балл 10/10, и в поиск
+    конкурентов. Но 400 978 — это спрос на шиномонтаж ВООБЩЕ, включая
+    стационарные точки, куда клиент мобильной услуги как раз не идёт;
+    целевые фразы давали 23 123 и 19 271. Число красивее, вывод неверный.
+
+    Побочно это же тянуло в конкуренты агрегаторы: по широкому запросу топ
+    выдачи всегда занят справочниками — это их бизнес.
+    """
+
+    def _post(self, searched):
+        """Фейковый _post с реальными числами того прогона."""
+        counts = {"шиномонтаж": 400978, "выездной шиномонтаж": 23123,
+                  "мобильный шиномонтаж": 19271, "шиномонтаж на дому": 307}
+        async def post(provider, payload):
+            if provider == "yandex":
+                if "шкалам" in payload["instructions"]:
+                    return _yandex_response(json.dumps(
+                        {"competition": 5, "timing": 5, "execution": 5,
+                         "notes": {"competition": "", "timing": "", "execution": ""}},
+                        ensure_ascii=False))
+                return _yandex_response(json.dumps([
+                    {"phrase": "шиномонтаж", "kind": "category"},
+                    {"phrase": "выездной шиномонтаж", "kind": "target"},
+                    {"phrase": "мобильный шиномонтаж", "kind": "target"},
+                    {"phrase": "шиномонтаж на дому", "kind": "target"},
+                ], ensure_ascii=False))
+            if provider == "wordstat":
+                return {"totalCount": counts.get(payload["phrase"], 0)}
+            searched.append(payload["query"]["queryText"])
+            return {"rawData": None}
+        return post
+
+    def _run(self):
+        searched = []
+        out = asyncio.run(check_demand("Мобильный шиномонтаж с выездом на дом",
+                                       _post=self._post(searched)))
+        return out, searched
+
+    def test_score_is_built_on_the_target_phrase_not_the_category(self):
+        from app.demand import _demand_score
+        out, _ = self._run()
+        demand = next(s for s in out["scores"] if s["key"] == "demand")
+        assert demand["value"] == _demand_score(23123)
+        assert demand["value"] != _demand_score(400978), \
+            "балл посчитан по родовой категории — это спрос на рынок, не на идею"
+
+    def test_verdict_quotes_the_target_number(self):
+        out, _ = self._run()
+        assert "23 123" in out["verdict"]["text"]
+        assert "400 978" not in out["verdict"]["text"]
+
+    def test_competitors_are_searched_by_the_target_phrase(self):
+        """Корень проблемы с агрегаторами: по слову «шиномонтаж» в топе
+        всегда справочники, по «выездному» — живые локальные сервисы."""
+        _, searched = self._run()
+        assert searched == ["выездной шиномонтаж"], searched
+
+    def test_category_is_still_shown_but_separately(self):
+        """Размер рынка — полезный контекст, просто не тот же самый спрос."""
+        out, _ = self._run()
+        assert out["category"] == {"phrase": "шиномонтаж", "count": 400978}
+        assert all(f["kind"] in ("target", "category") for f in out["formulations"])
+
+    def test_page_marks_the_category_row_so_it_is_not_read_as_the_answer(self):
+        from pathlib import Path
+        text = Path("static/result.html").read_text(encoding="utf-8")
+        assert "f.kind === 'category'" in text
+        assert "В оценку спроса не идёт" in text
+
+    def test_plain_strings_from_the_model_still_work(self):
+        """Модель может сорвать формат и вернуть голые строки. Строка без
+        типа читается как целевая: занизить спрос безопаснее, чем выкинуть
+        из расчёта единственную содержательную фразу."""
+        from app.demand import _parse_formulations, KIND_TARGET
+        rows = _parse_formulations(["первая фраза", {"phrase": "вторая", "kind": "category"}])
+        assert rows[0] == {"phrase": "первая фраза", "kind": KIND_TARGET}
+        assert rows[1]["kind"] == "category"
+
+    def test_all_category_falls_back_instead_of_leaving_nothing(self):
+        """Если модель пометила категорией ВСЁ, считать спрос не по чему —
+        лучше широкая цифра, чем никакой."""
+        from app.demand import _parse_formulations
+        import asyncio as _a
+        async def post(provider, payload):
+            return _yandex_response(json.dumps(
+                [{"phrase": "а б", "kind": "category"},
+                 {"phrase": "в г", "kind": "category"}], ensure_ascii=False))
+        rows = _a.run(generate_formulations("Достаточно длинное описание идеи", _post=post))
+        assert all(r["kind"] == "target" for r in rows)
+
+
 class TestInventedNumbersDoNotBecomeFacts:
     """Живой прогон 2026-08-04, самая дорогая находка. Подпись к шкале
     конкуренции (её пишет LLM на бесплатной проверке) содержала выдуманное
