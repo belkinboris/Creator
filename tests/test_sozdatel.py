@@ -1305,6 +1305,77 @@ def _static_result():
     return Path("static/result.html").read_text(encoding="utf-8")
 
 
+class TestInventedNumbersDoNotBecomeFacts:
+    """Живой прогон 2026-08-04, самая дорогая находка. Подпись к шкале
+    конкуренции (её пишет LLM на бесплатной проверке) содержала выдуманное
+    «162 стационарные точки». Весь demand_data уезжал в отчёт одним ключом
+    «данные_проверки_спроса», и модель отчёта честно приняла чужую выдумку за
+    измерение: число 162 разошлось по ШЕСТИ разделам платного бизнес-плана
+    как факт — «наличие 162 фиксированных точек во Владимире», «на Яндекс
+    Услугах представлено более 162 сервисов».
+
+    Мы такого не измеряем никогда: есть частотности Вордстата и домены из
+    выдачи, и всё. Для документа, который несут в комиссию соцзащиты,
+    выдуманное число стоит особенно дорого.
+    """
+
+    DEMAND = {"formulations": [{"phrase": "шиномонтаж", "count": 400978}],
+              "best_phrase": "шиномонтаж",
+              "competitors": {"top": [{"domain": "shina33.ru"}], "found": 891000},
+              "scores": [{"key": "competition", "label": "Конкуренция", "value": 7,
+                          "note": "во Владимире уже 162 стационарные точки"}],
+              "overall": {"value": 7, "weakest": "Конкуренция"}}
+
+    def _context(self):
+        from app.report_engine import _user_message
+        return json.loads(_user_message("Мобильный шиномонтаж с выездом", self.DEMAND))
+
+    def test_measurements_and_opinions_are_separated(self):
+        ctx = self._context()
+        measured = ctx["измеренные_данные"]
+        assert "formulations" in measured and "competitors" in measured
+        assert "scores" not in measured, "мнение модели попало в измеренные данные"
+        assert "overall" not in measured
+
+    def test_the_opinion_block_names_itself_as_an_opinion(self):
+        """Ключ читает модель, а не человек — он обязан говорить сам за себя,
+        без опоры на то, что где-то в промпте это объяснено."""
+        ctx = self._context()
+        key = [k for k in ctx if k.startswith("оценка")][0]
+        assert "мнение" in key and "не_измерение" in key
+        assert ctx[key]["scores"][0]["note"].startswith("во Владимире")
+
+    def test_prompt_forbids_numbers_we_never_measured(self):
+        from app.report_engine import _core_prompt, _section_prompt, PURPOSES
+        for purpose in PURPOSES:
+            for prompt in (_core_prompt("full", purpose),
+                           _section_prompt("competitors", "full", purpose)):
+                assert "Мы НЕ измеряли" in prompt, purpose
+                assert "сколько в городе точек" in prompt, purpose
+
+    def test_assumptions_are_allowed_but_must_be_labelled(self):
+        """Запрет чисел не должен убить расчёты: смета и окупаемость — это то,
+        за что заплатили (см. _FINANCE_SPEC). Допущение разрешено, но обязано
+        быть названо допущением."""
+        from app.report_engine import _section_prompt
+        p = _section_prompt("finance", "full", "social_contract")
+        assert "допущение" in p
+        assert "предположим" in p.lower()
+
+    def test_real_wordstat_numbers_are_still_required(self):
+        """Сторож от чрезмерной правки: цифры Вордстата — единственное, чем
+        разбор отличается от бесплатных ИИ-генераторов."""
+        from app.report_engine import _section_prompt
+        p = _section_prompt("market", "full", "business")
+        assert "буквально — не выдумывай другие" in p
+        assert "измеренные_данные" in p
+
+    def test_empty_demand_data_does_not_crash_the_split(self):
+        from app.report_engine import _user_message
+        ctx = json.loads(_user_message("Идея достаточной длины", {}))
+        assert ctx["измеренные_данные"] == {}
+
+
 class TestAnswersStayInRussian:
     """Живой прогон 2026-08-04: подписи к трём шкалам оценки приехали
     иероглифами («本地已有162个固定点，但移动细分仍有空白») и в таком виде
