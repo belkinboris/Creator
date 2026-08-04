@@ -1305,6 +1305,129 @@ def _static_result():
     return Path("static/result.html").read_text(encoding="utf-8")
 
 
+class _FakeReq:
+    """Минимальный Request для проверки _client_ip: только заголовки и сокет."""
+
+    def __init__(self, headers, host="127.0.0.1"):
+        self.headers = headers
+        self.client = type("C", (), {"host": host})() if host else None
+
+
+class TestRateLimitCannotBeForged:
+    """Аудит перед запуском рекламы 2026-08-04. Лимит брал ПЕРВЫЙ элемент
+    X-Forwarded-For, а этот заголовок формирует клиент: прокси лишь дописывает
+    свой адрес справа. Подставляя каждый раз новый «IP», кто угодно получал по
+    свежему лимиту на каждый запрос — то есть лимита не было вовсе.
+
+    За платным трафиком это прямой счёт владельцу: /api/demand и /api/sharpen
+    дёргают LLM, а /api/demand ещё и шесть запросов в Вордстат.
+    """
+
+    def test_forged_header_does_not_win_over_the_proxy(self):
+        import app.main as m
+        for i in range(5):
+            ip = m._client_ip(_FakeReq({"x-forwarded-for": f"10.0.0.{i}, 203.0.113.9"}))
+            assert ip == "203.0.113.9", "лимит считается по подделанному адресу"
+
+    def test_real_client_ip_is_the_last_hop(self):
+        import app.main as m
+        assert m._client_ip(_FakeReq({"x-forwarded-for": "1.1.1.1, 2.2.2.2"})) == "2.2.2.2"
+        assert m._client_ip(_FakeReq({"x-forwarded-for": "  5.5.5.5  "})) == "5.5.5.5"
+
+    def test_falls_back_to_socket_without_the_header(self):
+        """Локальный запуск и прямой доступ мимо прокси."""
+        import app.main as m
+        assert m._client_ip(_FakeReq({}, host="7.7.7.7")) == "7.7.7.7"
+        assert m._client_ip(_FakeReq({"x-forwarded-for": " , "}, host="7.7.7.7")) == "7.7.7.7"
+
+    def test_overflow_cleanup_keeps_active_limits(self):
+        """Прежний `clear()` при переполнении сбрасывал лимит ВСЕМ — вторая
+        дверь мимо ограничения: словарь мог переполнить кто угодно."""
+        import app.main as m, time
+        m._RL_WINDOW.clear()
+        try:
+            for i in range(10050):
+                m._RL_WINDOW[f"stale-{i}"] = [time.monotonic() - m._RL_SECONDS - 10]
+            m._RL_WINDOW["живой"] = [time.monotonic()] * m._RL_LIMIT
+            assert m._rate_limited("живой") is True
+            assert m._rate_limited("живой") is True, "активный лимит потерялся при чистке"
+        finally:
+            m._RL_WINDOW.clear()
+
+    def test_limit_still_stops_a_flood_from_one_address(self):
+        import app.main as m
+        m._RL_WINDOW.clear()
+        try:
+            hits = [m._rate_limited("198.51.100.7") for _ in range(m._RL_LIMIT + 3)]
+            assert hits[:m._RL_LIMIT] == [False] * m._RL_LIMIT
+            assert all(hits[m._RL_LIMIT:]), "лимит перестал срабатывать"
+        finally:
+            m._RL_WINDOW.clear()
+
+
+class TestIndexingAndBrand:
+    """Аудит перед рекламой: что видит поисковик и что видит браузер."""
+
+    def test_legal_page_is_open_to_indexing(self):
+        """`Disallow: /legal` закрывал публичную юридическую страницу, на
+        которую мы сами ссылаемся из форм согласия и подвала."""
+        assert "Disallow: /legal" not in client.get("/robots.txt").text
+
+    def test_private_pages_are_closed(self):
+        t = client.get("/robots.txt").text
+        for path in ("/desk", "/p/", "/l/", "/api/", "/r/", "/report/", "/account"):
+            assert f"Disallow: {path}" in t, path
+
+    def test_showcases_stay_indexable(self):
+        """Главная и витрины аудиторий — посадочные под поиск и Директ."""
+        t = client.get("/robots.txt").text
+        for path in ("/social-contract", "/students"):
+            assert f"Disallow: {path}" not in t, path
+
+    def test_favicon_matches_the_one_pages_declare(self):
+        """`/favicon.ico` отдавал значок СТАРОЙ дизайн-системы (тёмно-синий
+        #11263F с оранжевой рамкой), хотя во всех страницах стоит жёлтый
+        квадрат с «С». Браузер, спросивший favicon напрямую, показывал рядом
+        со ссылкой чужой бренд."""
+        body = client.get("/favicon.ico").text
+        assert "#FFDE59" in body, "фавикон не в цвете акцента дизайн-системы"
+        assert "11263F" not in body and "FF8A2A" not in body, "остался старый бренд"
+        assert ">С<" in body
+        # Тот же значок, что объявлен в разметке страниц.
+        assert "%23FFDE59" in client.get("/").text
+
+
+class TestFormsAskForConsent:
+    """152-ФЗ: согласие на обработку персональных данных у КАЖДОЙ формы, где
+    берём почту или телефон. Было только на проверочной странице клиента
+    (landing_template.html) — на наших собственных формах не было нигде,
+    хотя именно там человек оставляет контакт и платит."""
+
+    def _pages(self):
+        from pathlib import Path
+        return {n: Path(f"static/{n}.html").read_text(encoding="utf-8")
+                for n in ("result", "report")}
+
+    def test_every_contact_form_links_the_privacy_policy(self):
+        for name, text in self._pages().items():
+            assert "pd-note" in text, name
+            assert "/privacy" in text, name
+            assert "персональных данных" in text, name
+
+    def test_paid_forms_also_reference_the_offer(self):
+        """Форма, за которой идёт списание денег, обязана назвать оферту:
+        акцептом по ней считается сама оплата (см. /oferta, п. 1)."""
+        for name, text in self._pages().items():
+            block = text.split('placeholder="Почта или телефон', 1)[1][:700]
+            assert "/oferta" in block, name
+
+    def test_client_landing_kept_its_own_consent(self):
+        """Сторож: страница, которую мы собираем клиенту, тоже собирает
+        контакты — своё согласие она несла и раньше, потерять его нельзя."""
+        from pathlib import Path
+        assert "персональных данных" in Path("app/landing_template.html").read_text(encoding="utf-8")
+
+
 class TestCategoryDemandIsNotIdeaDemand:
     """Живой прогон 2026-08-04, идея «мобильный шиномонтаж с выездом».
 

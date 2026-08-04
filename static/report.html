@@ -145,6 +145,10 @@
   .sample-foot{color:var(--muted);font-size:14px;max-width:46em;
     border-left:3px solid var(--marker);padding:6px 0 6px 12px;margin-bottom:4px}
   .terms-note{margin-top:14px;font-size:13px;color:var(--muted);max-width:44em}
+  /* Согласие на обработку ПД (152-ФЗ) у формы, где берём почту или телефон. */
+  .pd-note{margin-top:10px;font-size:12.5px;color:var(--muted);max-width:44em}
+  .pd-note a{color:var(--muted)}
+  .pd-note a:hover{color:var(--ink)}
   .contact-row{margin-top:16px}
   .contact-row input{width:100%;max-width:360px;padding:11px 12px;border:1px solid var(--line);
     border-radius:6px;background:#fff;color:var(--ink);font:inherit}
@@ -555,12 +559,14 @@ if (document.getElementById('access-note')) {
     <div class="tiers">${tierCard('full')}</div>
     <p class="terms-note">Отчёт формируется сразу после оплаты. Если собрать его не удалось — вернём деньги полностью. <a href="/oferta">Условия и возврат</a></p>
   <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
+    <p class="pd-note">Отправляя контакт, вы принимаете <a href="/oferta" target="_blank">условия оферты</a> и соглашаетесь с <a href="/privacy" target="_blank">политикой обработки персональных данных</a>.</p>
     <p class="err" id="order-err" role="alert"></p>`;
 } else {
   pricing.innerHTML = `<h3>Получите <span class="hl">отчёт по идее</span></h3>
     <p>Не общие слова — разбор на данных, которые мы уже честно посчитали на бесплатной проверке спроса.</p>
     <div class="tiers">${tierCard('quick')}${tierCard('full')}</div>
     <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
+    <p class="pd-note">Отправляя контакт, вы принимаете <a href="/oferta" target="_blank">условия оферты</a> и соглашаетесь с <a href="/privacy" target="_blank">политикой обработки персональных данных</a>.</p>
     <p class="err" id="order-err" role="alert"></p>`;
 }
 

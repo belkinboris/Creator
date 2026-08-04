@@ -72,6 +72,12 @@
   .tier-groups li + li{margin-top:3px}
   .tier-groups b{color:var(--ink);font-weight:600}
   .terms-note{margin-top:10px;font-size:13px;color:var(--muted);max-width:40em}
+  /* Согласие на обработку ПД (152-ФЗ) у каждой формы, где берём контакт. */
+  .pd-note{margin-top:10px;font-size:12.5px;color:var(--muted);max-width:40em}
+  .pd-note a{color:var(--muted)}
+  .pd-note a:hover{color:var(--ink)}
+  #save-pd{display:none}
+  .save-form.show ~ #save-pd{display:block}
   .example-link{margin-top:10px;font-size:13px;color:var(--muted)}
   .example-link:empty{display:none}
 
@@ -326,6 +332,10 @@
       <input id="save-contact" type="email" placeholder="Почта — для входа в кабинет">
       <button class="btn-ghost" id="save-submit" type="button">Сохранить</button>
     </div>
+    <!-- 152-ФЗ: согласие на обработку ПД у КАЖДОЙ формы, где берём почту или
+         телефон. Было только на проверочной странице клиента
+         (landing_template.html), а на наших собственных формах — нигде. -->
+    <p class="pd-note" id="save-pd">Отправляя почту, вы соглашаетесь с <a href="/privacy" target="_blank">политикой обработки персональных данных</a>.</p>
     <p class="err" id="save-err" role="alert"></p>
     <p class="okmsg" id="save-ok"></p>
     <!-- Прежний текст обещал, что рекламу запустим мы и сами принесём цифры.
@@ -418,6 +428,7 @@
       <p class="chosen-note" id="chosen-note"></p>
       <input id="contact" placeholder="Почта или телефон">
       <button class="btn" id="order-btn" type="button"></button>
+      <p class="pd-note">Отправляя контакт, вы принимаете <a href="/oferta" target="_blank">условия оферты</a> и соглашаетесь с <a href="/privacy" target="_blank">политикой обработки персональных данных</a>.</p>
       <!-- Про рекламный бюджет до оплаты не говорилось нигде, хотя в оферте
            это записано, а на деле он больше самой услуги. Узнать об этом
            после оплаты -- законный повод требовать возврат. -->

@@ -5,3 +5,4 @@ __pycache__/
 sozdatel.db
 *.db
 .DS_Store
+shot_*.py
