@@ -1305,6 +1305,94 @@ def _static_result():
     return Path("static/result.html").read_text(encoding="utf-8")
 
 
+class TestAnswersStayInRussian:
+    """Живой прогон 2026-08-04: подписи к трём шкалам оценки приехали
+    иероглифами («本地已有162个固定点，但移动细分仍有空白») и в таком виде
+    попали и на страницу результата, и в платный бизнес-план за 2990 ₽.
+
+    Причина: модель по умолчанию — DeepSeek (китайская), а требования писать
+    по-русски не было НИ В ОДНОМ промпте, кроме заострения идеи.
+    """
+
+    def test_language_rule_applies_to_every_call_not_per_prompt(self):
+        """Правило живёт в адаптере, а не в промптах движков: промптов уже
+        четыре файла, и в следующем его снова забудут — как забыли в
+        demand.py и report_engine.py, где иероглифы и вылезли."""
+        from app.llm_adapter import NON_CLAUDE_HARDENING
+        low = NON_CLAUDE_HARDENING.lower()
+        assert "только русский" in low
+        assert "иероглиф" in low
+
+    def test_detector_finds_cjk_but_not_ordinary_latin(self):
+        """Латиница в русском ответе — норма: домены конкурентов, названия
+        сервисов, единицы. Ловить её значило бы получать ложные срабатывания
+        чаще, чем настоящие."""
+        from app.llm_adapter import looks_non_russian
+        assert looks_non_russian("本地已有162个固定点")
+        assert looks_non_russian("Спрос есть, но 移动细分仍有空白")
+        assert not looks_non_russian("В выдаче: 2gis.ru и uslugi.yandex.ru")
+        assert not looks_non_russian("Реклама в Яндекс Директе, CPA до 500 ₽")
+        assert not looks_non_russian("")
+
+    def test_hieroglyphs_trigger_one_retry(self):
+        """Промпт — не гарантия: на живом прогоне требование языка в
+        offer_engine было, а модель всё равно сорвалась. Нужен ретрай."""
+        import asyncio
+        from app import llm_adapter
+        calls = []
+        async def post(provider, payload):
+            calls.append(payload["instructions"])
+            text = "需车辆和设备" if len(calls) == 1 else "Нужны машина и оборудование"
+            return {"output": [{"content": [{"type": "output_text", "text": text}]}]}
+        out = asyncio.run(llm_adapter.call("Оцени идею", "контекст", 100,
+                                           provider="yandex", _post=post))
+        assert out == "Нужны машина и оборудование"
+        assert len(calls) == 2, "повторной попытки не было"
+        assert "ОТКЛОНЕНА" in calls[1], "повтор не сказал модели, что было не так"
+
+    def test_good_answer_is_not_retried(self):
+        """Ретрай стоит денег и времени — он только на реальном срыве."""
+        import asyncio
+        from app import llm_adapter
+        calls = []
+        async def post(provider, payload):
+            calls.append(1)
+            return {"output": [{"content": [{"type": "output_text",
+                                             "text": "Нормальный русский ответ"}]}]}
+        asyncio.run(llm_adapter.call("s", "u", 100, provider="yandex", _post=post))
+        assert len(calls) == 1
+
+    def test_transport_does_not_kill_the_check_after_a_failed_retry(self):
+        """Если модель сорвалась дважды — решать, что делать с испорченным
+        текстом, должен движок (у подписи к шкале она необязательна и просто
+        гасится), а не транспорт, роняющий всю бесплатную проверку."""
+        import asyncio
+        from app import llm_adapter
+        async def post(provider, payload):
+            return {"output": [{"content": [{"type": "output_text", "text": "需车辆"}]}]}
+        out = asyncio.run(llm_adapter.call("s", "u", 100, provider="yandex", _post=post))
+        assert out == "需车辆"
+
+    def test_score_note_is_blanked_rather_than_shown_in_chinese(self):
+        """Балл — число, от языка не зависит и остаётся. Подпись
+        необязательна: пустая честнее иероглифов."""
+        import asyncio
+        from app.demand import score_idea
+        async def post(provider, payload):
+            return _yandex_response(json.dumps({
+                "competition": 7, "timing": 7, "execution": 8,
+                "notes": {"competition": "本地已有162个固定点",
+                          "timing": "季节换胎需求明确",
+                          "execution": "Нужны машина и оборудование"}},
+                ensure_ascii=False))
+        out = asyncio.run(score_idea("идея", [], {"top": [], "found": 1}, _post=post))
+        by_key = {s["key"]: s for s in out}
+        assert by_key["competition"]["value"] == 7        # балл сохранён
+        assert by_key["competition"]["note"] == ""        # подпись погашена
+        assert by_key["timing"]["note"] == ""
+        assert by_key["execution"]["note"] == "Нужны машина и оборудование"
+
+
 class TestCompetitorsAreBusinesses:
     """Живой прогон показал в блоке «Конкуренты» Википедию, Ленту и женский
     журнал. Для информационного запроса это правдивая выдача, но человеку
@@ -1319,8 +1407,32 @@ class TestCompetitorsAreBusinesses:
 
     def test_real_businesses_survive_the_filter(self):
         from app.demand import _is_not_competitor
-        for domain in ("ozon.ru", "avito.ru", "my-clinic.ru", "studio22.ru",
+        for domain in ("my-clinic.ru", "studio22.ru", "shinomontazh33.ru",
                        "market.merch.ru", "informatika-shop.ru"):
+            assert not _is_not_competitor(domain), domain
+
+    def test_aggregators_and_directories_are_not_competitors(self):
+        """Живой прогон 2026-08-04: в «конкурентах» мобильного шиномонтажа
+        оказались Яндекс.Карты, 2ГИС и Яндекс.Услуги — и весь раздел платного
+        отчёта был построен вокруг них.
+
+        По любому локальному запросу справочники занимают весь топ: это их
+        бизнес — собирать чужие услуги. Конкурентами они не являются, потому
+        что услугу не оказывают, а перепродают доступ к тем, кто оказывает.
+        Владелец назвал это «то же самое, что предлагать в конкурентах
+        измерителя журнал».
+        """
+        from app.demand import _is_not_competitor
+        for domain in ("yandex.ru", "uslugi.yandex.ru", "2gis.ru", "zoon.ru",
+                       "flamp.ru", "profi.ru", "avito.ru", "youla.ru",
+                       "yell.ru", "orgpage.ru"):
+            assert _is_not_competitor(domain), domain
+
+    def test_local_service_sites_still_pass(self):
+        """Сторож от чрезмерной фильтрации: настоящий локальный сервис часто
+        живёт на домене с городом или названием — его вырезать нельзя."""
+        from app.demand import _is_not_competitor
+        for domain in ("koleso-vladimir.ru", "shini-33.ru", "avtoservice-nn.ru"):
             assert not _is_not_competitor(domain), domain
 
     def test_substring_match_does_not_eat_commercial_domains(self):

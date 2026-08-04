@@ -300,6 +300,18 @@ _NOT_COMPETITOR_BASES = frozenset({
     "wordpress.com", "vc.ru", "habr.com", "journal.tinkoff.ru",
     # госресурсы и правовые базы
     "gosuslugi.ru", "nalog.ru", "consultant.ru", "garant.ru", "pravo.gov.ru",
+    # Агрегаторы, справочники, карты и доски объявлений. Отдельная и самая
+    # обидная категория: по любому локальному запросу («шиномонтаж»,
+    # «репетитор», «клининг») они занимают весь топ, потому что это их
+    # бизнес -- собирать чужие услуги. Конкурентами они не являются: они не
+    # оказывают услугу, а перепродают доступ к тем, кто оказывает. Живой
+    # прогон 2026-08-04: в «конкурентах» мобильного шиномонтажа оказались
+    # Яндекс.Карты, 2ГИС и Яндекс.Услуги, и весь раздел платного отчёта был
+    # построен вокруг них -- разбор ни о чём.
+    "yandex.ru", "ya.ru", "2gis.ru", "2gis.com", "google.com", "maps.google.com",
+    "zoon.ru", "flamp.ru", "yell.ru", "orgpage.ru", "spr.ru", "rusprofile.ru",
+    "profi.ru", "youdo.com", "avito.ru", "youla.ru", "uslugi.yandex.ru",
+    "blizko.ru", "tiu.ru", "satom.ru", "pulscen.ru", "regmarkets.ru",
 })
 
 
@@ -510,8 +522,16 @@ async def score_idea(idea: str, rows: list, comp: dict, *, _post=None) -> list |
             value = int(data[key])
             if not 1 <= value <= 10:
                 raise ValueError(f"{key} out of range")
-            out.append({"key": key, "label": label, "value": value,
-                        "note": str(notes.get(key, ""))[:140]})
+            note = str(notes.get(key, ""))[:140]
+            # Балл — число, он от языка не зависит и остаётся. А подпись
+            # необязательна: пустая честнее иероглифов. Живой прогон
+            # 2026-08-04: три подписи приехали по-китайски и в таком виде
+            # доехали и до страницы результата, и до платного бизнес-плана
+            # (адаптер их отдал после неудачного повтора, см. llm_adapter.call).
+            if llm_adapter.looks_non_russian(note):
+                logger.warning("score_idea: подпись к шкале %s не по-русски, гашу", key)
+                note = ""
+            out.append({"key": key, "label": label, "value": value, "note": note})
         return out
     except Exception:
         logger.warning("score_idea failed", exc_info=True)
