@@ -82,7 +82,16 @@ _FORMULATIONS_SYSTEM = (
     "Убирай уточнения (точный возраст, район, состав услуги) -- с ними почти не ищут. "
     "Запросы должны отличаться друг от друга, без названий брендов, без кавычек, "
     "строчными буквами.\n"
-    "Ответь ТОЛЬКО JSON-массивом из 6 строк, без пояснений."
+    "У КАЖДОГО запроса укажи тип:\n"
+    "- \"target\" -- запрос про ИМЕННО ТО, что человек собирается продавать "
+    "(включая описание задачи своими словами);\n"
+    "- \"category\" -- запрос про широкую категорию целиком, куда идея лишь входит. "
+    "Такой запрос ищут и те, кому нужно совсем другое внутри этой же категории.\n"
+    "Пример: для идеи «мобильный шиномонтаж с выездом» запрос «выездной шиномонтаж» "
+    "это target, а просто «шиномонтаж» -- category: его ищут в основном те, кто едет "
+    "на стационарную точку.\n"
+    "Ответь ТОЛЬКО JSON-массивом из 6 объектов вида "
+    "{\"phrase\": \"...\", \"kind\": \"target\"|\"category\"}, без пояснений."
 )
 
 _IDEA_SYSTEM = (
@@ -127,20 +136,58 @@ class DemandError(Exception):
     """Человекочитаемая ошибка -- показывается пользователю как есть."""
 
 
-async def generate_formulations(idea: str, *, _post=None) -> list[str]:
-    """Идея -> 3 поисковых формулировки. Единственный обязательный шаг:
-    без формулировок проверять нечего, поэтому ошибки здесь не глотаем."""
+#: Тип формулировки. "target" -- запрос про то, что человек собирается
+#: продавать; "category" -- широкая категория, куда идея лишь входит.
+KIND_TARGET = "target"
+KIND_CATEGORY = "category"
+
+
+def _parse_formulations(data) -> list[dict]:
+    """Ответ модели -> [{"phrase", "kind"}]. Терпим к формату.
+
+    Модель просят вернуть объекты с типом, но она может отдать и просто
+    массив строк (старое поведение, забытый ключ, срыв формата). Строка без
+    типа считается target: занизить спрос, приняв родовой запрос за целевой,
+    не так вредно, как завысить его, приняв целевой за родовой и выкинув из
+    расчёта единственную содержательную фразу.
+    """
+    out = []
+    for item in data or []:
+        if isinstance(item, str):
+            phrase, kind = item, KIND_TARGET
+        elif isinstance(item, dict):
+            phrase = item.get("phrase") or item.get("query") or ""
+            kind = KIND_CATEGORY if item.get("kind") == KIND_CATEGORY else KIND_TARGET
+        else:
+            continue
+        phrase = str(phrase).strip().lower()
+        if phrase:
+            out.append({"phrase": phrase, "kind": kind})
+    return out
+
+
+async def generate_formulations(idea: str, *, _post=None) -> list[dict]:
+    """Идея -> поисковые формулировки с типом ("target"/"category").
+
+    Единственный обязательный шаг: без формулировок проверять нечего, поэтому
+    ошибки здесь не глотаем.
+    """
     idea = (idea or "").strip()[:MAX_IDEA_CHARS]
     if len(idea) < 15:
         raise DemandError("Опишите идею хотя бы одним предложением: кому и чем она помогает.")
     try:
-        text = await llm_adapter.call(_FORMULATIONS_SYSTEM, f"Идея:\n{idea}", 500, _post=_post)
+        text = await llm_adapter.call(_FORMULATIONS_SYSTEM, f"Идея:\n{idea}", 700, _post=_post)
         text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        data = json.loads(text)
-        phrases = [str(p).strip().lower() for p in data if str(p).strip()]
-        if not phrases:
+        rows = _parse_formulations(json.loads(text))
+        if not rows:
             raise ValueError("empty")
-        return phrases[:FORMULATIONS_COUNT]
+        # Если модель пометила категорией ВСЁ, считать спрос не по чему.
+        # Возвращаем к target: пусть лучше цифра будет широкой, чем никакой.
+        if all(r["kind"] == KIND_CATEGORY for r in rows):
+            logger.warning("generate_formulations: все фразы помечены категорией, читаю как целевые")
+            for r in rows:
+                r["kind"] = KIND_TARGET
+        return rows[:FORMULATIONS_COUNT]
     except DemandError:
         raise
     except llm_adapter.LLMAdapterError as exc:
@@ -300,6 +347,18 @@ _NOT_COMPETITOR_BASES = frozenset({
     "wordpress.com", "vc.ru", "habr.com", "journal.tinkoff.ru",
     # госресурсы и правовые базы
     "gosuslugi.ru", "nalog.ru", "consultant.ru", "garant.ru", "pravo.gov.ru",
+    # Агрегаторы, справочники, карты и доски объявлений. Отдельная и самая
+    # обидная категория: по любому локальному запросу («шиномонтаж»,
+    # «репетитор», «клининг») они занимают весь топ, потому что это их
+    # бизнес -- собирать чужие услуги. Конкурентами они не являются: они не
+    # оказывают услугу, а перепродают доступ к тем, кто оказывает. Живой
+    # прогон 2026-08-04: в «конкурентах» мобильного шиномонтажа оказались
+    # Яндекс.Карты, 2ГИС и Яндекс.Услуги, и весь раздел платного отчёта был
+    # построен вокруг них -- разбор ни о чём.
+    "yandex.ru", "ya.ru", "2gis.ru", "2gis.com", "google.com", "maps.google.com",
+    "zoon.ru", "flamp.ru", "yell.ru", "orgpage.ru", "spr.ru", "rusprofile.ru",
+    "profi.ru", "youdo.com", "avito.ru", "youla.ru", "uslugi.yandex.ru",
+    "blizko.ru", "tiu.ru", "satom.ru", "pulscen.ru", "regmarkets.ru",
 })
 
 
@@ -390,14 +449,20 @@ async def check_demand(idea: str, *, _post=None) -> dict:
     """Полная бесплатная проверка: формулировки -> частотности -> конкуренты
     по лучшей формулировке -> вердикт."""
     phrases = await generate_formulations(idea, _post=_post)
+    # Терпим к формату: generate_formulations может быть подменена (тесты) или
+    # вернуть голые строки со старого формата ответа модели. Строка без типа --
+    # целевая, см. _parse_formulations.
+    phrases = [p if isinstance(p, dict) else {"phrase": str(p), "kind": KIND_TARGET}
+               for p in phrases]
     # Параллельно, а не по очереди: формулировок теперь вдвое больше
     # (FORMULATIONS_COUNT), и последовательные вызовы удвоили бы ожидание на
     # шаге, который человек и так ждёт ~20 секунд. Запросы независимы.
-    results = await asyncio.gather(*(wordstat_best(p, _post=_post) for p in phrases))
+    results = await asyncio.gather(
+        *(wordstat_best(p["phrase"], _post=_post) for p in phrases))
     rows = []
     for p, r in zip(phrases, results):
-        row = {"phrase": p, "count": r["count"]}
-        if r["count"] is not None and r["phrase"] != p:
+        row = {"phrase": p["phrase"], "kind": p["kind"], "count": r["count"]}
+        if r["count"] is not None and r["phrase"] != p["phrase"]:
             # Вордстат сам предложил формулировку с большей частотностью --
             # показываем её отдельно, а не молча приписываем чужой счёт
             # исходной фразе (см. wordstat_best/_best_related).
@@ -408,13 +473,32 @@ async def check_demand(idea: str, *, _post=None) -> dict:
     # читается как главная -- пусть главной и будет та, которую реально ищут.
     # Неизмеренные (count=None) уходят вниз: сравнивать их не с чем.
     rows.sort(key=lambda r: (r["count"] is None, -(r["count"] or 0)))
-    # Конкурентов и "лучшую формулировку" ищем по реально ходовой фразе, если
-    # Вордстат её подсказал -- иначе искали бы конкурентов не по тому запросу,
-    # который на самом деле приносит трафик.
-    top_row = rows[0] if rows else {"phrase": "", "count": None}
+
+    # Спрос считаем по ЦЕЛЕВЫМ фразам, а родовую категорию показываем рядом
+    # отдельно. Живой прогон 2026-08-04, идея «мобильный шиномонтаж с выездом»:
+    # родовое «шиномонтаж» дало 400 978/мес и как максимум ушло и в вердикт
+    # («Спрос есть: ищут 400 978 раз в месяц»), и в балл 10/10, и в поиск
+    # конкурентов. Но 400 978 -- это спрос на шиномонтаж ВООБЩЕ, включая
+    # стационарные точки, куда клиент мобильной услуги как раз не идёт;
+    # целевые фразы давали 23 123 и 19 271. Число красивее, вывод -- неверный.
+    # Побочно это же тянуло в конкуренты агрегаторы: по широкому запросу топ
+    # выдачи всегда занят справочниками, это их бизнес.
+    target_rows = [r for r in rows if r["kind"] == KIND_TARGET]
+    measured_target = [r for r in target_rows if r["count"] is not None]
+    # Не осталось измеренных целевых (все сорвались) -- честнее взять что есть,
+    # чем показать «данных нет» при живых цифрах по категории.
+    basis_rows = measured_target or [r for r in rows if r["count"] is not None] or rows
+    top_row = basis_rows[0] if basis_rows else {"phrase": "", "count": None}
+    # Конкурентов ищем по той же целевой фразе (и по подсказанной Вордстатом,
+    # если она популярнее) -- иначе искали бы не по тому запросу, который
+    # приносит клиентов именно этой идее.
     search_phrase = top_row.get("matched_phrase") or top_row["phrase"]
     comp = await competitors(search_phrase, _post=_post)
     best = top_row["count"]
+    # Категория целиком -- полезный контекст («рынок такой»), но это НЕ спрос
+    # на идею, поэтому едет отдельным полем и в балл не входит.
+    category = next((r for r in rows
+                     if r["kind"] == KIND_CATEGORY and r["count"] is not None), None)
     llm_scores = await score_idea(idea, rows, comp, _post=_post)
     scores = [{"key": "demand", "label": "Спрос", "value": _demand_score(best), "note": ""}]
     scores += llm_scores or []
@@ -454,6 +538,10 @@ async def check_demand(idea: str, *, _post=None) -> dict:
         "formulations": rows,
         "best_phrase": search_phrase,
         "verdict": _verdict(best),
+        # Размер категории целиком: контекст, а не спрос на идею. Отдельным
+        # полем именно для того, чтобы его нельзя было спутать с `verdict`.
+        "category": ({"phrase": category["phrase"], "count": category["count"]}
+                     if category else None),
         "competitors": comp,
         "scores": scores,
         "overall": overall,
@@ -510,8 +598,16 @@ async def score_idea(idea: str, rows: list, comp: dict, *, _post=None) -> list |
             value = int(data[key])
             if not 1 <= value <= 10:
                 raise ValueError(f"{key} out of range")
-            out.append({"key": key, "label": label, "value": value,
-                        "note": str(notes.get(key, ""))[:140]})
+            note = str(notes.get(key, ""))[:140]
+            # Балл — число, он от языка не зависит и остаётся. А подпись
+            # необязательна: пустая честнее иероглифов. Живой прогон
+            # 2026-08-04: три подписи приехали по-китайски и в таком виде
+            # доехали и до страницы результата, и до платного бизнес-плана
+            # (адаптер их отдал после неудачного повтора, см. llm_adapter.call).
+            if llm_adapter.looks_non_russian(note):
+                logger.warning("score_idea: подпись к шкале %s не по-русски, гашу", key)
+                note = ""
+            out.append({"key": key, "label": label, "value": value, "note": note})
         return out
     except Exception:
         logger.warning("score_idea failed", exc_info=True)

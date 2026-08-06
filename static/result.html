@@ -72,6 +72,12 @@
   .tier-groups li + li{margin-top:3px}
   .tier-groups b{color:var(--ink);font-weight:600}
   .terms-note{margin-top:10px;font-size:13px;color:var(--muted);max-width:40em}
+  /* Согласие на обработку ПД (152-ФЗ) у каждой формы, где берём контакт. */
+  .pd-note{margin-top:10px;font-size:12.5px;color:var(--muted);max-width:40em}
+  .pd-note a{color:var(--muted)}
+  .pd-note a:hover{color:var(--ink)}
+  #save-pd{display:none}
+  .save-form.show ~ #save-pd{display:block}
   .example-link{margin-top:10px;font-size:13px;color:var(--muted)}
   .example-link:empty{display:none}
 
@@ -326,6 +332,10 @@
       <input id="save-contact" type="email" placeholder="Почта — для входа в кабинет">
       <button class="btn-ghost" id="save-submit" type="button">Сохранить</button>
     </div>
+    <!-- 152-ФЗ: согласие на обработку ПД у КАЖДОЙ формы, где берём почту или
+         телефон. Было только на проверочной странице клиента
+         (landing_template.html), а на наших собственных формах — нигде. -->
+    <p class="pd-note" id="save-pd">Отправляя почту, вы соглашаетесь с <a href="/privacy" target="_blank">политикой обработки персональных данных</a>.</p>
     <p class="err" id="save-err" role="alert"></p>
     <p class="okmsg" id="save-ok"></p>
     <!-- Прежний текст обещал, что рекламу запустим мы и сами принесём цифры.
@@ -418,6 +428,7 @@
       <p class="chosen-note" id="chosen-note"></p>
       <input id="contact" placeholder="Почта или телефон">
       <button class="btn" id="order-btn" type="button"></button>
+      <p class="pd-note">Отправляя контакт, вы принимаете <a href="/oferta" target="_blank">условия оферты</a> и соглашаетесь с <a href="/privacy" target="_blank">политикой обработки персональных данных</a>.</p>
       <!-- Про рекламный бюджет до оплаты не говорилось нигде, хотя в оферте
            это записано, а на деле он больше самой услуги. Узнать об этом
            после оплаты -- законный повод требовать возврат. -->
@@ -503,6 +514,12 @@ document.getElementById('freqs').innerHTML = (DATA.formulations||[]).map(f => `
       </span>
     </div>
     ${f.matched_phrase ? `<span class="freq-match">Число посчитано по более ходовой формулировке, которую подсказал Вордстат: «${escapeHtml(f.matched_phrase)}»</span>` : ''}
+    <!-- Родовой запрос честно помечен: его ищут в том числе те, кому нужно
+         совсем другое внутри той же категории, и в балл он не входит. Без
+         пометки строка с самым большим числом читалась как главная цифра
+         проверки — на живом прогоне 400 978 по слову «шиномонтаж» затмили
+         23 123 по «выездному», хотя клиент у идеи именно во втором. -->
+    ${f.kind === 'category' ? '<span class="freq-match">Категория целиком: сюда входят и те, кому нужна не ваша услуга. В оценку спроса не идёт.</span>' : ''}
   </div>`).join('');
 
 const v = DATA.verdict || {};
@@ -706,7 +723,12 @@ if (hasComp) document.getElementById('step2-next').textContent = nextLabel(2);
 if (hasScores) document.getElementById('step3-next').textContent = nextLabel(3);
 
 function summarizeStep1(){
-  const known = (DATA.formulations||[]).filter(f => f.count !== null);
+  // Считаем по ЦЕЛЕВЫМ фразам, как и вердикт с баллом (см. check_demand).
+  // Максимум по всем строкам взял бы родовую категорию — и свёрнутый шаг
+  // показывал бы число, которое к идее относится лишь косвенно.
+  const all = DATA.formulations || [];
+  const target = all.filter(f => f.kind !== 'category' && f.count !== null);
+  const known = target.length ? target : all.filter(f => f.count !== null);
   const top = known.length ? Math.max(...known.map(f => f.count)) : null;
   const label = {strong:'спрос есть', niche:'нишевый спрос', weak:'спроса почти нет', unknown:'частотность недоступна'}[v.level] || '';
   return top !== null ? `${fmt(top)} запросов/мес — ${label}` : label;

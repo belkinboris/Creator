@@ -134,6 +134,8 @@
   .tag.free-tag{background:linear-gradient(transparent 58%, var(--marker) 58%);padding:0 2px}
   .tag.future-tag{color:var(--muted)}
   .step p{color:var(--muted);font-size:15px;max-width:40em;margin-top:2px}
+  .prices-note{margin-top:14px;font-size:14px;color:var(--muted);max-width:44em}
+  .prices-note b{color:var(--ink);font-weight:600}
   .note{border-left:3px solid var(--marker);padding:2px 0 2px 12px;margin-top:22px;
     font-size:15px;color:var(--muted);max-width:42em}
   .note b{color:var(--ink);font-weight:600}
@@ -200,7 +202,11 @@
       <div class="step"><span class="n">6</span><div><h3>Повторяемость <span class="tag future-tag">в Создателе 2.0</span></h3><p>Проверяем, что продажи — не случайность: канал стабильно приводит клиентов по известной цене.</p></div></div>
       <div class="step"><span class="n">7</span><div><h3>Удержание <span class="tag future-tag">в Создателе 2.0</span></h3><p>Клиенты возвращаются и рекомендуют. Здесь идея становится бизнесом.</p></div></div>
     </div>
-    <p class="note"><b>Не готовы тратиться на рекламу?</b> После бесплатной проверки спроса можно сразу заказать разбор идеи с бизнес-планом — рынок, конкуренты, финансы, риски и план запуска, не дожидаясь рекламы.</p>
+    <p class="note"><b>Не готовы тратиться на рекламу?</b> После бесплатной проверки спроса можно сразу заказать разбор идеи с бизнес-планом — рынок, конкуренты, финансы, риски и план запуска, без теста на реальных людях.</p>
+    <!-- Цены — до входа в воронку, а не сюрпризом в её конце (аудит 2026-08-04).
+         Значения из REPORT_PRICES/LIVE_TEST_PRICE через _fill_server_values:
+         зашитая копия цены — трижды пойманный источник вранья (B5). -->
+    <p class="prices-note">Сколько это стоит: проверка спроса — <b>бесплатно</b>, разбор идеи — от <b>__MIN_REPORT_PRICE__ ₽</b>, бизнес-план — <b>__FULL_PRICE__ ₽</b>, тест на реальных людях — <b>__LIVE_TEST_PRICE__ ₽</b> (рекламный бюджет — отдельно, обычно __AD_BUDGET__).</p>
   </section>
 </main>
 
@@ -220,9 +226,11 @@ function fmt(n){ return n.toLocaleString('ru-RU'); }
 function showErr(msg){ errEl.textContent = msg; errEl.classList.add('show'); }
 
 // Живая цифра вместо пустоты под кнопкой — честный счётчик, не выдумка.
-// Ноль ничего не доказывает, поэтому не показываем совсем малые значения.
+// Порог 100, не 10: «уже проверили 12 идей» на живом прогоне читалось как
+// признак пустого сервиса и работало ПРОТИВ доверия. Малое число хуже
+// отсутствия числа; врать счётчик не начнёт ни при каком пороге.
 fetch('/api/stats').then(r => r.json()).then(d => {
-  if (d.ideas_checked >= 10) {
+  if (d.ideas_checked >= 100) {
     document.getElementById('social-proof').innerHTML =
       `Уже проверили <b>${fmt(d.ideas_checked)}</b> идей`;
   }

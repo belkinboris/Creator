@@ -543,10 +543,11 @@ async def offers(data: IdeaIn, request: Request):
 @app.post("/api/idea")
 async def idea_suggest(request: Request):
     """«Придумать за меня» — для тех, кто пришёл без идеи (вход воронки)."""
-    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
+    client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
+    if _llm_fuse_blown():
+        raise HTTPException(429, _FUSE_MSG)
     try:
         return {"ok": True, "idea": await generate_idea()}
     except DemandError as e:
@@ -555,10 +556,11 @@ async def idea_suggest(request: Request):
 
 @app.post("/api/demand")
 async def demand_check(data: IdeaIn, request: Request):
-    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
+    client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
+    if _llm_fuse_blown():
+        raise HTTPException(429, _FUSE_MSG)
     try:
         result = await check_demand(data.idea)
     except DemandError as e:
@@ -610,10 +612,11 @@ def _polish_offers(result: dict) -> dict:
 async def sharpen(data: IdeaIn, request: Request):
     """Бесплатное заострение идеи в 3 варианта позиционирования — по кнопке
     на странице результата, не на каждый визит (LLM-вызов тяжёлый и долгий)."""
-    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
+    client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
+    if _llm_fuse_blown():
+        raise HTTPException(429, _FUSE_MSG)
     try:
         result = await sharpen_idea(data.idea, purpose=data.purpose)
         return {"ok": True, **_polish_offers(result)}
@@ -843,6 +846,22 @@ def _as_sentence(text: str) -> str:
     return t if not t or t[-1] in _SENTENCE_END else t + "."
 
 
+def _target_top_count(demand_data: dict) -> int | None:
+    """Максимум частотности по ЦЕЛЕВЫМ фразам -- та же логика, что в
+    check_demand: родовая категория (`kind == "category"`) это спрос на
+    рынок целиком, не на идею, и в цифру спроса не входит. Строка без
+    `kind` (старые записи в БД) читается как целевая. Если целевых с числом
+    не осталось -- берём что есть: широкая цифра честнее, чем «данных нет»
+    при живых числах на экране."""
+    rows = demand_data.get("formulations") or []
+    target = [f["count"] for f in rows
+              if f.get("count") is not None and f.get("kind") != "category"]
+    if target:
+        return max(target)
+    known = [f["count"] for f in rows if f.get("count") is not None]
+    return max(known) if known else None
+
+
 def _demand_caption(demand_data: dict) -> str:
     """Подпись к шкале спроса -- из её же частотности, без участия модели.
 
@@ -851,12 +870,15 @@ def _demand_caption(demand_data: dict) -> str:
     результате из четырёх ячеек одна стояла голой -- причём самая важная:
     спрос единственный посчитан по реальным цифрам Яндекса и он же потолок
     общего балла. Числа берём готовые, ничего не выдумываем (принцип 1).
+
+    Максимум -- по целевым фразам (_target_top_count): раньше подпись брала
+    max по ВСЕМ строкам и рядом с баллом, посчитанным по целевым 23 123,
+    писала «400 978 запросов в месяц» из родовой категории.
     """
-    known = [f["count"] for f in (demand_data.get("formulations") or [])
-             if f.get("count") is not None]
-    if not known:
+    top = _target_top_count(demand_data)
+    if top is None:
         return "Частотность недоступна"
-    return f"{max(known):,}".replace(",", "\u00a0") + " запросов в месяц"
+    return f"{top:,}".replace(",", "\u00a0") + " запросов в месяц"
 
 
 def _polish_scores(demand_data: dict) -> dict:
@@ -892,9 +914,9 @@ def _report_preview(demand_data: dict) -> dict:
     (dimeadozen как ориентир на содержательный анализ, не «воду»)."""
     v = demand_data.get("verdict") or {}
     overall = demand_data.get("overall") or {}
-    formulations = demand_data.get("formulations") or []
-    known = [f["count"] for f in formulations if f.get("count") is not None]
-    top = max(known) if known else None
+    # По целевым фразам, не по всем: max по всем строкам брал родовую
+    # категорию, и тизер называл «спросом» цифру рынка целиком.
+    top = _target_top_count(demand_data)
     comp = demand_data.get("competitors") or {}
     top_names = [c.get("domain") or c.get("title") or "" for c in (comp.get("top") or [])[:3]]
     # В тизере заметки идут отдельными абзацами -- там нужна точка, в отличие
@@ -959,6 +981,11 @@ async def _ensure_sample(check_id: int) -> dict | None:
         idea = rec.idea
         chosen = _chosen_offer(rec)
         demand_data = json.loads(rec.result_json)
+
+    # Образец — бесплатная генерация за счёт владельца: при сгоревшем дневном
+    # предохранителе страница просто остаётся без образца (принцип 7).
+    if _llm_fuse_blown():
+        return None
 
     try:
         core = await generate_core(idea, demand_data, "quick",
@@ -1967,6 +1994,52 @@ _RL_LIMIT = 30          # событий с одного IP в минуту
 _RL_SECONDS = 60.0
 
 
+# --- Дневной предохранитель на БЕСПЛАТНЫЕ вызовы LLM ------------------------
+# Поштучный rate-limit держит один адрес, но из Директа приходит МНОГО разных
+# адресов, и у каждого свой лимит — общего потолка трат не было вовсе (аудит
+# 2026-08-04). Каждая бесплатная проверка — два вызова модели плюс шесть
+# запросов в Вордстат, всё за счёт владельца. Предохранитель считает только
+# бесплатные операции; ПЛАТНАЯ генерация отчёта не ограничивается никогда:
+# заплатившему нельзя ответить «приходите завтра».
+# In-memory и сбрасывается рестартом — это предохранитель от разорения за
+# ночь, а не бухгалтерия.
+DAILY_FREE_LLM = int(os.environ.get("SOZDATEL_DAILY_FREE_LLM", "500"))
+_FUSE = {"day": "", "used": 0}
+_FUSE_MSG = ("Сегодня проверок больше, чем мы рассчитывали, — сервис берёт "
+             "паузу до завтра. Загляните позже: проверка останется бесплатной.")
+
+
+def _llm_fuse_blown() -> bool:
+    """True — дневной запас бесплатных вызовов исчерпан. Иначе списывает один."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _FUSE["day"] != today:
+        _FUSE["day"] = today
+        _FUSE["used"] = 0
+    if _FUSE["used"] >= DAILY_FREE_LLM:
+        return True
+    _FUSE["used"] += 1
+    return False
+
+
+def _client_ip(request: Request) -> str:
+    """IP для rate-limit -- ПОСЛЕДНИЙ узел в X-Forwarded-For, а не первый.
+
+    Заголовок формирует клиент, и прокси лишь ДОПИСЫВАЕТ к нему свой адрес
+    справа. Значит первый элемент полностью подконтролен тому, кто стучится:
+    подставляя каждый раз новый «IP», он получал по свежему лимиту на каждый
+    запрос — то есть лимита не было вовсе. За платным трафиком это прямой
+    счёт владельцу: /api/demand и /api/sharpen дёргают LLM.
+
+    Последний элемент дописывает наш собственный прокси (Timeweb), подделать
+    его клиент не может. Если заголовка нет (локальный запуск, прямой доступ)
+    -- берём адрес сокета.
+    """
+    chain = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",") if p.strip()]
+    if chain:
+        return chain[-1]
+    return request.client.host if request.client else "?"
+
+
 def _rate_limited(ip: str) -> bool:
     import time
     now = time.monotonic()
@@ -1976,15 +2049,18 @@ def _rate_limited(ip: str) -> bool:
     if len(bucket) >= _RL_LIMIT:
         return True
     bucket.append(now)
-    if len(_RL_WINDOW) > 10000:   # защита памяти от рассеянных IP
-        _RL_WINDOW.clear()
+    if len(_RL_WINDOW) > 10000:
+        # Чистим ТОЛЬКО протухшее, а не весь словарь: полный clear() сбрасывал
+        # лимит всем сразу, и переполнить словарь мог кто угодно -- это была
+        # вторая дверь мимо ограничения, рядом с подделкой X-Forwarded-For.
+        for key in [k for k, v in _RL_WINDOW.items() if not v or now - v[-1] > _RL_SECONDS]:
+            _RL_WINDOW.pop(key, None)
     return False
 
 
 @app.post("/api/smoke-event")
 async def smoke_event(request: Request):
-    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
+    client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
     try:
@@ -2433,8 +2509,7 @@ class WaitlistIn(BaseModel):
 async def waitlist(data: WaitlistIn, request: Request):
     """Лист ожидания Создателя: контакты людей без ключа владельца.
     Создатель smoke-тестит сам себя: та же механика лидов, своя idea-метка."""
-    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
+    client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
     contact = data.contact.strip()[:_MAX_FIELD]
@@ -2481,8 +2556,7 @@ async def account_request_link(data: AccountLinkIn, request: Request):
     # Отправляет письмо -- без лимита кто угодно мог бы забросать произвольную
     # почту письмами со ссылкой входа (чужой адрес, не только свой) и посадить
     # репутацию SMTP-аккаунта. Тот же лимит, что у остальных публичных ручек.
-    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
+    client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
     contact = data.contact.strip().lower()
@@ -2609,8 +2683,7 @@ async def demand_save(rid: int, data: DemandSaveIn, request: Request):
     полученный без прямой ссылки на /account (обычный вход с посадочной),
     нигде не найти повторно. Уже вошедшему привязываем контактом сессии
     сразу; остальным -- контакт из формы + magic-link, как обычный вход."""
-    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
+    client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
     with Session(engine) as s:
@@ -2687,8 +2760,7 @@ def demand_chosen(rid: int, data: ChosenOfferIn, request: Request):
     экране, — без этой привязки человек выбирал позиционирование, а платный
     разбор молча строился по исходной сырой формулировке идеи.
     """
-    client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
+    client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
     with Session(engine) as s:
@@ -2932,20 +3004,38 @@ def contacts_page():
 @app.get("/robots.txt")
 def robots():
     from fastapi.responses import PlainTextResponse
-    # Индексируем витрину; служебные и проверочные страницы -- нет
-    # (лендинги идей — временные, дубли по структуре: индексация вредит)
+    # Индексируем витрины (главная и страницы аудиторий -- это посадочные под
+    # поиск и Директ); служебное и приватное -- нет. Личные страницы человека
+    # (/r/, /report/, /account) несут ещё и meta noindex: robots.txt лишь
+    # просит не ходить, а мета запрещает показывать в выдаче.
+    #
+    # `Disallow: /legal` убран: это публичная юридическая страница, и закрывать
+    # её от индексации незачем -- ссылку на неё мы сами даём из форм согласия
+    # и подвала (152-ФЗ). Прежний `Allow: /$` тоже убран: без общего
+    # `Disallow: /` он ничего не разрешал сверх умолчания и только путал.
     return PlainTextResponse(
-        "User-agent: *\nAllow: /$\nDisallow: /desk\nDisallow: /p/\n"
-        "Disallow: /l/\nDisallow: /api/\nDisallow: /legal\n"
+        "User-agent: *\n"
+        "Disallow: /desk\nDisallow: /p/\nDisallow: /l/\nDisallow: /api/\n"
+        "Disallow: /r/\nDisallow: /report/\nDisallow: /account\n"
     )
+
+
+# Жёлтый квадрат с «С» -- ровно тот же значок, что стоит в <link rel="icon">
+# на каждой странице. Раньше здесь отдавался фавикон СТАРОЙ дизайн-системы
+# (тёмно-синий фон #11263F с оранжевой рамкой): браузер, спросивший
+# /favicon.ico напрямую, получал чужой бренд рядом со ссылкой на сайт.
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<rect width="64" height="64" rx="12" fill="#FFDE59"/>'
+    '<text x="32" y="44" font-family="Arial,sans-serif" font-size="36" '
+    'font-weight="700" text-anchor="middle" fill="#1B1C20">С</text></svg>'
+)
 
 
 @app.get("/favicon.ico")
 def favicon():
     from fastapi.responses import Response
-    # оранжевый квадрат-чертёж 1x1 svg: не 404 в каждом визите
-    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" fill="%2311263F"/><rect x="3" y="3" width="10" height="10" fill="none" stroke="%23FF8A2A" stroke-width="2"/></svg>'
-    return Response(content=svg, media_type="image/svg+xml")
+    return Response(content=_FAVICON_SVG, media_type="image/svg+xml")
 
 
 @app.get("/health")

@@ -23,8 +23,12 @@ import pytest as _pytest
 @_pytest.fixture(autouse=True)
 def _reset_rate_limit():
     """Все тесты идут с одного IP тест-клиента — сбрасываем минутное окно,
-    чтобы rate limit тестировался только там, где тестируется он сам."""
+    чтобы rate limit тестировался только там, где тестируется он сам.
+    Дневной предохранитель LLM сбрасываем по той же причине: он общий на
+    процесс, и без сброса сьют сгорел бы на пятисотом вызове /api/demand."""
     main_module._RL_WINDOW.clear()
+    main_module._FUSE["day"] = ""
+    main_module._FUSE["used"] = 0
     yield
 main_module.OWNER_KEY = "test-owner-key"
 OWNER = {"X-Owner-Key": "test-owner-key"}
@@ -1305,6 +1309,497 @@ def _static_result():
     return Path("static/result.html").read_text(encoding="utf-8")
 
 
+class _FakeReq:
+    """Минимальный Request для проверки _client_ip: только заголовки и сокет."""
+
+    def __init__(self, headers, host="127.0.0.1"):
+        self.headers = headers
+        self.client = type("C", (), {"host": host})() if host else None
+
+
+class TestRateLimitCannotBeForged:
+    """Аудит перед запуском рекламы 2026-08-04. Лимит брал ПЕРВЫЙ элемент
+    X-Forwarded-For, а этот заголовок формирует клиент: прокси лишь дописывает
+    свой адрес справа. Подставляя каждый раз новый «IP», кто угодно получал по
+    свежему лимиту на каждый запрос — то есть лимита не было вовсе.
+
+    За платным трафиком это прямой счёт владельцу: /api/demand и /api/sharpen
+    дёргают LLM, а /api/demand ещё и шесть запросов в Вордстат.
+    """
+
+    def test_forged_header_does_not_win_over_the_proxy(self):
+        import app.main as m
+        for i in range(5):
+            ip = m._client_ip(_FakeReq({"x-forwarded-for": f"10.0.0.{i}, 203.0.113.9"}))
+            assert ip == "203.0.113.9", "лимит считается по подделанному адресу"
+
+    def test_real_client_ip_is_the_last_hop(self):
+        import app.main as m
+        assert m._client_ip(_FakeReq({"x-forwarded-for": "1.1.1.1, 2.2.2.2"})) == "2.2.2.2"
+        assert m._client_ip(_FakeReq({"x-forwarded-for": "  5.5.5.5  "})) == "5.5.5.5"
+
+    def test_falls_back_to_socket_without_the_header(self):
+        """Локальный запуск и прямой доступ мимо прокси."""
+        import app.main as m
+        assert m._client_ip(_FakeReq({}, host="7.7.7.7")) == "7.7.7.7"
+        assert m._client_ip(_FakeReq({"x-forwarded-for": " , "}, host="7.7.7.7")) == "7.7.7.7"
+
+    def test_overflow_cleanup_keeps_active_limits(self):
+        """Прежний `clear()` при переполнении сбрасывал лимит ВСЕМ — вторая
+        дверь мимо ограничения: словарь мог переполнить кто угодно."""
+        import app.main as m, time
+        m._RL_WINDOW.clear()
+        try:
+            for i in range(10050):
+                m._RL_WINDOW[f"stale-{i}"] = [time.monotonic() - m._RL_SECONDS - 10]
+            m._RL_WINDOW["живой"] = [time.monotonic()] * m._RL_LIMIT
+            assert m._rate_limited("живой") is True
+            assert m._rate_limited("живой") is True, "активный лимит потерялся при чистке"
+        finally:
+            m._RL_WINDOW.clear()
+
+    def test_limit_still_stops_a_flood_from_one_address(self):
+        import app.main as m
+        m._RL_WINDOW.clear()
+        try:
+            hits = [m._rate_limited("198.51.100.7") for _ in range(m._RL_LIMIT + 3)]
+            assert hits[:m._RL_LIMIT] == [False] * m._RL_LIMIT
+            assert all(hits[m._RL_LIMIT:]), "лимит перестал срабатывать"
+        finally:
+            m._RL_WINDOW.clear()
+
+
+class TestIndexingAndBrand:
+    """Аудит перед рекламой: что видит поисковик и что видит браузер."""
+
+    def test_legal_page_is_open_to_indexing(self):
+        """`Disallow: /legal` закрывал публичную юридическую страницу, на
+        которую мы сами ссылаемся из форм согласия и подвала."""
+        assert "Disallow: /legal" not in client.get("/robots.txt").text
+
+    def test_private_pages_are_closed(self):
+        t = client.get("/robots.txt").text
+        for path in ("/desk", "/p/", "/l/", "/api/", "/r/", "/report/", "/account"):
+            assert f"Disallow: {path}" in t, path
+
+    def test_showcases_stay_indexable(self):
+        """Главная и витрины аудиторий — посадочные под поиск и Директ."""
+        t = client.get("/robots.txt").text
+        for path in ("/social-contract", "/students"):
+            assert f"Disallow: {path}" not in t, path
+
+    def test_favicon_matches_the_one_pages_declare(self):
+        """`/favicon.ico` отдавал значок СТАРОЙ дизайн-системы (тёмно-синий
+        #11263F с оранжевой рамкой), хотя во всех страницах стоит жёлтый
+        квадрат с «С». Браузер, спросивший favicon напрямую, показывал рядом
+        со ссылкой чужой бренд."""
+        body = client.get("/favicon.ico").text
+        assert "#FFDE59" in body, "фавикон не в цвете акцента дизайн-системы"
+        assert "11263F" not in body and "FF8A2A" not in body, "остался старый бренд"
+        assert ">С<" in body
+        # Тот же значок, что объявлен в разметке страниц.
+        assert "%23FFDE59" in client.get("/").text
+
+
+class TestDailyLlmFuse:
+    """Аудит 2026-08-04: поштучный rate-limit держит один адрес, но из
+    Директа приходит много РАЗНЫХ адресов, и у каждого свой лимит — общего
+    потолка трат на LLM не было вовсе. Каждая бесплатная проверка — два
+    вызова модели плюс шесть запросов в Вордстат, всё за счёт владельца."""
+
+    def _burn(self):
+        import app.main as m
+        from datetime import datetime, timezone
+        m._FUSE["day"] = datetime.now(timezone.utc).date().isoformat()
+        m._FUSE["used"] = m.DAILY_FREE_LLM
+
+    def test_free_endpoints_pause_when_the_daily_budget_is_spent(self, monkeypatch):
+        import app.main as m
+        async def boom(*a, **kw):
+            raise AssertionError("LLM вызвана после сгоревшего предохранителя")
+        monkeypatch.setattr(m, "check_demand", boom)
+        monkeypatch.setattr(m, "sharpen_idea", boom)
+        monkeypatch.setattr(m, "generate_idea", boom)
+        self._burn()
+        for call in (lambda: client.post("/api/demand", json={"idea": "Достаточно длинная идея для проверки"}),
+                     lambda: client.post("/api/sharpen", json={"idea": "Достаточно длинная идея для проверки"}),
+                     lambda: client.post("/api/idea")):
+            r = call()
+            assert r.status_code == 429
+            assert "паузу до завтра" in r.text
+
+    def test_paid_report_generation_is_never_fused(self, monkeypatch):
+        """Заплатившему нельзя ответить «приходите завтра» — платная генерация
+        не проходит через предохранитель вообще."""
+        import app.main as m, inspect
+        src = inspect.getsource(m.report_section)
+        assert "_llm_fuse_blown" not in src
+
+    def test_sample_degrades_to_none_instead_of_burning_money(self):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Идея для образца при сгоревшем предохранителе",
+                              result_json=json.dumps({"formulations": []}, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            rid = rec.id
+        self._burn()
+        assert asyncio.run(m._ensure_sample(rid)) is None
+
+    def test_fuse_resets_on_a_new_day(self):
+        import app.main as m
+        m._FUSE["day"] = "2020-01-01"
+        m._FUSE["used"] = m.DAILY_FREE_LLM
+        assert m._llm_fuse_blown() is False   # новый день — счётчик обнулился
+        assert m._FUSE["used"] == 1
+
+
+class TestShowcaseTellsThePrice:
+    """Аудит 2026-08-04: цен не было ни на главной, ни на витринах — человек
+    узнавал их только в конце бесплатной проверки. Для платного трафика это
+    сюрприз в худшем месте воронки."""
+
+    def test_prices_come_from_the_single_source(self):
+        import app.main as m
+        for path in ("/", "/students", "/social-contract"):
+            text = client.get(path).text
+            assert "Сколько это стоит" in text, path
+            assert f"{m.LIVE_TEST_PRICE} ₽" in text, path
+            assert "__MIN_REPORT_PRICE__" not in text, path   # слот подставлен
+            assert "бесплатно" in text, path
+
+    def test_ad_budget_is_named_next_to_the_price(self):
+        """Рекламный бюджет больше самой услуги — умолчать о нём на витрине
+        значит получить законное «вы мне не сказали» после оплаты."""
+        text = client.get("/").text
+        assert "рекламный бюджет" in text.lower()
+
+    def test_social_proof_hides_below_a_hundred(self):
+        """«Уже проверили 12 идей» читалось как признак пустого сервиса.
+        Малое число хуже отсутствия числа."""
+        text = client.get("/").text
+        assert "ideas_checked >= 100" in text
+
+
+class TestFormsAskForConsent:
+    """152-ФЗ: согласие на обработку персональных данных у КАЖДОЙ формы, где
+    берём почту или телефон. Было только на проверочной странице клиента
+    (landing_template.html) — на наших собственных формах не было нигде,
+    хотя именно там человек оставляет контакт и платит."""
+
+    def _pages(self):
+        from pathlib import Path
+        return {n: Path(f"static/{n}.html").read_text(encoding="utf-8")
+                for n in ("result", "report")}
+
+    def test_every_contact_form_links_the_privacy_policy(self):
+        for name, text in self._pages().items():
+            assert "pd-note" in text, name
+            assert "/privacy" in text, name
+            assert "персональных данных" in text, name
+
+    def test_paid_forms_also_reference_the_offer(self):
+        """Форма, за которой идёт списание денег, обязана назвать оферту:
+        акцептом по ней считается сама оплата (см. /oferta, п. 1)."""
+        for name, text in self._pages().items():
+            block = text.split('placeholder="Почта или телефон', 1)[1][:700]
+            assert "/oferta" in block, name
+
+    def test_client_landing_kept_its_own_consent(self):
+        """Сторож: страница, которую мы собираем клиенту, тоже собирает
+        контакты — своё согласие она несла и раньше, потерять его нельзя."""
+        from pathlib import Path
+        assert "персональных данных" in Path("app/landing_template.html").read_text(encoding="utf-8")
+
+
+class TestCategoryDemandIsNotIdeaDemand:
+    """Живой прогон 2026-08-04, идея «мобильный шиномонтаж с выездом».
+
+    Родовое «шиномонтаж» дало 400 978/мес и как максимум ушло и в вердикт
+    («Спрос есть: ищут 400 978 раз в месяц»), и в балл 10/10, и в поиск
+    конкурентов. Но 400 978 — это спрос на шиномонтаж ВООБЩЕ, включая
+    стационарные точки, куда клиент мобильной услуги как раз не идёт;
+    целевые фразы давали 23 123 и 19 271. Число красивее, вывод неверный.
+
+    Побочно это же тянуло в конкуренты агрегаторы: по широкому запросу топ
+    выдачи всегда занят справочниками — это их бизнес.
+    """
+
+    def _post(self, searched):
+        """Фейковый _post с реальными числами того прогона."""
+        counts = {"шиномонтаж": 400978, "выездной шиномонтаж": 23123,
+                  "мобильный шиномонтаж": 19271, "шиномонтаж на дому": 307}
+        async def post(provider, payload):
+            if provider == "yandex":
+                if "шкалам" in payload["instructions"]:
+                    return _yandex_response(json.dumps(
+                        {"competition": 5, "timing": 5, "execution": 5,
+                         "notes": {"competition": "", "timing": "", "execution": ""}},
+                        ensure_ascii=False))
+                return _yandex_response(json.dumps([
+                    {"phrase": "шиномонтаж", "kind": "category"},
+                    {"phrase": "выездной шиномонтаж", "kind": "target"},
+                    {"phrase": "мобильный шиномонтаж", "kind": "target"},
+                    {"phrase": "шиномонтаж на дому", "kind": "target"},
+                ], ensure_ascii=False))
+            if provider == "wordstat":
+                return {"totalCount": counts.get(payload["phrase"], 0)}
+            searched.append(payload["query"]["queryText"])
+            return {"rawData": None}
+        return post
+
+    def _run(self):
+        searched = []
+        out = asyncio.run(check_demand("Мобильный шиномонтаж с выездом на дом",
+                                       _post=self._post(searched)))
+        return out, searched
+
+    def test_score_is_built_on_the_target_phrase_not_the_category(self):
+        from app.demand import _demand_score
+        out, _ = self._run()
+        demand = next(s for s in out["scores"] if s["key"] == "demand")
+        assert demand["value"] == _demand_score(23123)
+        assert demand["value"] != _demand_score(400978), \
+            "балл посчитан по родовой категории — это спрос на рынок, не на идею"
+
+    def test_verdict_quotes_the_target_number(self):
+        out, _ = self._run()
+        assert "23 123" in out["verdict"]["text"]
+        assert "400 978" not in out["verdict"]["text"]
+
+    def test_competitors_are_searched_by_the_target_phrase(self):
+        """Корень проблемы с агрегаторами: по слову «шиномонтаж» в топе
+        всегда справочники, по «выездному» — живые локальные сервисы."""
+        _, searched = self._run()
+        assert searched == ["выездной шиномонтаж"], searched
+
+    def test_category_is_still_shown_but_separately(self):
+        """Размер рынка — полезный контекст, просто не тот же самый спрос."""
+        out, _ = self._run()
+        assert out["category"] == {"phrase": "шиномонтаж", "count": 400978}
+        assert all(f["kind"] in ("target", "category") for f in out["formulations"])
+
+    def test_page_marks_the_category_row_so_it_is_not_read_as_the_answer(self):
+        from pathlib import Path
+        text = Path("static/result.html").read_text(encoding="utf-8")
+        assert "f.kind === 'category'" in text
+        assert "В оценку спроса не идёт" in text
+
+    def test_plain_strings_from_the_model_still_work(self):
+        """Модель может сорвать формат и вернуть голые строки. Строка без
+        типа читается как целевая: занизить спрос безопаснее, чем выкинуть
+        из расчёта единственную содержательную фразу."""
+        from app.demand import _parse_formulations, KIND_TARGET
+        rows = _parse_formulations(["первая фраза", {"phrase": "вторая", "kind": "category"}])
+        assert rows[0] == {"phrase": "первая фраза", "kind": KIND_TARGET}
+        assert rows[1]["kind"] == "category"
+
+    def test_all_category_falls_back_instead_of_leaving_nothing(self):
+        """Если модель пометила категорией ВСЁ, считать спрос не по чему —
+        лучше широкая цифра, чем никакой."""
+        from app.demand import _parse_formulations
+        import asyncio as _a
+        async def post(provider, payload):
+            return _yandex_response(json.dumps(
+                [{"phrase": "а б", "kind": "category"},
+                 {"phrase": "в г", "kind": "category"}], ensure_ascii=False))
+        rows = _a.run(generate_formulations("Достаточно длинное описание идеи", _post=post))
+        assert all(r["kind"] == "target" for r in rows)
+
+
+class TestPreviewAndCaptionUseTargetPhrases:
+    """Продолжение находки с родовой категорией (аудит 2026-08-04): вердикт
+    и балл уже считались по целевым фразам, но подпись к шкале спроса
+    (_demand_caption) и тизер отчёта (_report_preview) по-прежнему брали max
+    по ВСЕМ строкам — рядом с баллом, посчитанным по 23 123, стояла подпись
+    «400 978 запросов в месяц» из родовой категории."""
+
+    DATA = {"formulations": [
+        {"phrase": "шиномонтаж", "kind": "category", "count": 400978},
+        {"phrase": "выездной шиномонтаж", "kind": "target", "count": 23123}]}
+
+    def test_caption_quotes_the_target_number(self):
+        import app.main as m
+        cap = m._demand_caption(self.DATA)
+        assert "23\u00a0123" in cap, cap
+        assert "400" not in cap
+
+    def test_report_preview_quotes_the_target_number(self):
+        import app.main as m
+        assert m._report_preview(self.DATA)["best_count"] == 23123
+
+    def test_old_records_without_kind_still_work(self):
+        """Записи в БД, сохранённые до появления kind, — строки без типа
+        читаются как целевые."""
+        import app.main as m
+        old = {"formulations": [{"phrase": "а", "count": 500}]}
+        assert m._target_top_count(old) == 500
+
+    def test_all_category_falls_back_to_what_is_there(self):
+        import app.main as m
+        only_cat = {"formulations": [{"phrase": "а", "kind": "category", "count": 900}]}
+        assert m._target_top_count(only_cat) == 900   # шире, но честнее «данных нет»
+
+
+class TestInventedNumbersDoNotBecomeFacts:
+    """Живой прогон 2026-08-04, самая дорогая находка. Подпись к шкале
+    конкуренции (её пишет LLM на бесплатной проверке) содержала выдуманное
+    «162 стационарные точки». Весь demand_data уезжал в отчёт одним ключом
+    «данные_проверки_спроса», и модель отчёта честно приняла чужую выдумку за
+    измерение: число 162 разошлось по ШЕСТИ разделам платного бизнес-плана
+    как факт — «наличие 162 фиксированных точек во Владимире», «на Яндекс
+    Услугах представлено более 162 сервисов».
+
+    Мы такого не измеряем никогда: есть частотности Вордстата и домены из
+    выдачи, и всё. Для документа, который несут в комиссию соцзащиты,
+    выдуманное число стоит особенно дорого.
+    """
+
+    DEMAND = {"formulations": [{"phrase": "шиномонтаж", "count": 400978}],
+              "best_phrase": "шиномонтаж",
+              "competitors": {"top": [{"domain": "shina33.ru"}], "found": 891000},
+              "scores": [{"key": "competition", "label": "Конкуренция", "value": 7,
+                          "note": "во Владимире уже 162 стационарные точки"}],
+              "overall": {"value": 7, "weakest": "Конкуренция"}}
+
+    def _context(self):
+        from app.report_engine import _user_message
+        return json.loads(_user_message("Мобильный шиномонтаж с выездом", self.DEMAND))
+
+    def test_measurements_and_opinions_are_separated(self):
+        ctx = self._context()
+        measured = ctx["измеренные_данные"]
+        assert "formulations" in measured and "competitors" in measured
+        assert "scores" not in measured, "мнение модели попало в измеренные данные"
+        assert "overall" not in measured
+
+    def test_the_opinion_block_names_itself_as_an_opinion(self):
+        """Ключ читает модель, а не человек — он обязан говорить сам за себя,
+        без опоры на то, что где-то в промпте это объяснено."""
+        ctx = self._context()
+        key = [k for k in ctx if k.startswith("оценка")][0]
+        assert "мнение" in key and "не_измерение" in key
+        assert ctx[key]["scores"][0]["note"].startswith("во Владимире")
+
+    def test_prompt_forbids_numbers_we_never_measured(self):
+        from app.report_engine import _core_prompt, _section_prompt, PURPOSES
+        for purpose in PURPOSES:
+            for prompt in (_core_prompt("full", purpose),
+                           _section_prompt("competitors", "full", purpose)):
+                assert "Мы НЕ измеряли" in prompt, purpose
+                assert "сколько в городе точек" in prompt, purpose
+
+    def test_assumptions_are_allowed_but_must_be_labelled(self):
+        """Запрет чисел не должен убить расчёты: смета и окупаемость — это то,
+        за что заплатили (см. _FINANCE_SPEC). Допущение разрешено, но обязано
+        быть названо допущением."""
+        from app.report_engine import _section_prompt
+        p = _section_prompt("finance", "full", "social_contract")
+        assert "допущение" in p
+        assert "предположим" in p.lower()
+
+    def test_real_wordstat_numbers_are_still_required(self):
+        """Сторож от чрезмерной правки: цифры Вордстата — единственное, чем
+        разбор отличается от бесплатных ИИ-генераторов."""
+        from app.report_engine import _section_prompt
+        p = _section_prompt("market", "full", "business")
+        assert "буквально — не выдумывай другие" in p
+        assert "измеренные_данные" in p
+
+    def test_empty_demand_data_does_not_crash_the_split(self):
+        from app.report_engine import _user_message
+        ctx = json.loads(_user_message("Идея достаточной длины", {}))
+        assert ctx["измеренные_данные"] == {}
+
+
+class TestAnswersStayInRussian:
+    """Живой прогон 2026-08-04: подписи к трём шкалам оценки приехали
+    иероглифами («本地已有162个固定点，但移动细分仍有空白») и в таком виде
+    попали и на страницу результата, и в платный бизнес-план за 2990 ₽.
+
+    Причина: модель по умолчанию — DeepSeek (китайская), а требования писать
+    по-русски не было НИ В ОДНОМ промпте, кроме заострения идеи.
+    """
+
+    def test_language_rule_applies_to_every_call_not_per_prompt(self):
+        """Правило живёт в адаптере, а не в промптах движков: промптов уже
+        четыре файла, и в следующем его снова забудут — как забыли в
+        demand.py и report_engine.py, где иероглифы и вылезли."""
+        from app.llm_adapter import NON_CLAUDE_HARDENING
+        low = NON_CLAUDE_HARDENING.lower()
+        assert "только русский" in low
+        assert "иероглиф" in low
+
+    def test_detector_finds_cjk_but_not_ordinary_latin(self):
+        """Латиница в русском ответе — норма: домены конкурентов, названия
+        сервисов, единицы. Ловить её значило бы получать ложные срабатывания
+        чаще, чем настоящие."""
+        from app.llm_adapter import looks_non_russian
+        assert looks_non_russian("本地已有162个固定点")
+        assert looks_non_russian("Спрос есть, но 移动细分仍有空白")
+        assert not looks_non_russian("В выдаче: 2gis.ru и uslugi.yandex.ru")
+        assert not looks_non_russian("Реклама в Яндекс Директе, CPA до 500 ₽")
+        assert not looks_non_russian("")
+
+    def test_hieroglyphs_trigger_one_retry(self):
+        """Промпт — не гарантия: на живом прогоне требование языка в
+        offer_engine было, а модель всё равно сорвалась. Нужен ретрай."""
+        import asyncio
+        from app import llm_adapter
+        calls = []
+        async def post(provider, payload):
+            calls.append(payload["instructions"])
+            text = "需车辆和设备" if len(calls) == 1 else "Нужны машина и оборудование"
+            return {"output": [{"content": [{"type": "output_text", "text": text}]}]}
+        out = asyncio.run(llm_adapter.call("Оцени идею", "контекст", 100,
+                                           provider="yandex", _post=post))
+        assert out == "Нужны машина и оборудование"
+        assert len(calls) == 2, "повторной попытки не было"
+        assert "ОТКЛОНЕНА" in calls[1], "повтор не сказал модели, что было не так"
+
+    def test_good_answer_is_not_retried(self):
+        """Ретрай стоит денег и времени — он только на реальном срыве."""
+        import asyncio
+        from app import llm_adapter
+        calls = []
+        async def post(provider, payload):
+            calls.append(1)
+            return {"output": [{"content": [{"type": "output_text",
+                                             "text": "Нормальный русский ответ"}]}]}
+        asyncio.run(llm_adapter.call("s", "u", 100, provider="yandex", _post=post))
+        assert len(calls) == 1
+
+    def test_transport_does_not_kill_the_check_after_a_failed_retry(self):
+        """Если модель сорвалась дважды — решать, что делать с испорченным
+        текстом, должен движок (у подписи к шкале она необязательна и просто
+        гасится), а не транспорт, роняющий всю бесплатную проверку."""
+        import asyncio
+        from app import llm_adapter
+        async def post(provider, payload):
+            return {"output": [{"content": [{"type": "output_text", "text": "需车辆"}]}]}
+        out = asyncio.run(llm_adapter.call("s", "u", 100, provider="yandex", _post=post))
+        assert out == "需车辆"
+
+    def test_score_note_is_blanked_rather_than_shown_in_chinese(self):
+        """Балл — число, от языка не зависит и остаётся. Подпись
+        необязательна: пустая честнее иероглифов."""
+        import asyncio
+        from app.demand import score_idea
+        async def post(provider, payload):
+            return _yandex_response(json.dumps({
+                "competition": 7, "timing": 7, "execution": 8,
+                "notes": {"competition": "本地已有162个固定点",
+                          "timing": "季节换胎需求明确",
+                          "execution": "Нужны машина и оборудование"}},
+                ensure_ascii=False))
+        out = asyncio.run(score_idea("идея", [], {"top": [], "found": 1}, _post=post))
+        by_key = {s["key"]: s for s in out}
+        assert by_key["competition"]["value"] == 7        # балл сохранён
+        assert by_key["competition"]["note"] == ""        # подпись погашена
+        assert by_key["timing"]["note"] == ""
+        assert by_key["execution"]["note"] == "Нужны машина и оборудование"
+
+
 class TestCompetitorsAreBusinesses:
     """Живой прогон показал в блоке «Конкуренты» Википедию, Ленту и женский
     журнал. Для информационного запроса это правдивая выдача, но человеку
@@ -1319,8 +1814,32 @@ class TestCompetitorsAreBusinesses:
 
     def test_real_businesses_survive_the_filter(self):
         from app.demand import _is_not_competitor
-        for domain in ("ozon.ru", "avito.ru", "my-clinic.ru", "studio22.ru",
+        for domain in ("my-clinic.ru", "studio22.ru", "shinomontazh33.ru",
                        "market.merch.ru", "informatika-shop.ru"):
+            assert not _is_not_competitor(domain), domain
+
+    def test_aggregators_and_directories_are_not_competitors(self):
+        """Живой прогон 2026-08-04: в «конкурентах» мобильного шиномонтажа
+        оказались Яндекс.Карты, 2ГИС и Яндекс.Услуги — и весь раздел платного
+        отчёта был построен вокруг них.
+
+        По любому локальному запросу справочники занимают весь топ: это их
+        бизнес — собирать чужие услуги. Конкурентами они не являются, потому
+        что услугу не оказывают, а перепродают доступ к тем, кто оказывает.
+        Владелец назвал это «то же самое, что предлагать в конкурентах
+        измерителя журнал».
+        """
+        from app.demand import _is_not_competitor
+        for domain in ("yandex.ru", "uslugi.yandex.ru", "2gis.ru", "zoon.ru",
+                       "flamp.ru", "profi.ru", "avito.ru", "youla.ru",
+                       "yell.ru", "orgpage.ru"):
+            assert _is_not_competitor(domain), domain
+
+    def test_local_service_sites_still_pass(self):
+        """Сторож от чрезмерной фильтрации: настоящий локальный сервис часто
+        живёт на домене с городом или названием — его вырезать нельзя."""
+        from app.demand import _is_not_competitor
+        for domain in ("koleso-vladimir.ru", "shini-33.ru", "avtoservice-nn.ru"):
             assert not _is_not_competitor(domain), domain
 
     def test_substring_match_does_not_eat_commercial_domains(self):
