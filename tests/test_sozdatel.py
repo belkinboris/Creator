@@ -23,8 +23,12 @@ import pytest as _pytest
 @_pytest.fixture(autouse=True)
 def _reset_rate_limit():
     """Все тесты идут с одного IP тест-клиента — сбрасываем минутное окно,
-    чтобы rate limit тестировался только там, где тестируется он сам."""
+    чтобы rate limit тестировался только там, где тестируется он сам.
+    Дневной предохранитель LLM сбрасываем по той же причине: он общий на
+    процесс, и без сброса сьют сгорел бы на пятисотом вызове /api/demand."""
     main_module._RL_WINDOW.clear()
+    main_module._FUSE["day"] = ""
+    main_module._FUSE["used"] = 0
     yield
 main_module.OWNER_KEY = "test-owner-key"
 OWNER = {"X-Owner-Key": "test-owner-key"}
@@ -1397,6 +1401,86 @@ class TestIndexingAndBrand:
         assert "%23FFDE59" in client.get("/").text
 
 
+class TestDailyLlmFuse:
+    """Аудит 2026-08-04: поштучный rate-limit держит один адрес, но из
+    Директа приходит много РАЗНЫХ адресов, и у каждого свой лимит — общего
+    потолка трат на LLM не было вовсе. Каждая бесплатная проверка — два
+    вызова модели плюс шесть запросов в Вордстат, всё за счёт владельца."""
+
+    def _burn(self):
+        import app.main as m
+        from datetime import datetime, timezone
+        m._FUSE["day"] = datetime.now(timezone.utc).date().isoformat()
+        m._FUSE["used"] = m.DAILY_FREE_LLM
+
+    def test_free_endpoints_pause_when_the_daily_budget_is_spent(self, monkeypatch):
+        import app.main as m
+        async def boom(*a, **kw):
+            raise AssertionError("LLM вызвана после сгоревшего предохранителя")
+        monkeypatch.setattr(m, "check_demand", boom)
+        monkeypatch.setattr(m, "sharpen_idea", boom)
+        monkeypatch.setattr(m, "generate_idea", boom)
+        self._burn()
+        for call in (lambda: client.post("/api/demand", json={"idea": "Достаточно длинная идея для проверки"}),
+                     lambda: client.post("/api/sharpen", json={"idea": "Достаточно длинная идея для проверки"}),
+                     lambda: client.post("/api/idea")):
+            r = call()
+            assert r.status_code == 429
+            assert "паузу до завтра" in r.text
+
+    def test_paid_report_generation_is_never_fused(self, monkeypatch):
+        """Заплатившему нельзя ответить «приходите завтра» — платная генерация
+        не проходит через предохранитель вообще."""
+        import app.main as m, inspect
+        src = inspect.getsource(m.report_section)
+        assert "_llm_fuse_blown" not in src
+
+    def test_sample_degrades_to_none_instead_of_burning_money(self):
+        import app.main as m
+        from app.main import DemandCheck, Session, engine
+        with Session(engine) as s:
+            rec = DemandCheck(idea="Идея для образца при сгоревшем предохранителе",
+                              result_json=json.dumps({"formulations": []}, ensure_ascii=False))
+            s.add(rec); s.commit(); s.refresh(rec)
+            rid = rec.id
+        self._burn()
+        assert asyncio.run(m._ensure_sample(rid)) is None
+
+    def test_fuse_resets_on_a_new_day(self):
+        import app.main as m
+        m._FUSE["day"] = "2020-01-01"
+        m._FUSE["used"] = m.DAILY_FREE_LLM
+        assert m._llm_fuse_blown() is False   # новый день — счётчик обнулился
+        assert m._FUSE["used"] == 1
+
+
+class TestShowcaseTellsThePrice:
+    """Аудит 2026-08-04: цен не было ни на главной, ни на витринах — человек
+    узнавал их только в конце бесплатной проверки. Для платного трафика это
+    сюрприз в худшем месте воронки."""
+
+    def test_prices_come_from_the_single_source(self):
+        import app.main as m
+        for path in ("/", "/students", "/social-contract"):
+            text = client.get(path).text
+            assert "Сколько это стоит" in text, path
+            assert f"{m.LIVE_TEST_PRICE} ₽" in text, path
+            assert "__MIN_REPORT_PRICE__" not in text, path   # слот подставлен
+            assert "бесплатно" in text, path
+
+    def test_ad_budget_is_named_next_to_the_price(self):
+        """Рекламный бюджет больше самой услуги — умолчать о нём на витрине
+        значит получить законное «вы мне не сказали» после оплаты."""
+        text = client.get("/").text
+        assert "рекламный бюджет" in text.lower()
+
+    def test_social_proof_hides_below_a_hundred(self):
+        """«Уже проверили 12 идей» читалось как признак пустого сервиса.
+        Малое число хуже отсутствия числа."""
+        text = client.get("/").text
+        assert "ideas_checked >= 100" in text
+
+
 class TestFormsAskForConsent:
     """152-ФЗ: согласие на обработку персональных данных у КАЖДОЙ формы, где
     берём почту или телефон. Было только на проверочной странице клиента
@@ -1521,6 +1605,40 @@ class TestCategoryDemandIsNotIdeaDemand:
                  {"phrase": "в г", "kind": "category"}], ensure_ascii=False))
         rows = _a.run(generate_formulations("Достаточно длинное описание идеи", _post=post))
         assert all(r["kind"] == "target" for r in rows)
+
+
+class TestPreviewAndCaptionUseTargetPhrases:
+    """Продолжение находки с родовой категорией (аудит 2026-08-04): вердикт
+    и балл уже считались по целевым фразам, но подпись к шкале спроса
+    (_demand_caption) и тизер отчёта (_report_preview) по-прежнему брали max
+    по ВСЕМ строкам — рядом с баллом, посчитанным по 23 123, стояла подпись
+    «400 978 запросов в месяц» из родовой категории."""
+
+    DATA = {"formulations": [
+        {"phrase": "шиномонтаж", "kind": "category", "count": 400978},
+        {"phrase": "выездной шиномонтаж", "kind": "target", "count": 23123}]}
+
+    def test_caption_quotes_the_target_number(self):
+        import app.main as m
+        cap = m._demand_caption(self.DATA)
+        assert "23\u00a0123" in cap, cap
+        assert "400" not in cap
+
+    def test_report_preview_quotes_the_target_number(self):
+        import app.main as m
+        assert m._report_preview(self.DATA)["best_count"] == 23123
+
+    def test_old_records_without_kind_still_work(self):
+        """Записи в БД, сохранённые до появления kind, — строки без типа
+        читаются как целевые."""
+        import app.main as m
+        old = {"formulations": [{"phrase": "а", "count": 500}]}
+        assert m._target_top_count(old) == 500
+
+    def test_all_category_falls_back_to_what_is_there(self):
+        import app.main as m
+        only_cat = {"formulations": [{"phrase": "а", "kind": "category", "count": 900}]}
+        assert m._target_top_count(only_cat) == 900   # шире, но честнее «данных нет»
 
 
 class TestInventedNumbersDoNotBecomeFacts:

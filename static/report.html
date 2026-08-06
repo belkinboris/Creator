@@ -179,6 +179,11 @@
     body{background:#fff}
     .report-layout{grid-template-columns:1fr;margin-top:0}
     .section.locked{display:none}
+    /* Смета и карточки рисков не рвутся между страницами: соцконтрактный
+       план несут в комиссию на бумаге, и таблица, разрезанная переносом,
+       читается как небрежность в самом важном месте документа. */
+    .cost-table, .risk, .score-card{break-inside:avoid}
+    .section h2{break-after:avoid}
   }
 </style>
 </head>

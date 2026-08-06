@@ -546,6 +546,8 @@ async def idea_suggest(request: Request):
     client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
+    if _llm_fuse_blown():
+        raise HTTPException(429, _FUSE_MSG)
     try:
         return {"ok": True, "idea": await generate_idea()}
     except DemandError as e:
@@ -557,6 +559,8 @@ async def demand_check(data: IdeaIn, request: Request):
     client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
+    if _llm_fuse_blown():
+        raise HTTPException(429, _FUSE_MSG)
     try:
         result = await check_demand(data.idea)
     except DemandError as e:
@@ -611,6 +615,8 @@ async def sharpen(data: IdeaIn, request: Request):
     client_ip = _client_ip(request)
     if _rate_limited(client_ip):
         raise HTTPException(429, "слишком часто")
+    if _llm_fuse_blown():
+        raise HTTPException(429, _FUSE_MSG)
     try:
         result = await sharpen_idea(data.idea, purpose=data.purpose)
         return {"ok": True, **_polish_offers(result)}
@@ -840,6 +846,22 @@ def _as_sentence(text: str) -> str:
     return t if not t or t[-1] in _SENTENCE_END else t + "."
 
 
+def _target_top_count(demand_data: dict) -> int | None:
+    """Максимум частотности по ЦЕЛЕВЫМ фразам -- та же логика, что в
+    check_demand: родовая категория (`kind == "category"`) это спрос на
+    рынок целиком, не на идею, и в цифру спроса не входит. Строка без
+    `kind` (старые записи в БД) читается как целевая. Если целевых с числом
+    не осталось -- берём что есть: широкая цифра честнее, чем «данных нет»
+    при живых числах на экране."""
+    rows = demand_data.get("formulations") or []
+    target = [f["count"] for f in rows
+              if f.get("count") is not None and f.get("kind") != "category"]
+    if target:
+        return max(target)
+    known = [f["count"] for f in rows if f.get("count") is not None]
+    return max(known) if known else None
+
+
 def _demand_caption(demand_data: dict) -> str:
     """Подпись к шкале спроса -- из её же частотности, без участия модели.
 
@@ -848,12 +870,15 @@ def _demand_caption(demand_data: dict) -> str:
     результате из четырёх ячеек одна стояла голой -- причём самая важная:
     спрос единственный посчитан по реальным цифрам Яндекса и он же потолок
     общего балла. Числа берём готовые, ничего не выдумываем (принцип 1).
+
+    Максимум -- по целевым фразам (_target_top_count): раньше подпись брала
+    max по ВСЕМ строкам и рядом с баллом, посчитанным по целевым 23 123,
+    писала «400 978 запросов в месяц» из родовой категории.
     """
-    known = [f["count"] for f in (demand_data.get("formulations") or [])
-             if f.get("count") is not None]
-    if not known:
+    top = _target_top_count(demand_data)
+    if top is None:
         return "Частотность недоступна"
-    return f"{max(known):,}".replace(",", "\u00a0") + " запросов в месяц"
+    return f"{top:,}".replace(",", "\u00a0") + " запросов в месяц"
 
 
 def _polish_scores(demand_data: dict) -> dict:
@@ -889,9 +914,9 @@ def _report_preview(demand_data: dict) -> dict:
     (dimeadozen как ориентир на содержательный анализ, не «воду»)."""
     v = demand_data.get("verdict") or {}
     overall = demand_data.get("overall") or {}
-    formulations = demand_data.get("formulations") or []
-    known = [f["count"] for f in formulations if f.get("count") is not None]
-    top = max(known) if known else None
+    # По целевым фразам, не по всем: max по всем строкам брал родовую
+    # категорию, и тизер называл «спросом» цифру рынка целиком.
+    top = _target_top_count(demand_data)
     comp = demand_data.get("competitors") or {}
     top_names = [c.get("domain") or c.get("title") or "" for c in (comp.get("top") or [])[:3]]
     # В тизере заметки идут отдельными абзацами -- там нужна точка, в отличие
@@ -956,6 +981,11 @@ async def _ensure_sample(check_id: int) -> dict | None:
         idea = rec.idea
         chosen = _chosen_offer(rec)
         demand_data = json.loads(rec.result_json)
+
+    # Образец — бесплатная генерация за счёт владельца: при сгоревшем дневном
+    # предохранителе страница просто остаётся без образца (принцип 7).
+    if _llm_fuse_blown():
+        return None
 
     try:
         core = await generate_core(idea, demand_data, "quick",
@@ -1962,6 +1992,33 @@ _MAX_FIELD = 300
 _RL_WINDOW: dict[str, list[float]] = {}
 _RL_LIMIT = 30          # событий с одного IP в минуту
 _RL_SECONDS = 60.0
+
+
+# --- Дневной предохранитель на БЕСПЛАТНЫЕ вызовы LLM ------------------------
+# Поштучный rate-limit держит один адрес, но из Директа приходит МНОГО разных
+# адресов, и у каждого свой лимит — общего потолка трат не было вовсе (аудит
+# 2026-08-04). Каждая бесплатная проверка — два вызова модели плюс шесть
+# запросов в Вордстат, всё за счёт владельца. Предохранитель считает только
+# бесплатные операции; ПЛАТНАЯ генерация отчёта не ограничивается никогда:
+# заплатившему нельзя ответить «приходите завтра».
+# In-memory и сбрасывается рестартом — это предохранитель от разорения за
+# ночь, а не бухгалтерия.
+DAILY_FREE_LLM = int(os.environ.get("SOZDATEL_DAILY_FREE_LLM", "500"))
+_FUSE = {"day": "", "used": 0}
+_FUSE_MSG = ("Сегодня проверок больше, чем мы рассчитывали, — сервис берёт "
+             "паузу до завтра. Загляните позже: проверка останется бесплатной.")
+
+
+def _llm_fuse_blown() -> bool:
+    """True — дневной запас бесплатных вызовов исчерпан. Иначе списывает один."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _FUSE["day"] != today:
+        _FUSE["day"] = today
+        _FUSE["used"] = 0
+    if _FUSE["used"] >= DAILY_FREE_LLM:
+        return True
+    _FUSE["used"] += 1
+    return False
 
 
 def _client_ip(request: Request) -> str:
