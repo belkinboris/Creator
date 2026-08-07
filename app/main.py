@@ -1436,10 +1436,15 @@ async def report_section(rid: int, request: Request, key: str):
         idea, tier, purpose = rec.idea, purchase.tier, rec.purpose
         chosen, purchase_id = _chosen_offer(rec), purchase.id
         demand_data = json.loads(rec.result_json)
+        # Балл уже посчитан ядром отчёта и лежит рядом с разделами. Раздел
+        # «Вердикт» без него скатывался в «доработать» на любой идее — см.
+        # report_engine._verdict_anchor.
+        score = stored.get("viability_score")
 
     try:
         section = await generate_section(key, idea, demand_data, tier,
-                                         chosen_offer=chosen, purpose=purpose)
+                                         chosen_offer=chosen, purpose=purpose,
+                                         viability_score=score)
     except ReportEngineError as e:
         # Сбой одного раздела не должен выглядеть как сбой всего отчёта:
         # остальные уже собраны и читаются.

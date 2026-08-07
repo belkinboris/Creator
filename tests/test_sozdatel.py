@@ -9203,3 +9203,88 @@ class TestOpticsCanBeSwitchedOnTheResultPage:
         t = client.get(f"/r/{pid}").text
         aud = json.loads(t.split("const AUDIENCE = ", 1)[1].split(";\n", 1)[0])
         assert aud["plan_first"] is True
+
+
+class TestVerdictAnchor:
+    """Кастдев 2026-08-07: раздел «Вердикт» ЗАКАНЧИВАЛСЯ словом «доработать»
+    в каждом бизнес-плане, независимо от идеи и балла. Причина не в идеях:
+    раздел писался без якоря, а из трёх вариантов («запускать» /
+    «дорабатывать» / «не запускать») средний безопасен всегда — модель
+    честно выбирала безопасный. Вердикт теперь считает код, модель его
+    объясняет (тот же принцип, что compute_verdict в demand.py)."""
+
+    IDEA = "Мобильный шиномонтаж с выездом"
+
+    def test_call_matches_viability_label_thresholds(self):
+        """Два места на одной странице не должны противоречить друг другу:
+        метка рядом с баллом («Рабочий вариант») и вердикт в конце. Пороги
+        обязаны быть одни и те же — иначе 65/100 даст «Рабочий вариант» и
+        тут же «дорабатывать»."""
+        from app.report_engine import _verdict_call, _viability_label
+        for score in range(1, 101):
+            label, call = _viability_label(score), _verdict_call(score)
+            if label in ("Сильная позиция для запуска", "Рабочий вариант, есть слабые места"):
+                assert call == "запускать", f"{score}: {label} → {call}"
+            elif label == "Нужна доработка перед запуском":
+                assert call == "дорабатывать", f"{score}: {label} → {call}"
+            else:
+                assert call == "не запускать в текущем виде", f"{score}: {label} → {call}"
+
+    def test_high_score_anchors_the_prompt_to_launch(self):
+        from app.report_engine import _section_prompt
+        p = _section_prompt("verdict", "full", "business", viability_score=85)
+        assert "«запускать»" in p
+        assert "85 из 100" in p
+        assert "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" in p
+
+    def test_low_score_anchors_the_prompt_to_refusal(self):
+        from app.report_engine import _section_prompt
+        p = _section_prompt("verdict", "full", "business", viability_score=20)
+        assert "«не запускать в текущем виде»" in p
+
+    def test_anchor_forbids_softening_into_rework(self):
+        """Мало назвать вердикт — модель дописывала «но сначала доработайте»
+        и обнуляла его. Запрет должен стоять в самом промпте."""
+        from app.report_engine import _section_prompt
+        p = " ".join(_section_prompt("verdict", "full", "business",
+                                     viability_score=85).split())
+        assert "Не смягчай" in p
+        assert "подменяй его рекомендацией доработать" in p
+
+    def test_other_sections_get_no_verdict_anchor(self):
+        """Якорь принадлежит одному разделу. В «Рынке» он был бы шумом и
+        подталкивал бы модель выносить приговор не в своём разделе."""
+        from app.report_engine import _section_prompt
+        for key in ("market", "summary", "competitors"):
+            assert "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" not in _section_prompt(
+                key, "full", "business", viability_score=85)
+
+    def test_absent_score_leaves_prompt_unanchored(self):
+        """Старые покупки в БД лежат без балла рядом с разделами; они обязаны
+        продолжать генерироваться, просто без якоря."""
+        from app.report_engine import _section_prompt
+        assert "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" not in _section_prompt("verdict", "full", "business")
+
+    def test_score_reaches_the_model_through_generate_section(self):
+        from app.report_engine import generate_section
+        cap = {}
+        asyncio.run(generate_section(
+            "verdict", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            viability_score=88,
+            _post=_fake_llm(body="Запускать. Спрос подтверждён.", captured=cap)))
+        flat = " ".join(cap["instructions"].split())
+        assert "88 из 100" in flat and "«запускать»" in flat
+
+    def test_full_report_anchors_verdict_to_its_own_core_score(self):
+        """generate_report считает ядро первым — вердикт обязан опираться на
+        тот же балл, а не на второе независимое мнение модели."""
+        from app.report_engine import generate_report, _verdict_call
+        cap = {}
+        out = asyncio.run(generate_report(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                          _post=_fake_llm(captured=cap)))
+        expected = _verdict_call(out["viability_score"])
+        verdict_calls = [c for c in cap["calls"]
+                         if "Ты пишешь ОДИН раздел" in c.get("instructions", "")
+                         and "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" in c["instructions"]]
+        assert len(verdict_calls) == 1
+        assert f"«{expected}»" in verdict_calls[0]["instructions"]
