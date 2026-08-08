@@ -5364,6 +5364,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
             "__ACTION_BUTTONS__", "__CONTEXT_BLOCK__",
+            "__AUDIENCE_SWITCH_TOP__", "__AUDIENCE_SWITCH_BOTTOM__",
             # страница результата -- audiences.for_page / состояние проверки
             "__AUDIENCE_JSON__", "__RESUME__", "__CHOSEN_H1_JSON__",
             # страница подтверждения входа -- заполняет _verify_page
@@ -8928,11 +8929,19 @@ class TestVisitorCanFindHisOwnEntrance:
                 assert bad not in low, (a.key, a.switch_label)
 
     def test_switch_is_built_in_one_place(self):
-        """Разметка переключателя не должна лежать копией в витринах."""
-        for name in ("index.html", "audience-landing.html"):
-            t = _read_static(name)
-            assert "__AUDIENCE_SWITCH__" in t, name
-            assert 'class="aud-switch"' not in t, name
+        """Разметка переключателя не должна лежать копией в витринах.
+
+        audience-landing.html держит ДВА слота, не один (G1, PRODUCT_ROADMAP):
+        у plan_first-аудитории переключатель уезжает вниз страницы, у
+        остальных остаётся наверху -- но собирает его по-прежнему только
+        _audience_switch_html, копии разметки в шаблоне нет ни там, ни там."""
+        t = _read_static("index.html")
+        assert "__AUDIENCE_SWITCH__" in t
+        assert 'class="aud-switch"' not in t
+        t = _read_static("audience-landing.html")
+        assert "__AUDIENCE_SWITCH_TOP__" in t
+        assert "__AUDIENCE_SWITCH_BOTTOM__" in t
+        assert 'class="aud-switch"' not in t
 
     def test_result_page_lets_you_switch_optics_without_rechecking(self):
         """Спрос уже посчитан — гонять человека через проверку заново, чтобы
@@ -9414,3 +9423,41 @@ class TestSocialContractContextBlock:
         копирайтинг: ценность видна сразу, не после скролла мимо лишнего)."""
         t = client.get("/social-contract").text
         assert t.index("Что такое социальный контракт") < t.index("Путь от идеи до денег")
+
+
+class TestPlanFirstSwitchMovesBelowTheFold:
+    """G1 (PRODUCT_ROADMAP, разбор соцплан.рф), последний кусок задачи:
+    переключатель «Вы к нам зачем» стоял первым под шапкой на КАЖДОЙ
+    витрине — лишнее решение до того, как человек увидел хоть какую-то
+    ценность (Baymard/NN·g: above-the-fold место — самому ценному
+    предложению, не навигационному выбору). F2 когда-то добавил его именно
+    наверх, чтобы избежать тупика витрины — сама навигация остаётся, просто
+    не ценой первого экрана у аудитории, которая пришла за готовым
+    документом."""
+
+    def test_social_contract_switch_is_not_above_the_hero(self):
+        t = client.get("/social-contract").text
+        h1_pos = t.index("<h1>")
+        switch_pos = t.index('class="aud-switch"')
+        assert switch_pos > h1_pos, "переключатель всё ещё стоит перед заголовком"
+
+    def test_social_contract_switch_sits_after_the_faq(self):
+        t = client.get("/social-contract").text
+        faq_pos = t.index("Частые вопросы")
+        switch_pos = t.index('class="aud-switch"')
+        assert switch_pos > faq_pos
+
+    def test_student_switch_still_leads_the_page(self):
+        """Без plan_first поведение не меняется — переключатель остаётся
+        первым, как было."""
+        t = client.get("/students").text
+        h1_pos = t.index("<h1>")
+        switch_pos = t.index('class="aud-switch"')
+        assert switch_pos < h1_pos
+
+    def test_switch_still_works_from_the_new_position(self):
+        """Перенос не должен молча сломать саму навигацию: переключатель
+        должен по-прежнему называть остальные аудитории и вести на главную."""
+        t = client.get("/social-contract").text
+        assert 'href="/"' in t
+        assert 'href="/students"' in t

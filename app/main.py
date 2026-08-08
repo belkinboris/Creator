@@ -2946,6 +2946,19 @@ def _audience_landing(key: str) -> str:
             f'<section class="band wrap"><h2>{html.escape(context_block["title"])}</h2>'
             f'<p class="band-sub">{html.escape(context_block.get("sub", ""))}</p>'
             f'{items}</section>')
+    # G1 (PRODUCT_ROADMAP, разбор соцплан.рф, остаток задачи): переключатель
+    # «Вы к нам зачем» стоял первым под шапкой на КАЖДОЙ витрине -- лишнее
+    # решение до того, как человек увидел хоть какую-то ценность (F2 когда-то
+    # добавил его именно наверх, чтобы витрина не была тупиком; сама навигация
+    # остаётся, снизу, а не наверху). У аудитории, которая пришла за готовым
+    # документом (plan_first), переключатель уезжает вниз страницы, после FAQ
+    # -- если человек всё же ошибся аудиторией, путь назад остаётся, просто
+    # не ценой первого экрана. У остальных аудиторий поведение не менялось.
+    switch_html = _audience_switch_html(a.key)
+    if a.plan_first:
+        switch_top, switch_bottom = "", f'<section class="band">{switch_html}</section>'
+    else:
+        switch_top, switch_bottom = switch_html, ""
     # Кнопка-обгон (F10): только у аудиторий, где она задана в реестре --
     # проверка спроса всё равно считается в фоне, ведёт сразу на /report/.
     #
@@ -2982,11 +2995,12 @@ def _audience_landing(key: str) -> str:
             .replace("__PROMISE_SUB__", html.escape(c.get("promise_sub", "")))
             .replace("__PROMISES__", promises)
             .replace("__CONTEXT_BLOCK__", context_html)
+            .replace("__AUDIENCE_SWITCH_TOP__", switch_top)
+            .replace("__AUDIENCE_SWITCH_BOTTOM__", switch_bottom)
             .replace("__QUICK_NOTE__", c.get("quick_note", ""))
             .replace("__FULL_NOTE__", c.get("full_note", ""))
             .replace("__FAQ__", faq)
             .replace("__ACTION_BUTTONS__", action_buttons)
-            .replace("__AUDIENCE_SWITCH__", _audience_switch_html(a.key))
             .replace("__AUDIENCE_KEY__", a.key))
     return _fill_server_values(page, a.key)
 
