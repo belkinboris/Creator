@@ -947,6 +947,29 @@ def test_order_button_blocks_a_second_click_while_the_first_is_in_flight(site, b
         ctx.close()
 
 
+def test_first_purchase_shows_the_same_refund_guarantee_as_every_other_purchase(site, browser):
+    """Аудит воронки 2026-08-08: гарантия возврата («если собрать не
+    удалось — вернём деньги полностью») стоит РЯДОМ с кнопкой оплаты в
+    result.html (комментарий в коде так и объясняет: «Условия возврата —
+    там же, где решают платить, а не только в оферте» — приём Baymard про
+    risk reversal в момент решения) и в допродаже бизнес-плана здесь же, в
+    report.html. Но именно у ПЕРВОЙ покупки на report.html — самого
+    тревожного момента, первый раз видит незнакомый сервис — гарантии не
+    было: ветка pricing.innerHTML для ещё неоплаченного отчёта копировала
+    всё, кроме этой строки. Разметку строит скрипт, подстрокой в шаблоне
+    не проверить."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['weak']}")
+    try:
+        page.wait_for_timeout(400)
+        text = page.inner_text("#pricing-top")
+        assert "вернём деньги" in text, "гарантия возврата обязана быть видна у первой покупки, не только у допродажи"
+        assert page.locator("#pricing-top .terms-note a[href='/oferta']").count() == 1
+        _assert_clean(page, "отчёт с гарантией возврата у первой покупки")
+    finally:
+        ctx.close()
+
+
 def test_two_kinds_of_tables_render_correctly_side_by_side(site, browser):
     """G6 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента
     таблиц несколько и они разные по смыслу -- смета деньгами и план
