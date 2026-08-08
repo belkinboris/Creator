@@ -10003,3 +10003,23 @@ class TestNoFabricatedDiscount:
         t = client.get(f"/report/{rid}").text
         assert "3990" not in t
         assert "class=\"was\"" not in t
+
+
+class TestFaqAnswersTheRefundObjection:
+    """Продолжение аудита воронки 2026-08-08 (после G10): гарантия возврата
+    («если собрать отчёт не удалось — вернём деньги полностью») стоит рядом
+    с кнопкой оплаты на report.html и result.html, но человек, читающий FAQ
+    на /social-contract или /students ДО того, как долистал до цены, этого
+    ещё не знает — а «а если не сработает / можно вернуть деньги» ровно тот
+    вопрос, который FAQ обязан снимать (NN/g, CXL: FAQ должен закрывать
+    возражения, блокирующие покупку, а не только объяснять продукт). Ни
+    один из трёх вопросов в faq обеих аудиторий (app/audiences.py) этого не
+    касался."""
+
+    def test_social_contract_faq_answers_the_refund_question(self):
+        t = client.get("/social-contract").text
+        assert "вернём деньги" in t
+
+    def test_students_faq_answers_the_refund_question(self):
+        t = client.get("/students").text
+        assert "вернём деньги" in t
