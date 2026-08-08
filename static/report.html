@@ -78,6 +78,11 @@
   .risk p{color:var(--muted);font-size:14px}
 
   .report-layout{display:grid;grid-template-columns:200px 1fr;gap:28px;margin-top:22px}
+  /* Виновник переполнения из G6: широкая таблица (4 колонки, nowrap в
+     заголовках) задаёт треку грида неявный min-width:auto по своему
+     min-content -- без явного 0 страница растягивается под таблицу вместо
+     того, чтобы таблица скроллилась в своём .table-scroll. */
+  .report-main{min-width:0}
   @media (max-width:720px){.report-layout{grid-template-columns:1fr}}
 
   .report-nav{position:sticky;top:18px;align-self:start}
@@ -111,6 +116,12 @@
   .cost-table td:first-child{color:var(--ink)}
   .cost-table td.sum{font:600 14px "IBM Plex Mono",monospace;text-align:right;white-space:nowrap}
   .cost-table tfoot td{border-top:1px solid var(--ink);font-weight:600}
+  .cost-table th{padding:8px 10px;border-top:1px solid var(--line);text-align:left;
+    font:600 12px "IBM Plex Sans";color:var(--muted);white-space:nowrap}
+  /* Таблица этапов -- 4 колонки, на узком экране шире 375px без переноса
+     не помещается (правило дизайн-системы: широкий контент скроллится в
+     своём контейнере, страница вбок -- нет). */
+  .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 
   /* Что осталось за пределами купленного тарифа -- одной строкой внизу
      документа, а не решетом из замазанных заголовков по всему тексту. */
@@ -129,7 +140,6 @@
   .tier{border:1px solid var(--line);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px}
   .tier .name{font-size:16px;font-weight:600}
   .tier .price{font:600 26px "IBM Plex Mono",monospace}
-  .tier .was{font-size:14px;color:var(--muted);text-decoration:line-through;margin-left:8px}
   .tier .desc{color:var(--muted);font-size:13.5px}
   .tier button{margin-top:auto}
   .group-title{font:600 13px "IBM Plex Sans";color:var(--muted);margin:26px 0 2px;
@@ -139,6 +149,7 @@
   .nav-group:first-child{margin-top:0}
   .build-progress{border-left:3px solid var(--marker);padding:6px 0 6px 12px;
     margin-top:16px;font-size:14px;color:var(--muted);max-width:46em}
+  .notify-row{margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   /* Бесплатный образец: настоящий кусок платного разбора, не тизер. */
   .sample-tag{font:600 12px "IBM Plex Sans";color:var(--muted);margin:22px 0 -6px}
   .sample-section{border-top:0;padding-top:0}
@@ -212,6 +223,10 @@
 
   <div class="preview" id="preview"></div>
   <div class="build-progress" id="build-progress" style="display:none"></div>
+  <div class="notify-row no-print" id="notify-row" style="display:none">
+    <button class="btn-ghost" id="notify-btn" type="button">Надоело ждать?</button>
+    <span class="fine" id="notify-status"></span>
+  </div>
   <div id="sample"></div>
   <div id="score-section"></div>
   <div class="pricing no-print" id="pricing-top"></div>
@@ -226,7 +241,7 @@
       <div class="report-nav-label">Разделы отчёта</div>
       <ul id="section-nav"></ul>
     </aside>
-    <div>
+    <div class="report-main">
       <div id="sections"></div>
     </div>
   </div>
@@ -391,17 +406,29 @@ function inTier(key){ return TIER_KEYS.indexOf(key) !== -1; }
 // Внутри оплаченного отчёта чужой тариф сворачивается в одну строку внизу.
 const PAID = TIER_KEYS.length > 0;
 
-// Смета построчно (F: соц-план.рф, владелец 2026-08-02) -- не у каждого
+// Таблица построчно (F: соц-план.рф, владелец 2026-08-02) -- не у каждого
 // раздела есть table, только у тех, где wants_table (см. report_engine.py).
+// G6 (PRODUCT_ROADMAP): два вида -- смета деньгами (money) и план запуска
+// этапами (stages), различаются столбцами и наличием итога.
 function tableHtml(t){
   if (!t || !t.rows || !t.rows.length) return '';
+  if (t.kind === 'stages') {
+    const rows = t.rows.map(r => `
+        <tr><td>${escapeHtml(r.stage)}</td><td>${escapeHtml(r.what)}</td>
+        <td>${escapeHtml(r.deadline || '—')}</td><td>${escapeHtml(r.who || '—')}</td></tr>`).join('');
+    return `<div class="table-scroll"><table class="cost-table stages-table">
+      <caption>${escapeHtml(t.caption || 'Этапы запуска')}</caption>
+      <thead><tr><th>Этап</th><th>Что сделать</th><th>Срок</th><th>Ответственный</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+  }
   const rows = t.rows.map(r => `
       <tr><td>${escapeHtml(r.item)}</td><td class="sum">${fmt(r.sum)} ₽</td></tr>`).join('');
-  return `<table class="cost-table">
+  return `<div class="table-scroll"><table class="cost-table">
     <caption>${escapeHtml(t.caption || 'Смета')}</caption>
     <tbody>${rows}</tbody>
     <tfoot><tr><td>Итого</td><td class="sum">${fmt(t.total)} ₽</td></tr></tfoot>
-  </table>`;
+  </table></div>`;
 }
 
 function sectionHtml(s){
@@ -497,16 +524,24 @@ function render(){
     if (docxLink) docxLink.href = docxUrl();
   }
   const bar = document.getElementById('build-progress');
+  const notifyRow = document.getElementById('notify-row');
+  const inProgress = total && done < total;
   if (bar) {
-    if (!total || done >= total) { bar.style.display = 'none'; }
+    if (!inProgress) { bar.style.display = 'none'; }
     else {
       bar.style.display = 'block';
       // Про «можно закрыть» человек не догадается сам: собранные разделы
       // дописываются в базу сразу, но со стороны это выглядит как процесс,
-      // который оборвётся вместе с вкладкой.
-      bar.textContent = `Разбор собирается: готово ${done} из ${total}. Можно читать уже готовые разделы — остальные появятся сами. Страницу можно закрыть: собранное не пропадёт, при следующем открытии сборка продолжится.`;
+      // который оборвётся вместе с вкладкой. «Среднее время» -- та же цифра,
+      // что уже стоит в FAQ («Сразу после оплаты — текст собирается за
+      // одну-две минуты») -- G5 (PRODUCT_ROADMAP): человек не должен гадать,
+      // зависло или идёт (соцплан.рф пишет это прямо над оглавлением).
+      bar.textContent = `Разбор собирается: готово ${done} из ${total}. Среднее время сборки — одна-две минуты. Можно читать уже готовые разделы — остальные появятся сами. Страницу можно закрыть: собранное не пропадёт, при следующем открытии сборка продолжится.`;
     }
   }
+  // G5: «надоело ждать» -- кнопка, которую владелец отдельно отметил у
+  // конкурента. Появляется вместе с прогресс-баром, пропадает вместе с ним.
+  if (notifyRow) notifyRow.style.display = inProgress ? 'flex' : 'none';
 }
 
 render();
@@ -542,6 +577,37 @@ async function fillMissing(){
 
 if (TIER_KEYS.length && SECTIONS.some(s => inTier(s.key) && !gotMap[s.key])) fillMissing();
 
+// G5: «надоело ждать» -- просим сервер прислать письмо, когда встанет на
+// место последний раздел (report_notify_me в app/main.py). Тот же
+// owner-ключ/токен, что и у fillMissing/docxUrl.
+const notifyBtn = document.getElementById('notify-btn');
+if (notifyBtn) notifyBtn.addEventListener('click', async () => {
+  const qs = new URLSearchParams(location.search);
+  const key = qs.get('key') || '';
+  const headers = key ? {'X-Owner-Key': key} : {};
+  const tok = qs.get('t') ? `&t=${encodeURIComponent(qs.get('t'))}` : '';
+  const statusEl = document.getElementById('notify-status');
+  notifyBtn.disabled = true;
+  try {
+    const r = await fetch(`/api/report/${CHECK_ID}/notify-me?${tok.replace(/^&/, '')}`,
+                          {method: 'POST', headers});
+    const d = await r.json();
+    if (d.ok && d.will_email) {
+      statusEl.textContent = 'Хорошо — пришлём письмо, как только всё будет готово.';
+      notifyBtn.style.display = 'none';
+    } else if (d.ok) {
+      statusEl.textContent = 'В заказе не почта, письмо прислать некуда. Но всё сохраняется — просто вернитесь на эту страницу позже.';
+      notifyBtn.style.display = 'none';
+    } else {
+      statusEl.textContent = d.error || 'Не получилось. Попробуйте обновить страницу.';
+      notifyBtn.disabled = false;
+    }
+  } catch (e) {
+    statusEl.textContent = 'Связь прервалась. Попробуйте ещё раз.';
+    notifyBtn.disabled = false;
+  }
+});
+
 // --- Статус заказа / ошибка генерации ---
 const statusEl = document.getElementById('status-note');
 if (GEN_ERROR) {
@@ -564,9 +630,9 @@ function tierCard(key){
   const t = PRICES[key];
   return `<div class="tier">
     <div class="name">${escapeHtml(t.label)}</div>
-    <div><span class="price">${fmt(t.price)} ₽</span><span class="was">${fmt(t.was)} ₽</span></div>
+    <div><span class="price">${fmt(t.price)} ₽</span></div>
     <div class="desc">${key === 'quick' ? '4 ключевых раздела: резюме, рынок, конкуренты, вердикт' : 'Все 8 разделов: + аудитория, финансы, риски, план запуска'}</div>
-    <button class="btn" type="button" onclick="order('${key}')">Получить отчёт</button>
+    <button class="btn" type="button" onclick="order('${key}', this)">Получить отчёт</button>
   </div>`;
 }
 // Отчёт по этой идее уже куплен, просто открыт не тем (или тем, но без
@@ -588,15 +654,24 @@ if (document.getElementById('access-note')) {
   pricing.innerHTML = `<h3>Получите <span class="hl">отчёт по идее</span></h3>
     <p>Не общие слова — разбор на данных, которые мы уже честно посчитали на бесплатной проверке спроса.</p>
     <div class="tiers">${tierCard('quick')}${tierCard('full')}</div>
+    <p class="terms-note">Отчёт формируется сразу после оплаты. Если собрать его не удалось — вернём деньги полностью. <a href="/oferta">Условия и возврат</a></p>
     <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>
     <p class="pd-note">Отправляя контакт, вы принимаете <a href="/oferta" target="_blank">условия оферты</a> и соглашаетесь с <a href="/privacy" target="_blank">политикой обработки персональных данных</a>.</p>
     <p class="err" id="order-err" role="alert"></p>`;
 }
 
-async function order(tier){
+async function order(tier, btn){
   const errEl = document.getElementById('order-err');
   const contact = document.getElementById('contact').value;
   errEl.classList.remove('show');
+  // Кнопка платит деньгами покупателя -- без блокировки двойной клик (или
+  // нетерпеливый тап на медленной сети) уходил бы двумя заказами: два
+  // письма владельцу, а с оплатой -- две платёжные сессии в ЮКассе на одну
+  // и ту же покупку. Тот же приём уже стоит у каждой другой кнопки на
+  // сайте (result.html, index.html, desk.html) -- здесь его не было.
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Секунду…';
   try {
     const r = await fetch('/api/report', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -608,8 +683,11 @@ async function order(tier){
     if (data.paid && data.confirmation_url) { location.href = data.confirmation_url; return; }
     statusEl.textContent = data.message; statusEl.classList.add('ok'); statusEl.style.display = 'block';
     statusEl.scrollIntoView({behavior:'smooth', block:'center'});
+    pricing.style.display = 'none';
   } catch (e) {
     errEl.textContent = e.message; errEl.classList.add('show');
+    btn.disabled = false;
+    btn.textContent = label;
   }
 }
 

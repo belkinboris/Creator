@@ -5298,7 +5298,7 @@ class TestNoHardcodedServerValuesInStatic:
         import app.main as m
         amounts = {str(m.LIVE_TEST_PRICE)}
         for tier in m.REPORT_PRICES.values():
-            amounts |= {str(tier["price"]), str(tier["was"])}
+            amounts.add(str(tier["price"]))
         bad = []
         for name, text in self._sources():
             # Сначала схлопываем разделители разрядов: «1 490 ₽» -> «1490 ₽».
@@ -9511,11 +9511,16 @@ class TestPlanFirstHidesIrrelevantSteps:
         assert "Скачайте" not in t
         assert "скачат" not in t.lower()
 
-    def test_social_contract_still_shows_all_four_prices(self):
-        """prices-note не входит в эту задачу — цены остаются как были,
-        чтобы не задеть test_prices_are_the_same_for_everyone заново."""
+    def test_social_contract_still_shows_the_real_prices(self):
+        """prices-note не входит в эту задачу — реальные цены остаются как
+        были, чтобы не задеть test_prices_are_the_same_for_everyone заново.
+        990/2990 -- тарифы отчёта, 1490 -- LIVE_TEST_PRICE (живой тест),
+        настоящая цена. 3990 сюда не входит: это была зачёркнутая
+        "старая" цена бизнес-плана, которую никто никогда не платил (см.
+        аудит воронки 2026-08-08, REPORT_PRICES.was) — убрана как
+        выдуманная скидка."""
         t = client.get("/social-contract").text
-        for price in ("990", "1490", "2990", "3990"):
+        for price in ("990", "1490", "2990"):
             assert price in t, price
 
     def test_student_keeps_the_full_seven_step_map(self):
@@ -9670,3 +9675,351 @@ class TestDocxExport:
         t = client.get(f"/report/{pub}?t={tok}").text
         assert 'id="docx-link"' in t
         assert "docxUrl" in t
+
+
+class TestPlansDeliveredSocialProof:
+    """G7 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): «74 отзыва •
+    4.6/5» у конкурента на каждой странице, у нас счётчик был только на
+    главной («уже проверили N идей») и вообще отсутствовал на
+    /social-contract и /students. Честного числа отзывов у нас нет, значит
+    не выдумываем — показываем реально измеримое: для аудитории, пришедшей
+    за документом, это число собранных планов, а не проверок идей."""
+
+    def _make_purchase(self, contact, *, status="paid", delivered=True):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": f"Идея для {contact}"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        client.post("/api/report", json={"check_id": rid, "tier": "quick", "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = status
+            if delivered:
+                o.report_json = json.dumps({"viability_score": 50, "viability_summary": "с",
+                                           "top_risks": [], "sections": []}, ensure_ascii=False)
+            s.add(o); s.commit()
+
+    def test_counts_only_paid_and_delivered(self):
+        """Оплата без доставленного разбора (A1 -- генерация сорвалась) не
+        должна попадать в цифру, которую сайт показывает как доказательство,
+        что у нас покупают И получают."""
+        before = client.get("/api/stats").json()["plans_delivered"]
+        self._make_purchase("proof-paid-delivered@example.com", status="paid", delivered=True)
+        self._make_purchase("proof-paid-failed@example.com", status="paid", delivered=False)
+        self._make_purchase("proof-not-paid@example.com", status="pending_payment", delivered=True)
+        after = client.get("/api/stats").json()["plans_delivered"]
+        assert after == before + 1
+
+    def test_social_proof_element_present_on_all_three_showcases(self):
+        for url in ("/", "/social-contract", "/students"):
+            assert 'id="social-proof"' in client.get(url).text, url
+
+    def test_social_contract_shows_plans_not_ideas(self):
+        """plan_first-аудитория ближе к оплате -- её вопрос «а вообще у вас
+        покупают», не «сколько идей проверили»."""
+        t = client.get("/social-contract").text
+        assert "plans_delivered" in t
+        assert "Уже собрали" in t
+
+    def test_other_showcases_keep_the_ideas_counter(self):
+        for url in ("/", "/students"):
+            t = client.get(url).text
+            assert "ideas_checked" in t
+            assert "Уже проверили" in t
+
+
+class TestNotifyWhenReportIsReady:
+    """G5 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): владелец отдельно
+    отметил кнопку «надоело ждать» + уведомление о готовности у конкурента.
+    Без фоновых воркеров момент «готово» -- это когда встал на место
+    последний недостающий раздел, внутри того же report_section, который и
+    так вызывается для каждого раздела (fillMissing на странице)."""
+
+    def _stub_generate(self, monkeypatch):
+        import app.main as m
+        async def fake_section(key, idea, demand_data, tier="quick", chosen_offer=None,
+                               purpose="business", **kw):
+            return {"key": key, "title": key, "body": "Готово."}
+        monkeypatch.setattr(m, "generate_section", fake_section)
+
+    def _paid(self, monkeypatch, contact, *, tier="quick"):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея для уведомления о готовности"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        client.post("/api/report", json={"check_id": rid, "tier": tier, "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = "paid"; s.add(o); s.commit()
+            pub = s.get(m.DemandCheck, rid).public_id
+            return rid, o.access_token, pub
+
+    def test_requires_access(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, "guarded@example.com")
+        r = client.post(f"/api/report/{rid}/notify-me")
+        assert r.status_code == 403
+
+    def test_email_contact_gets_subscribed(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, "will-email@example.com")
+        r = client.post(f"/api/report/{rid}/notify-me?t={tok}")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "will_email": True}
+        from app.main import ReportPurchase, Session, engine, select
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.check_id == rid)).first()
+            assert o.notify_requested is True
+
+    def test_phone_contact_is_told_honestly_it_wont_email(self, monkeypatch):
+        """Контакт для чека 54-ФЗ разрешает и телефон -- письмо туда не
+        уйдёт, и страница обязана сказать это прямо, а не притвориться."""
+        rid, tok, pub = self._paid(monkeypatch, "+79261234567")
+        r = client.post(f"/api/report/{rid}/notify-me?t={tok}")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "will_email": False}
+
+    def test_email_sent_only_when_the_last_section_lands(self, monkeypatch):
+        import app.report_engine as re_module
+        self._stub_generate(monkeypatch)
+        rid, tok, pub = self._paid(monkeypatch, "waiting-buyer@example.com")
+        client.post(f"/api/report/{rid}/notify-me?t={tok}")
+        sent = []
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "notify_buyer",
+                            lambda to, subject, body, **kw: sent.append((to, subject)) or True)
+        keys = list(re_module.QUICK_KEYS)
+        for k in keys[:-1]:
+            r = client.post(f"/api/report/{rid}/section?key={k}&t={tok}")
+            assert r.status_code == 200
+            assert not sent, f"письмо ушло раньше времени, после раздела {k}"
+        r = client.post(f"/api/report/{rid}/section?key={keys[-1]}&t={tok}")
+        assert r.status_code == 200
+        assert len(sent) == 1
+        assert sent[0][0] == "waiting-buyer@example.com"
+        assert "готов" in sent[0][1].lower()
+
+    def test_email_not_sent_twice_on_concurrent_last_requests(self, monkeypatch):
+        """notify_sent -- отдельный флаг именно против дублей: две вкладки
+        могли попросить один и тот же последний раздел почти одновременно."""
+        import app.report_engine as re_module
+        self._stub_generate(monkeypatch)
+        rid, tok, pub = self._paid(monkeypatch, "double-check@example.com")
+        client.post(f"/api/report/{rid}/notify-me?t={tok}")
+        sent = []
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "notify_buyer",
+                            lambda to, subject, body, **kw: sent.append(to) or True)
+        keys = list(re_module.QUICK_KEYS)
+        for k in keys:
+            client.post(f"/api/report/{rid}/section?key={k}&t={tok}")
+        # Раздел уже закэширован -- повторный запрос того же ключа не должен
+        # снова решить, что "последний раздел только что встал", и не должен
+        # слать письмо ещё раз.
+        client.post(f"/api/report/{rid}/section?key={keys[-1]}&t={tok}")
+        assert len(sent) == 1
+
+    def test_email_not_sent_without_subscribing_first(self, monkeypatch):
+        import app.report_engine as re_module
+        self._stub_generate(monkeypatch)
+        rid, tok, pub = self._paid(monkeypatch, "never-asked@example.com")
+        sent = []
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "notify_buyer",
+                            lambda to, subject, body, **kw: sent.append(to) or True)
+        for k in re_module.QUICK_KEYS:
+            client.post(f"/api/report/{rid}/section?key={k}&t={tok}")
+        assert sent == []
+
+    def test_report_page_carries_the_notify_button_markup(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, "markup2@example.com")
+        t = client.get(f"/report/{pub}?t={tok}").text
+        assert 'id="notify-row"' in t
+        assert 'id="notify-btn"' in t
+        assert "notify-me" in t
+
+
+class TestRicherTables:
+    """G6 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента
+    таблиц несколько и они разные по смыслу — смета деньгами и план
+    запуска этапами. У нас была только денежная форма, зашитая под
+    finance. Отдельно: их смета сходится в 350 000 ₽ РОВНО (290+24+20+16) —
+    комиссия проверяет именно это, и такая арифметика должна быть
+    требованием промпта, а не удачей."""
+
+    IDEA = "Мобильный шиномонтаж с выездом на дом"
+
+    def test_money_total_is_always_computed_not_trusted(self):
+        """Модель может ошибиться в арифметике (или соврать). Раньше её
+        число total подставлялось как есть, если оно вообще было числом —
+        сходимость сметы была везением. Теперь итог считает код."""
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.",
+                            table={"caption": "Смета", "rows": [
+                                {"item": "Аренда", "sum": 15000},
+                                {"item": "Материалы", "sum": 10000}],
+                                "total": 999999})))  # модель ошиблась в итоге
+        assert out["table"]["total"] == 25000
+        assert out["table"]["kind"] == "money"
+
+    def test_launch_gets_a_stages_table(self):
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "launch", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="План запуска по неделям.",
+                            table={"caption": "Этапы запуска", "rows": [
+                                {"stage": "Подготовительный", "what": "Регистрация ИП",
+                                 "deadline": "1-я неделя", "who": "Инициатор проекта"},
+                                {"stage": "Закупочный", "what": "Покупка оборудования",
+                                 "deadline": "2-я неделя", "who": "Инициатор проекта"}]})))
+        assert out["table"]["kind"] == "stages"
+        assert out["table"]["rows"][0]["stage"] == "Подготовительный"
+        assert out["table"]["rows"][0]["what"] == "Регистрация ИП"
+        assert out["table"]["rows"][0]["deadline"] == "1-я неделя"
+
+    def test_stages_table_has_no_fake_total(self):
+        """Таблица этапов не про деньги -- у неё не должно появляться поле
+        total, даже случайно унаследованное от денежной формы."""
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "launch", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="План запуска.",
+                            table={"rows": [{"stage": "А", "what": "Б"}]})))
+        assert "total" not in out["table"]
+
+    def test_missing_stages_table_is_not_fatal_even_for_social_contract(self):
+        """Денежная таблица (finance) обязательна для estimate_required —
+        план этапами полезен, но раздел не про деньги, и без таблицы body
+        всё ещё полный ответ на вопрос раздела."""
+        from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
+        out = asyncio.run(generate_section(
+            "launch", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_SOCIAL_CONTRACT,
+            _post=_fake_llm(body="План запуска текстом, без таблицы.")))
+        assert "table" not in out
+        assert out["body"]
+
+    def test_launch_prompt_asks_for_stages_not_money(self):
+        from app.report_engine import _section_prompt
+        p = _section_prompt("launch", "full", "business")
+        assert "stage" in p and "deadline" in p
+        assert '"sum"' not in p
+
+    def test_finance_prompt_still_asks_for_money(self):
+        from app.report_engine import _section_prompt
+        p = _section_prompt("finance", "full", "business")
+        assert '"sum"' in p
+        assert "stage" not in p
+
+
+class TestStagesTableInDocx:
+    """G6: план запуска этапами должен пережить экспорт в .docx таблицей
+    с колонками этап/что сделать/срок/ответственный, не деградировать в
+    денежную форму и не потерять данные."""
+
+    def test_stages_table_renders_with_its_own_columns(self):
+        import io
+        from docx import Document
+        from app.docx_export import build_docx
+        data = build_docx(
+            doc_title="Бизнес-план", idea="Мобильный шиномонтаж",
+            core={"viability_score": 70, "viability_summary": "с", "top_risks": []},
+            sections=[{"key": "launch", "title": "План запуска", "body": "Текст плана.",
+                      "table": {"kind": "stages", "caption": "Этапы запуска", "rows": [
+                          {"stage": "Подготовительный", "what": "Регистрация ИП",
+                           "deadline": "1-я неделя", "who": "Инициатор проекта"},
+                          {"stage": "Закупочный", "what": "Покупка оборудования",
+                           "deadline": "2-я неделя", "who": "Инициатор проекта"}]}}])
+        doc = Document(io.BytesIO(data))
+        assert doc.tables, "план запуска должен прийти таблицей"
+        t = doc.tables[0]
+        header = [c.text for c in t.rows[0].cells]
+        assert header == ["Этап", "Что сделать", "Срок", "Ответственный"]
+        body_cells = [c.text for row in t.rows[1:] for c in row.cells]
+        assert "Подготовительный" in body_cells
+        assert "Регистрация ИП" in body_cells
+        assert "1-я неделя" in body_cells
+        assert "Итого" not in [c.text for c in t.rows[-1].cells]
+
+
+class TestNoFabricatedDiscount:
+    """Аудит воронки 2026-08-08 («блок G исчерпан, пройди воронку глазами
+    человека с улицы»): зачёркнутая «старая» цена (1490 ₽ → 990 ₽,
+    3990 ₽ → 2990 ₽) стояла в REPORT_PRICES с самого первого коммита,
+    введшего платный отчёт (`git log -S'"was": 1490'`) — то есть НИКОГДА не
+    была ценой, которую кто-то реально платил. Тот же класс проблемы, что
+    уже ловили в A14: «Ранним — 50% на первый месяц» — скидку на чужой
+    бизнес придумали за владельца и показывали живым людям. Здесь придумали
+    скидку на свой же тариф — то же самое, только более скрытое: обёрнуто
+    в обычный ценник, а не в отдельную табличку с надписью «скидка»."""
+
+    def test_report_prices_carry_no_fabricated_was_field(self):
+        import app.main as m
+        for tier in m.REPORT_PRICES.values():
+            assert "was" not in tier, tier
+
+    def test_no_strikethrough_price_markup_anywhere(self):
+        """Разметка вымышленной скидки не должна вернуться ни в одной
+        витрине, даже если кто-то реализует G4/новый тариф и случайно
+        скопирует старый шаблон карточки."""
+        for name, text in (("index.html", _read_static("index.html")),
+                           ("audience-landing.html", _read_static("audience-landing.html")),
+                           ("report.html", _read_static("report.html"))):
+            assert 'class="was"' not in text, name
+            assert "text-decoration:line-through" not in text, name
+
+    def test_social_contract_shows_a_single_honest_price_per_tier(self):
+        t = client.get("/social-contract").text
+        assert "990" in t and "2990" in t
+        assert "3990" not in t, "выдуманная «была» цена бизнес-плана вернулась"
+
+    def test_report_page_tariff_cards_show_no_was_price(self, monkeypatch):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        monkeypatch.setattr(m, "check_demand", fake_check)
+        rid = client.post("/api/demand", json={"idea": "Идея для проверки честной цены"}).json()["id"]
+        t = client.get(f"/report/{rid}").text
+        assert "3990" not in t
+        assert "class=\"was\"" not in t
+
+
+class TestFaqAnswersTheRefundObjection:
+    """Продолжение аудита воронки 2026-08-08 (после G10): гарантия возврата
+    («если собрать отчёт не удалось — вернём деньги полностью») стоит рядом
+    с кнопкой оплаты на report.html и result.html, но человек, читающий FAQ
+    на /social-contract или /students ДО того, как долистал до цены, этого
+    ещё не знает — а «а если не сработает / можно вернуть деньги» ровно тот
+    вопрос, который FAQ обязан снимать (NN/g, CXL: FAQ должен закрывать
+    возражения, блокирующие покупку, а не только объяснять продукт). Ни
+    один из трёх вопросов в faq обеих аудиторий (app/audiences.py) этого не
+    касался."""
+
+    def test_social_contract_faq_answers_the_refund_question(self):
+        t = client.get("/social-contract").text
+        assert "вернём деньги" in t
+
+    def test_students_faq_answers_the_refund_question(self):
+        t = client.get("/students").text
+        assert "вернём деньги" in t

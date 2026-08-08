@@ -258,6 +258,14 @@ class ReportPurchase(SQLModel, table=True):
     # написанный руками: показывать более гладкий текст, чем отдаёт движок,
     # значит продавать не то, что отдаём (принцип 3). Помечает владелец.
     is_example: bool = False
+    # G5 (PRODUCT_ROADMAP, разбор соцплан.рф): владелец отдельно отметил
+    # кнопку «надоело ждать» и предложение прислать уведомление о готовности
+    # у конкурента. notify_requested -- человек попросил письмо; notify_sent
+    # -- отдельный флаг, чтобы не отправить письмо дважды при двух почти
+    # одновременных запросах последнего недостающего раздела (тот же приём,
+    # что и buyer_notified/paid_notified -- не путать смыслы одним флагом).
+    notify_requested: bool = False
+    notify_sent: bool = False
     # Ключ от собственного отчёта. Страница /report/{check_id} адресуется
     # порядковым номером проверки, то есть чужой оплаченный бизнес-план
     # открывался перебором: 42 -> 41. Токен уходит в return_url оплаты и в
@@ -332,6 +340,8 @@ _MIGRATIONS = [
     ("demandcheck", "public_id", "VARCHAR DEFAULT ''"),
     ("livetestorder", "buyer_notified", "BOOLEAN DEFAULT FALSE"),
     ("smokeproject", "template_hash", "VARCHAR DEFAULT ''"),
+    ("reportpurchase", "notify_requested", "BOOLEAN DEFAULT FALSE"),
+    ("reportpurchase", "notify_sent", "BOOLEAN DEFAULT FALSE"),
 ]
 try:
     from sqlalchemy import inspect as _sa_inspect, text as _sqltext
@@ -818,12 +828,22 @@ async def yookassa_webhook(request: Request):
 # ---------------------------------------------------------------------------
 
 REPORT_PRICES = {
-    "quick": {"price": 990, "was": 1490, "label": "Быстрый разбор"},
+    "quick": {"price": 990, "label": "Быстрый разбор"},
     # "Полный отчёт" переименован в "Бизнес-план" -- этот тариф добавляет
     # именно то, что бизнес-планом и называют (финансы, план запуска), а не
     # ещё немного текста к тому же отчёту. Точнее описывает содержимое.
-    "full": {"price": 2990, "was": 3990, "label": "Бизнес-план"},
+    "full": {"price": 2990, "label": "Бизнес-план"},
 }
+# "was" (зачёркнутая "старая" цена 1490/3990 рядом с 990/2990) стояло в этом
+# словаре с самого первого коммита, где появился платный отчёт -- то есть
+# НИКОГДА не было ценой, которую кто-то реально платил, а было выдуманным
+# ориентиром для скидки. Тот же класс проблемы, что уже ловили в A14
+# («Ранним — 50% на первый месяц» -- скидку на чужой бизнес придумали за
+# владельца и показывали живым людям): здесь придумали скидку на СВОЙ же
+# тариф. Убрано целиком при аудите воронки 2026-08-08 (блок G исчерпан,
+# «пройди воронку глазами человека с улицы»). Настоящую вводную скидку — с
+# реальным сроком и тем, что случится по его истечении — можно вернуть, но
+# это решение и формулировка владельца, не то, что можно домыслить за него.
 
 
 _SENTENCE_END = ".!?…:"
@@ -1463,8 +1483,53 @@ async def report_section(rid: int, request: Request, key: str):
             sections.sort(key=lambda x: order.index(x["key"]) if x["key"] in order else 99)
             data["sections"] = sections
             fresh.report_json = json.dumps(data, ensure_ascii=False)
+            # G5 (PRODUCT_ROADMAP, разбор соцплан.рф): владелец отдельно
+            # отметил кнопку «надоело ждать» + уведомление о готовности у
+            # конкурента. Без фоновых воркеров единственный момент, когда
+            # сервер УЗНАЁТ, что разбор готов целиком, -- прямо здесь, когда
+            # встал на место последний недостающий раздел. mailer.notify_buyer
+            # сам молча пропускает нечто, не похожее на почту (телефон), и
+            # никогда не бросает -- сбой письма не имеет права сломать ответ.
+            if (fresh.notify_requested and not fresh.notify_sent
+                    and {x["key"] for x in sections} == set(order)):
+                base = str(request.base_url).rstrip("/")
+                if mailer.notify_buyer(
+                    fresh.contact, "Создатель: бизнес-план готов",
+                    "Разбор собран полностью — все разделы на месте.\n\n"
+                    f"Открыть: {base}{_report_link(fresh)}\n\n"
+                    f"Личный кабинет (та же почта): {base}/account\n"):
+                    fresh.notify_sent = True
             s.add(fresh); s.commit()
     return {"ok": True, "section": section}
+
+
+@app.post("/api/report/{rid}/notify-me")
+def report_notify_me(rid: int, request: Request):
+    """«Надоело ждать» -- прислать письмо, когда разбор соберётся целиком.
+
+    G5 (PRODUCT_ROADMAP): владелец отдельно отметил эту кнопку у конкурента.
+    Тот же контур доступа, что у report_section/report_docx. Отвечает честно,
+    сработает ли письмо: контакт мог оказаться телефоном, а с телефона
+    писать нечем (см. mailer.looks_like_email) -- страница обязана сказать
+    об этом прямо, а не притвориться, что подписка прошла.
+    """
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec or not rec.result_json:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+        purchase = _best_report_purchase(s, rid, include_preview=_is_owner(request))
+        if not purchase:
+            return JSONResponse({"ok": False, "error": "Уведомление доступно после оплаты."},
+                                status_code=403)
+        if not _report_access_ok(request, purchase):
+            return JSONResponse({"ok": False, "error": "Этот отчёт открывается по вашей ссылке "
+                                                       "или из личного кабинета."},
+                                status_code=403)
+        can_email = mailer.looks_like_email(purchase.contact)
+        if can_email:
+            purchase.notify_requested = True
+            s.add(purchase); s.commit()
+    return {"ok": True, "will_email": can_email}
 
 
 @app.get("/api/report/{rid}/docx")
@@ -1818,11 +1883,22 @@ def orders_list(request: Request):
 
 @app.get("/api/stats")
 def public_stats():
-    """Живые цифры для главной. Только честные счётчики из БД."""
+    """Живые цифры для витрин. Только честные счётчики из БД.
+
+    G7 (PRODUCT_ROADMAP, разбор соцплан.рф): «74 отзыва • 4.6/5» у
+    конкурента на каждой странице -- у нас честного числа отзывов нет
+    вовсе, выдумывать его нельзя (принцип 3). plans_delivered считает не
+    оплаты, а РЕАЛЬНО доставленные разборы (report_json заполнен) -- иначе
+    сорвавшаяся генерация (A1) попала бы в цифру, которую сайт показывает
+    как доказательство, что у нас покупают и получают.
+    """
     with Session(engine) as s:
         ideas = len(s.exec(select(DemandCheck)).all())
         events = len(s.exec(select(SmokeEvent)).all())
-    return {"ideas_checked": ideas, "events": events}
+        plans = len(s.exec(select(ReportPurchase).where(
+            ReportPurchase.status == "paid",
+            ReportPurchase.report_json != "")).all())
+    return {"ideas_checked": ideas, "events": events, "plans_delivered": plans}
 
 
 @app.get("/api/funnel")
@@ -3358,10 +3434,8 @@ def _fill_server_values(html: str, purpose: str = "business") -> str:
         ("__MIN_REPORT_PRICE__", str(min(t["price"] for t in REPORT_PRICES.values()))),
         ("__QUICK_LABEL__", REPORT_PRICES["quick"]["label"]),
         ("__QUICK_PRICE__", str(REPORT_PRICES["quick"]["price"])),
-        ("__QUICK_WAS__", str(REPORT_PRICES["quick"]["was"])),
         ("__FULL_LABEL__", REPORT_PRICES["full"]["label"]),
         ("__FULL_PRICE__", str(REPORT_PRICES["full"]["price"])),
-        ("__FULL_WAS__", str(REPORT_PRICES["full"]["was"])),
     ):
         html = html.replace(slot, value)
     # Ссылка на пример стоит денег (запрос в БД) и появляется, только когда
