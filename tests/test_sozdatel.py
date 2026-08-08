@@ -9525,3 +9525,148 @@ class TestPlanFirstHidesIrrelevantSteps:
         assert "Как это работает" not in t
         assert t.count('class="step"') == 7
         assert "Не готовы тратиться на рекламу" in t
+
+
+class TestDocxExport:
+    """G3 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): конкурент прямо
+    продаёт «Скачайте pdf/docx(word)» — комиссии соцзащиты сдают документ, а
+    не ссылку на веб-страницу. «Скачать PDF» уже был (печать браузером),
+    .docx не было вовсе. python-docx, тот же принцип единого FastAPI-процесса,
+    что у всего проекта."""
+
+    def _paid(self, monkeypatch, *, tier="quick", contact="docx-buyer@example.com",
+             status="paid", complete=True, with_table=False):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        from app.report_engine import section_keys
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ на дому"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        client.post("/api/report", json={"check_id": rid, "tier": tier, "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = status
+            keys = section_keys(tier)
+            if complete:
+                sections = []
+                for k in keys:
+                    sec = {"key": k, "title": k, "body": "Абзац первый.\n\nАбзац второй."}
+                    if with_table and k == "finance":
+                        sec["table"] = {"caption": "Смета расходов", "rows": [
+                            {"item": "Аренда", "sum": 15000}, {"item": "Материалы", "sum": 10000}],
+                            "total": 25000}
+                    sections.append(sec)
+            else:
+                sections = [{"key": keys[0], "title": keys[0], "body": "Готово."}]
+            o.report_json = json.dumps({
+                "viability_score": 62, "viability_label": "Рабочий вариант, есть слабые места",
+                "viability_summary": "Причина именно такого балла.",
+                "top_risks": [{"title": "Риск конкуренции", "body": "Механика провала."}],
+                "sections": sections}, ensure_ascii=False)
+            s.add(o); s.commit()
+            # rid -- числовой id ПРОВЕРКИ СПРОСА (DemandCheck), не покупки:
+            # именно его берут report_section/report_docx (см. rid: int в
+            # ручках main.py) и __CHECK_ID__ на странице. Раньше здесь
+            # ошибочно возвращался o.id (id самой ReportPurchase) -- в
+            # изолированном прогоне только этого класса счётчики двух таблиц
+            # случайно совпадали (по одной строке каждой на тест), и баг был
+            # не виден; в общем прогоне тесты бы стабильно ловили чужую или
+            # несуществующую проверку.
+            pub = s.get(m.DemandCheck, rid).public_id
+            return rid, o.access_token, pub
+
+    def test_requires_payment(self, monkeypatch):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        monkeypatch.setattr(m, "check_demand", fake_check)
+        rid = client.post("/api/demand", json={"idea": "Идея без всякой оплаты вообще"}).json()["id"]
+        r = client.get(f"/api/report/{rid}/docx")
+        assert r.status_code == 403
+
+    def test_requires_the_right_access(self, monkeypatch):
+        """Ни ключа владельца, ни токена покупателя, ни сессии кабинета --
+        файл выдаёт куда больше пользы постороннему, чем один раздел на
+        экране, поэтому доступ не может быть слабее, чем у /section."""
+        rid, tok, pub = self._paid(monkeypatch, contact="rightful@example.com")
+        r = client.get(f"/api/report/{rid}/docx")
+        assert r.status_code == 403
+
+    def test_token_from_the_purchase_grants_access(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, contact="withtoken@example.com")
+        r = client.get(f"/api/report/{rid}/docx?t={tok}")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        assert "attachment" in r.headers["content-disposition"]
+        assert ".docx" in r.headers["content-disposition"]
+
+    def test_rejects_when_sections_are_not_all_ready(self, monkeypatch):
+        """Раздел один из пяти -- документ был бы честной сметой наполовину,
+        хотя оплачен целый тариф (тот же принцип, что у «Скачать PDF»,
+        см. test_pdf_button_waits_for_all_sections_not_just_the_first)."""
+        rid, tok, pub = self._paid(monkeypatch, contact="partial@example.com", complete=False)
+        r = client.get(f"/api/report/{rid}/docx?t={tok}")
+        assert r.status_code == 409
+
+    def test_document_contains_the_idea_score_and_sections(self, monkeypatch):
+        import io
+        from docx import Document
+        rid, tok, pub = self._paid(monkeypatch, contact="content@example.com")
+        r = client.get(f"/api/report/{rid}/docx?t={tok}")
+        assert r.status_code == 200
+        doc = Document(io.BytesIO(r.content))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Пошив штор на заказ на дому" in text
+        assert "62/100" in text
+        assert "Риск конкуренции" in text
+        assert "Абзац первый." in text
+
+    def test_finance_table_becomes_a_word_table(self, monkeypatch):
+        """D1/G6: смета построчно таблицей, не абзацем — тот же принцип, что
+        уже действует на экране (wants_table у finance), должен пережить
+        экспорт в файл, а не деградировать обратно в текст."""
+        import io
+        from docx import Document
+        rid, tok, pub = self._paid(monkeypatch, tier="full", contact="tablebuyer@example.com",
+                                   with_table=True)
+        r = client.get(f"/api/report/{rid}/docx?t={tok}")
+        assert r.status_code == 200
+        doc = Document(io.BytesIO(r.content))
+        assert doc.tables, "смета должна прийти таблицей, не абзацем"
+        cells = [c.text for row in doc.tables[0].rows for c in row.cells]
+        assert "Аренда" in cells and "15 000" in cells
+        assert "Итого" in cells and "25 000" in cells
+
+    def test_owner_can_preview_before_anyone_pays(self, monkeypatch):
+        """Владелец собирает любой тариф без оплаты -- тот же принцип, что у
+        /report/{id}?preview=full (иначе проверить качество .docx можно
+        только заплатив себе самому)."""
+        rid, tok, pub = self._paid(monkeypatch, contact="preview@example.com", status="preview")
+        r = client.get(f"/api/report/{rid}/docx?key=test-owner-key")
+        assert r.status_code == 200
+
+    def test_stranger_with_wrong_token_is_rejected(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, contact="secret-owner@example.com")
+        r = client.get(f"/api/report/{rid}/docx?t=wrong-token-entirely")
+        assert r.status_code == 403
+
+    def test_report_page_carries_the_download_link_markup(self, monkeypatch):
+        """Кнопка должна физически быть на странице (JS её только показывает
+        и подставляет href, см. report.html render())."""
+        rid, tok, pub = self._paid(monkeypatch, contact="markup@example.com")
+        t = client.get(f"/report/{pub}?t={tok}").text
+        assert 'id="docx-link"' in t
+        assert "docxUrl" in t

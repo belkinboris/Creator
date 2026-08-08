@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -67,6 +67,7 @@ from app.report_engine import (  # noqa: E402
 from app import audiences  # noqa: E402
 from app import payments  # noqa: E402
 from app import mailer  # noqa: E402
+from app.docx_export import build_docx  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sozdatel")
@@ -1464,6 +1465,54 @@ async def report_section(rid: int, request: Request, key: str):
             fresh.report_json = json.dumps(data, ensure_ascii=False)
             s.add(fresh); s.commit()
     return {"ok": True, "section": section}
+
+
+@app.get("/api/report/{rid}/docx")
+def report_docx(rid: int, request: Request):
+    """Скачать бизнес-план файлом .docx.
+
+    G3 (PRODUCT_ROADMAP): PDF уже был («Скачать PDF» на report.html — печать
+    браузером), .docx не было вовсе — а комиссии соцзащиты сдают именно
+    редактируемый документ, не ссылку. Тот же контур доступа, что у
+    report_section: файл выдаёт куда больше пользы постороннему, чем один
+    раздел на экране, поэтому проверка не может быть слабее.
+
+    Отдаёт файл, только когда ВСЕ разделы тарифа уже сгенерированы --
+    неполный документ был бы честной сметой наполовину, а платили за целую.
+    """
+    owner = _is_owner(request)
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec or not rec.result_json:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+        purchase = _best_report_purchase(s, rid, include_preview=owner)
+        if not purchase:
+            return JSONResponse({"ok": False, "error": "Файл доступен после оплаты."},
+                                status_code=403)
+        if not _report_access_ok(request, purchase):
+            return JSONResponse({"ok": False, "error": "Этот отчёт открывается по вашей ссылке "
+                                                       "или из личного кабинета."},
+                                status_code=403)
+        if not purchase.report_json:
+            return JSONResponse({"ok": False, "error": "Разбор ещё собирается, "
+                                                       "попробуйте через минуту."},
+                                status_code=409)
+        report_full = json.loads(purchase.report_json)
+        ready = {sec.get("key") for sec in report_full.get("sections", [])}
+        expected = set(section_keys(purchase.tier))
+        if ready != expected:
+            return JSONResponse({"ok": False, "error": "Не все разделы ещё готовы, "
+                                                       "обновите страницу и попробуйте снова."},
+                                status_code=409)
+        doc_title, _ = _doc_title_and_meta(purchase)
+        idea = rec.idea
+
+    data = build_docx(doc_title=doc_title, idea=idea, core=report_full,
+                      sections=report_full["sections"])
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="biznes-plan-{rid}.docx"'})
 
 
 @app.post("/api/example/publish")

@@ -165,6 +165,7 @@
   .status-note{border-left:3px solid var(--marker);padding:2px 0 2px 12px;margin:18px 0;font-size:15px;color:var(--muted)}
   .status-note.ok{border-color:var(--ok)}
   .pdf-row{margin:18px 0}
+  .pdf-row .btn-ghost + .btn-ghost{margin-left:10px}
 
   footer{border-top:1px solid var(--line);margin-top:30px;padding:22px 0;color:var(--muted);font-size:13px}
   footer a{color:var(--muted)}
@@ -216,6 +217,7 @@
   <div class="pricing no-print" id="pricing-top"></div>
   <div class="pdf-row no-print" id="pdf-row" style="display:none">
     <button class="btn-ghost" onclick="window.print()" type="button">Скачать PDF</button>
+    <a class="btn-ghost" id="docx-link" href="#" download>Скачать DOCX</a>
   </div>
   <div class="status-note no-print" id="status-note" style="display:none"></div>
 
@@ -248,6 +250,18 @@ async function publishExample(checkId, tier){
 }
 
 const CHECK_ID = __CHECK_ID__;
+// Ссылка на .docx: та же авторизация, что у fillMissing (owner-ключ или
+// токен покупателя из адреса страницы) -- у <a> нет заголовков, поэтому оба
+// параметра только query-строкой.
+function docxUrl(){
+  const qs = new URLSearchParams(location.search);
+  const key = qs.get('key');
+  const t = qs.get('t');
+  let url = `/api/report/${CHECK_ID}/docx`;
+  if (key) url += `?key=${encodeURIComponent(key)}`;
+  else if (t) url += `?t=${encodeURIComponent(t)}`;
+  return url;
+}
 const PREVIEW = __PREVIEW_JSON__;
 const SAMPLE = __SAMPLE_JSON__;
 const PURPOSE = __PURPOSE_JSON__;
@@ -477,7 +491,11 @@ function render(){
   // где почти всё ещё «Собираем раздел…». Для соцконтракта это не
   // черновик, а лист, который несут в комиссию на бумаге (C5) -- кнопка
   // ждёт, пока готовы ВСЕ разделы тарифа.
-  if (total && done >= total) document.getElementById('pdf-row').style.display = 'block';
+  if (total && done >= total) {
+    document.getElementById('pdf-row').style.display = 'block';
+    const docxLink = document.getElementById('docx-link');
+    if (docxLink) docxLink.href = docxUrl();
+  }
   const bar = document.getElementById('build-progress');
   if (bar) {
     if (!total || done >= total) { bar.style.display = 'none'; }
