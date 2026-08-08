@@ -139,6 +139,7 @@
   .nav-group:first-child{margin-top:0}
   .build-progress{border-left:3px solid var(--marker);padding:6px 0 6px 12px;
     margin-top:16px;font-size:14px;color:var(--muted);max-width:46em}
+  .notify-row{margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   /* Бесплатный образец: настоящий кусок платного разбора, не тизер. */
   .sample-tag{font:600 12px "IBM Plex Sans";color:var(--muted);margin:22px 0 -6px}
   .sample-section{border-top:0;padding-top:0}
@@ -212,6 +213,10 @@
 
   <div class="preview" id="preview"></div>
   <div class="build-progress" id="build-progress" style="display:none"></div>
+  <div class="notify-row no-print" id="notify-row" style="display:none">
+    <button class="btn-ghost" id="notify-btn" type="button">Надоело ждать?</button>
+    <span class="fine" id="notify-status"></span>
+  </div>
   <div id="sample"></div>
   <div id="score-section"></div>
   <div class="pricing no-print" id="pricing-top"></div>
@@ -497,16 +502,24 @@ function render(){
     if (docxLink) docxLink.href = docxUrl();
   }
   const bar = document.getElementById('build-progress');
+  const notifyRow = document.getElementById('notify-row');
+  const inProgress = total && done < total;
   if (bar) {
-    if (!total || done >= total) { bar.style.display = 'none'; }
+    if (!inProgress) { bar.style.display = 'none'; }
     else {
       bar.style.display = 'block';
       // Про «можно закрыть» человек не догадается сам: собранные разделы
       // дописываются в базу сразу, но со стороны это выглядит как процесс,
-      // который оборвётся вместе с вкладкой.
-      bar.textContent = `Разбор собирается: готово ${done} из ${total}. Можно читать уже готовые разделы — остальные появятся сами. Страницу можно закрыть: собранное не пропадёт, при следующем открытии сборка продолжится.`;
+      // который оборвётся вместе с вкладкой. «Среднее время» -- та же цифра,
+      // что уже стоит в FAQ («Сразу после оплаты — текст собирается за
+      // одну-две минуты») -- G5 (PRODUCT_ROADMAP): человек не должен гадать,
+      // зависло или идёт (соцплан.рф пишет это прямо над оглавлением).
+      bar.textContent = `Разбор собирается: готово ${done} из ${total}. Среднее время сборки — одна-две минуты. Можно читать уже готовые разделы — остальные появятся сами. Страницу можно закрыть: собранное не пропадёт, при следующем открытии сборка продолжится.`;
     }
   }
+  // G5: «надоело ждать» -- кнопка, которую владелец отдельно отметил у
+  // конкурента. Появляется вместе с прогресс-баром, пропадает вместе с ним.
+  if (notifyRow) notifyRow.style.display = inProgress ? 'flex' : 'none';
 }
 
 render();
@@ -541,6 +554,37 @@ async function fillMissing(){
 }
 
 if (TIER_KEYS.length && SECTIONS.some(s => inTier(s.key) && !gotMap[s.key])) fillMissing();
+
+// G5: «надоело ждать» -- просим сервер прислать письмо, когда встанет на
+// место последний раздел (report_notify_me в app/main.py). Тот же
+// owner-ключ/токен, что и у fillMissing/docxUrl.
+const notifyBtn = document.getElementById('notify-btn');
+if (notifyBtn) notifyBtn.addEventListener('click', async () => {
+  const qs = new URLSearchParams(location.search);
+  const key = qs.get('key') || '';
+  const headers = key ? {'X-Owner-Key': key} : {};
+  const tok = qs.get('t') ? `&t=${encodeURIComponent(qs.get('t'))}` : '';
+  const statusEl = document.getElementById('notify-status');
+  notifyBtn.disabled = true;
+  try {
+    const r = await fetch(`/api/report/${CHECK_ID}/notify-me?${tok.replace(/^&/, '')}`,
+                          {method: 'POST', headers});
+    const d = await r.json();
+    if (d.ok && d.will_email) {
+      statusEl.textContent = 'Хорошо — пришлём письмо, как только всё будет готово.';
+      notifyBtn.style.display = 'none';
+    } else if (d.ok) {
+      statusEl.textContent = 'В заказе не почта, письмо прислать некуда. Но всё сохраняется — просто вернитесь на эту страницу позже.';
+      notifyBtn.style.display = 'none';
+    } else {
+      statusEl.textContent = d.error || 'Не получилось. Попробуйте обновить страницу.';
+      notifyBtn.disabled = false;
+    }
+  } catch (e) {
+    statusEl.textContent = 'Связь прервалась. Попробуйте ещё раз.';
+    notifyBtn.disabled = false;
+  }
+});
 
 // --- Статус заказа / ошибка генерации ---
 const statusEl = document.getElementById('status-note');

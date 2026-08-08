@@ -9729,3 +9729,120 @@ class TestPlansDeliveredSocialProof:
             t = client.get(url).text
             assert "ideas_checked" in t
             assert "Уже проверили" in t
+
+
+class TestNotifyWhenReportIsReady:
+    """G5 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): владелец отдельно
+    отметил кнопку «надоело ждать» + уведомление о готовности у конкурента.
+    Без фоновых воркеров момент «готово» -- это когда встал на место
+    последний недостающий раздел, внутри того же report_section, который и
+    так вызывается для каждого раздела (fillMissing на странице)."""
+
+    def _stub_generate(self, monkeypatch):
+        import app.main as m
+        async def fake_section(key, idea, demand_data, tier="quick", chosen_offer=None,
+                               purpose="business", **kw):
+            return {"key": key, "title": key, "body": "Готово."}
+        monkeypatch.setattr(m, "generate_section", fake_section)
+
+    def _paid(self, monkeypatch, contact, *, tier="quick"):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Идея для уведомления о готовности"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        client.post("/api/report", json={"check_id": rid, "tier": tier, "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = "paid"; s.add(o); s.commit()
+            pub = s.get(m.DemandCheck, rid).public_id
+            return rid, o.access_token, pub
+
+    def test_requires_access(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, "guarded@example.com")
+        r = client.post(f"/api/report/{rid}/notify-me")
+        assert r.status_code == 403
+
+    def test_email_contact_gets_subscribed(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, "will-email@example.com")
+        r = client.post(f"/api/report/{rid}/notify-me?t={tok}")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "will_email": True}
+        from app.main import ReportPurchase, Session, engine, select
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.check_id == rid)).first()
+            assert o.notify_requested is True
+
+    def test_phone_contact_is_told_honestly_it_wont_email(self, monkeypatch):
+        """Контакт для чека 54-ФЗ разрешает и телефон -- письмо туда не
+        уйдёт, и страница обязана сказать это прямо, а не притвориться."""
+        rid, tok, pub = self._paid(monkeypatch, "+79261234567")
+        r = client.post(f"/api/report/{rid}/notify-me?t={tok}")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "will_email": False}
+
+    def test_email_sent_only_when_the_last_section_lands(self, monkeypatch):
+        import app.report_engine as re_module
+        self._stub_generate(monkeypatch)
+        rid, tok, pub = self._paid(monkeypatch, "waiting-buyer@example.com")
+        client.post(f"/api/report/{rid}/notify-me?t={tok}")
+        sent = []
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "notify_buyer",
+                            lambda to, subject, body, **kw: sent.append((to, subject)) or True)
+        keys = list(re_module.QUICK_KEYS)
+        for k in keys[:-1]:
+            r = client.post(f"/api/report/{rid}/section?key={k}&t={tok}")
+            assert r.status_code == 200
+            assert not sent, f"письмо ушло раньше времени, после раздела {k}"
+        r = client.post(f"/api/report/{rid}/section?key={keys[-1]}&t={tok}")
+        assert r.status_code == 200
+        assert len(sent) == 1
+        assert sent[0][0] == "waiting-buyer@example.com"
+        assert "готов" in sent[0][1].lower()
+
+    def test_email_not_sent_twice_on_concurrent_last_requests(self, monkeypatch):
+        """notify_sent -- отдельный флаг именно против дублей: две вкладки
+        могли попросить один и тот же последний раздел почти одновременно."""
+        import app.report_engine as re_module
+        self._stub_generate(monkeypatch)
+        rid, tok, pub = self._paid(monkeypatch, "double-check@example.com")
+        client.post(f"/api/report/{rid}/notify-me?t={tok}")
+        sent = []
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "notify_buyer",
+                            lambda to, subject, body, **kw: sent.append(to) or True)
+        keys = list(re_module.QUICK_KEYS)
+        for k in keys:
+            client.post(f"/api/report/{rid}/section?key={k}&t={tok}")
+        # Раздел уже закэширован -- повторный запрос того же ключа не должен
+        # снова решить, что "последний раздел только что встал", и не должен
+        # слать письмо ещё раз.
+        client.post(f"/api/report/{rid}/section?key={keys[-1]}&t={tok}")
+        assert len(sent) == 1
+
+    def test_email_not_sent_without_subscribing_first(self, monkeypatch):
+        import app.report_engine as re_module
+        self._stub_generate(monkeypatch)
+        rid, tok, pub = self._paid(monkeypatch, "never-asked@example.com")
+        sent = []
+        import app.main as m
+        monkeypatch.setattr(m.mailer, "notify_buyer",
+                            lambda to, subject, body, **kw: sent.append(to) or True)
+        for k in re_module.QUICK_KEYS:
+            client.post(f"/api/report/{rid}/section?key={k}&t={tok}")
+        assert sent == []
+
+    def test_report_page_carries_the_notify_button_markup(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, "markup2@example.com")
+        t = client.get(f"/report/{pub}?t={tok}").text
+        assert 'id="notify-row"' in t
+        assert 'id="notify-btn"' in t
+        assert "notify-me" in t

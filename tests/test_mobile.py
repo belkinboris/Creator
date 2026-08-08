@@ -863,6 +863,37 @@ def test_docx_download_link_appears_alongside_pdf_and_actually_downloads(site, b
         ctx.close()
 
 
+def test_notify_button_appears_while_waiting_and_works(site, browser):
+    """G5 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): владелец отдельно
+    отметил кнопку «надоело ждать» + уведомление о готовности у конкурента.
+    Кнопка должна появляться ровно тогда, когда идёт сборка (тот же сид
+    pdf_partial, что и у прогресс-бара), пропадать вместе с прогрессом, когда
+    всё готово (pdf_full), и реально отвечать на клик — смотрим глазами
+    браузера, разметку и состояние рисует скрипт."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_partial']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        btn = page.locator("#notify-btn")
+        assert btn.is_visible(), "разбор ещё собирается -- кнопка должна быть видна"
+        btn.click()
+        page.wait_for_timeout(400)
+        status = page.inner_text("#notify-status")
+        assert status, "клик обязан оставить понятный статус, не тишину"
+        assert "готов" in status.lower() or "почт" in status.lower(), status
+        _assert_clean(page, "разбор в процессе сборки, кнопка «надоело ждать» нажата")
+    finally:
+        ctx.close()
+
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_full']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        assert not page.locator("#notify-btn").is_visible(), \
+            "все разделы готовы -- кнопка «надоело ждать» больше не нужна"
+    finally:
+        ctx.close()
+
+
 def test_paid_project_is_not_labelled_as_just_an_idea(site, browser):
     """A13. Этап рисует скрипт по ответу сервера — подстроками не проверить.
     Человек, оплативший тест на людях, не должен видеть свой проект на
