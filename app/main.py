@@ -1203,7 +1203,11 @@ def _notify_buyer_order(request: Request, *, kind: str, order_id: int, idea: str
     body += (f"Личный кабинет: {base}/account\n"
              "Вход без пароля — укажите эту же почту, и мы пришлём ссылку. "
              + tail +
-             "Если что-то пошло не так — просто ответьте на это письмо.\n")
+             # Адрес отправителя -- SOZDATEL_SMTP_USER, на проде
+             # noreply@projectsozdatel.ru (CLAUDE.md, письмо владельцу
+             # 2026-08-02): «просто ответьте на это письмо» звало ответить
+             # в никуда именно тогда, когда человеку правда нужна помощь.
+             f"Если что-то пошло не так — контакты для связи: {base}/contacts\n")
     return mailer.notify_buyer(contact, subject, body)
 
 

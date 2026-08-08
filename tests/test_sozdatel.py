@@ -6884,6 +6884,19 @@ class TestBuyerHearsFromUs:
         assert "/account" in body
         assert "без пароля" in body.lower()
 
+    def test_letter_does_not_invite_a_reply_to_a_noreply_address(self, monkeypatch):
+        """Аудит воронки 2026-08-08: письмо отправляется от адреса из
+        SOZDATEL_SMTP_USER, на проде это буквально noreply@projectsozdatel.ru
+        (CLAUDE.md — владелец сам получил тестовое письмо с этого адреса
+        2026-08-02). «Просто ответьте на это письмо» звало ответить именно
+        туда, куда ответ по определению не дойдёт — ровно в момент, когда
+        покупателю правда нужна помощь ('если что-то пошло не так')."""
+        sent = self._mail(monkeypatch)
+        self._pay(monkeypatch, "report", "noreply-check@example.com")
+        body = sent[0][2]
+        assert "ответьте на это письмо" not in body.lower()
+        assert "/contacts" in body
+
     def test_live_test_buyer_gets_a_letter_too(self, monkeypatch):
         sent = self._mail(monkeypatch)
         self._pay(monkeypatch, "livetest", "livebuyer@example.com")
