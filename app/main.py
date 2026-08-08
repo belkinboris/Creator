@@ -2933,10 +2933,29 @@ def _audience_landing(key: str) -> str:
                   for q, ans in c.get("faq", []))
     # Кнопка-обгон (F10): только у аудиторий, где она задана в реестре --
     # проверка спроса всё равно считается в фоне, ведёт сразу на /report/.
-    fast_plan_btn = (
-        f'<button class="btn-ghost" id="plan-btn" type="button">'
-        f'{html.escape(c["fast_plan_label"])}</button>'
-        if c.get("fast_plan_label") else "")
+    #
+    # G1 (PRODUCT_ROADMAP, разбор соцплан.рф): у аудиторий с plan_first=True
+    # человек пришёл именно за документом (соцплан.рф отдаёт план в одну
+    # кнопку с порога, без обязательного шага «сначала проверка спроса»).
+    # Раньше кнопка проверки спроса ВСЕГДА была тёмной/главной, а кнопка-обгон
+    # — второстепенной серой, даже когда именно она отвечает на запрос, с
+    # которым человек и пришёл. Акцент теперь решает plan_first, а не порядок
+    # объявления в шаблоне; проверка спроса никуда не девается, просто уступает
+    # главную кнопку тому действию, за которым реально пришли.
+    def _action_btn(id_: str, label: str, primary: bool) -> str:
+        cls = "btn" if primary else "btn-ghost"
+        return f'<button class="{cls}" id="{id_}" type="button">{html.escape(label)}</button>'
+
+    demand_label = "Проверить спрос — бесплатно"
+    plan_label = c.get("fast_plan_label", "")
+    if a.plan_first and plan_label:
+        action_buttons = (_action_btn("plan-btn", plan_label, primary=True) + "\n        "
+                          + _action_btn("check-btn", demand_label, primary=False))
+    elif plan_label:
+        action_buttons = (_action_btn("check-btn", demand_label, primary=True) + "\n        "
+                          + _action_btn("plan-btn", plan_label, primary=False))
+    else:
+        action_buttons = _action_btn("check-btn", demand_label, primary=True)
     page = (_static("audience-landing.html")
             .replace("__PAGE_TITLE__", html.escape(c.get("title", "Создатель")))
             .replace("__META__", html.escape(c.get("meta", "")))
@@ -2950,7 +2969,7 @@ def _audience_landing(key: str) -> str:
             .replace("__QUICK_NOTE__", c.get("quick_note", ""))
             .replace("__FULL_NOTE__", c.get("full_note", ""))
             .replace("__FAQ__", faq)
-            .replace("__FAST_PLAN_BTN__", fast_plan_btn)
+            .replace("__ACTION_BUTTONS__", action_buttons)
             .replace("__AUDIENCE_SWITCH__", _audience_switch_html(a.key))
             .replace("__AUDIENCE_KEY__", a.key))
     return _fill_server_values(page, a.key)

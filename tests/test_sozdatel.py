@@ -5363,7 +5363,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__PAGE_TITLE__", "__META__", "__FIELD_LABEL__", "__PLACEHOLDER__",
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
-            "__FAST_PLAN_BTN__",
+            "__ACTION_BUTTONS__",
             # страница результата -- audiences.for_page / состояние проверки
             "__AUDIENCE_JSON__", "__RESUME__", "__CHOSEN_H1_JSON__",
             # страница подтверждения входа -- заполняет _verify_page
@@ -9331,3 +9331,35 @@ class TestLandingSpeaksHumanLanguage:
         первым."""
         body = client.get("/").text
         assert "Первые два бесплатны" in body
+
+
+class TestPlanFirstPrimaryAction:
+    """G1 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у соцконтракта
+    главной кнопкой была проверка спроса, хотя человек пришёл ровно за
+    планом («сразу попал, сразу всё понял, нажал одну кнопку» — так
+    владелец описал витрину конкурента). plan_first в реестре аудиторий уже
+    существовал (app/audiences.py), но управлял только страницей /r/, а не
+    самой витриной, где выбор кнопки и происходит."""
+
+    def test_social_contract_makes_the_plan_button_primary(self):
+        t = client.get("/social-contract").text
+        assert '<button class="btn" id="plan-btn"' in t
+        assert '<button class="btn-ghost" id="check-btn"' in t
+
+    def test_social_contract_plan_button_comes_first_in_the_dom(self):
+        t = client.get("/social-contract").text
+        assert t.index('id="plan-btn"') < t.index('id="check-btn"')
+
+    def test_student_keeps_demand_check_as_the_primary_action(self):
+        """Студент не заказывает документ с порога — у него plan_first=False,
+        и обгона нет вовсе (нет fast_plan_label в реестре), проверяем, что
+        обычная кнопка проверки спроса осталась главной."""
+        t = client.get("/students").text
+        assert '<button class="btn" id="check-btn"' in t
+        assert 'id="plan-btn"' not in t
+
+    def test_home_page_unaffected(self):
+        """Главная не использует audience-landing.html — сторож от случайной
+        порчи чужого шаблона при редактировании этой функции."""
+        t = client.get("/").text
+        assert 'id="plan-btn"' not in t
