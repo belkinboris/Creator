@@ -2931,6 +2931,21 @@ def _audience_landing(key: str) -> str:
     faq = "".join(f'<div class="faq"><h3>{html.escape(q)}</h3>'
                   f"<p>{html.escape(ans)}</p></div>"
                   for q, ans in c.get("faq", []))
+    # G2 (PRODUCT_ROADMAP, разбор соцплан.рф): «что такое соцконтракт» с
+    # суммами -- у конкурента это первое, что объясняет ценность продукта,
+    # у нас не было вовсе. Задаётся в реестре (сейчас только у social_contract
+    # есть context_block), пустая секция у остальных аудиторий не рендерится.
+    context_block = c.get("context_block")
+    context_html = ""
+    if context_block:
+        items = "".join(
+            f'<div class="point"><span class="mark"></span><div>'
+            f"<h3>{html.escape(h3)}</h3><p>{html.escape(txt)}</p></div></div>"
+            for h3, txt in context_block.get("items", []))
+        context_html = (
+            f'<section class="band wrap"><h2>{html.escape(context_block["title"])}</h2>'
+            f'<p class="band-sub">{html.escape(context_block.get("sub", ""))}</p>'
+            f'{items}</section>')
     # Кнопка-обгон (F10): только у аудиторий, где она задана в реестре --
     # проверка спроса всё равно считается в фоне, ведёт сразу на /report/.
     #
@@ -2966,6 +2981,7 @@ def _audience_landing(key: str) -> str:
             .replace("__PROMISE_TITLE__", html.escape(c.get("promise_title", "")))
             .replace("__PROMISE_SUB__", html.escape(c.get("promise_sub", "")))
             .replace("__PROMISES__", promises)
+            .replace("__CONTEXT_BLOCK__", context_html)
             .replace("__QUICK_NOTE__", c.get("quick_note", ""))
             .replace("__FULL_NOTE__", c.get("full_note", ""))
             .replace("__FAQ__", faq)

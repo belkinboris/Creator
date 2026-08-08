@@ -5363,7 +5363,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__PAGE_TITLE__", "__META__", "__FIELD_LABEL__", "__PLACEHOLDER__",
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
-            "__ACTION_BUTTONS__",
+            "__ACTION_BUTTONS__", "__CONTEXT_BLOCK__",
             # страница результата -- audiences.for_page / состояние проверки
             "__AUDIENCE_JSON__", "__RESUME__", "__CHOSEN_H1_JSON__",
             # страница подтверждения входа -- заполняет _verify_page
@@ -9049,9 +9049,16 @@ class TestStudentAudience:
 
     def test_prices_are_the_same_for_everyone(self):
         """Решение владельца: разные цены обидят тех, кто не попал в льготную
-        группу. Витрины обязаны называть одни и те же суммы."""
+        группу. Витрины обязаны называть одни и те же суммы.
+
+        G2 (PRODUCT_ROADMAP) добавил на /social-contract суммы соцконтракта
+        («до 350 000 ₽») — это не тариф сайта, а параметр госпрограммы, ему
+        законно быть только на этой витрине. Без lookbehind старый regex
+        ловил «000» из «350 000 ₽» как отдельную «цену» и ломал сравнение
+        ложным расхождением; lookbehind исключает хвост разрядного пробела,
+        не ослабляя саму проверку тарифов сайта."""
         import re
-        nums = [set(re.findall(r"(\d{3,4}) ₽", client.get(p).text))
+        nums = [set(re.findall(r"(?<!\d )(\d{3,4}) ₽", client.get(p).text))
                 for p in ("/social-contract", "/students")]
         assert nums[0] == nums[1], nums
 
@@ -9363,3 +9370,47 @@ class TestPlanFirstPrimaryAction:
         порчи чужого шаблона при редактировании этой функции."""
         t = client.get("/").text
         assert 'id="plan-btn"' not in t
+
+
+class TestSocialContractContextBlock:
+    """G2 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента блок
+    с суммами соцконтракта -- двигатель мотивации ("До 350 000 ₽...",
+    "требуется бизнес-план"), у нас его не было вовсе. Суммы проверены
+    2026-08-08 (kontur.ru, УБРиР, Sberbusiness): 350 000 ₽ на бизнес,
+    200 000 ₽ на ЛПХ, 30 000 ₽ на обучение -- совпадают у трёх независимых
+    источников."""
+
+    def test_block_present_on_social_contract(self):
+        t = client.get("/social-contract").text
+        assert "Что такое социальный контракт" in t
+        assert "350 000" in t
+        assert "200 000" in t
+        assert "30 000" in t
+
+    def test_block_explains_why_the_product_is_needed(self):
+        """Последняя строка -- ради неё весь блок: она объясняет, зачем
+        человеку наш продукт, а не просто пересказывает программу."""
+        t = client.get("/social-contract").text
+        assert "требуется бизнес-план" in t.lower() or "обязателен бизнес-план" in t.lower()
+
+    def test_amounts_are_capped_not_promised_exactly(self):
+        """Порядок подачи и суммы -- предмет регионального регулирования;
+        сайт не должен звучать так, будто гарантирует федеральную сумму
+        каждому регионально."""
+        t = client.get("/social-contract").text
+        assert "До 350 000" in t or "до 350 000" in t
+
+    def test_block_absent_for_other_audiences(self):
+        """context_block — данные только у social_contract; у остальных
+        аудиторий реестр его не задаёт, секция не должна появляться пустой
+        рамкой."""
+        for url in ("/", "/students"):
+            t = client.get(url).text
+            assert "Что такое социальный контракт" not in t
+
+    def test_block_sits_above_the_seven_step_map(self):
+        """Ценностное объяснение -- первое, что видно после формы, а не
+        погребено под картой из семи этапов (above the fold, конверсионный
+        копирайтинг: ценность видна сразу, не после скролла мимо лишнего)."""
+        t = client.get("/social-contract").text
+        assert t.index("Что такое социальный контракт") < t.index("Путь от идеи до денег")
