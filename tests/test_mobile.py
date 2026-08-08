@@ -279,6 +279,20 @@ with Session(engine) as s:
     s.commit()
     out["two_tables"] = rec3.public_id
     s.commit()
+    # Аудит воронки 2026-08-08 (после G10/G11): оплачено, но report_json
+    # пуст -- открытие страницы вызовет generate_core живьём и упадёт (ключей
+    # LLM в этом окружении нет, см. env в site()), тот же путь, что настоящий
+    # сбой генерации. Проверяем, что расстроенный покупатель видит гарантию
+    # возврата, а не голое "обновите страницу".
+    rec4 = DemandCheck(idea="Идея, для которой отчёт не соберётся",
+                       best_count=1200, purpose="business",
+                       result_json=json.dumps(quick_partial, ensure_ascii=False))
+    s.add(rec4); s.commit(); s.refresh(rec4)
+    s.add(ReportPurchase(check_id=rec4.id, idea=rec4.idea, tier="quick", status="paid",
+                         contact="gen-failed@example.com", amount=990))
+    s.commit()
+    out["gen_failed"] = rec4.public_id
+    s.commit()
 print(json.dumps(out))
 '''
     r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,
@@ -294,7 +308,13 @@ def site(tmp_path_factory):
     db_url = f"sqlite:///{db}"
     ids = _seed(db_url)
     port = _free_port()
-    env = dict(os.environ, DATABASE_URL=db_url, SOZDATEL_OWNER_KEY=OWNER_KEY)
+    # Ни один тест здесь не рассчитывает на живой ответ LLM (весь платный
+    # разбор приходит уже готовым report_json из сида) -- явно снимаем
+    # ключи, чтобы generate_core падал предсказуемо в тесте на сбой
+    # генерации, а не только когда в окружении хоста их случайно нет.
+    base_env = {k: v for k, v in os.environ.items()
+               if k not in ("YANDEX_API_KEY", "ANTHROPIC_API_KEY", "YANDEX_FOLDER_ID")}
+    env = dict(base_env, DATABASE_URL=db_url, SOZDATEL_OWNER_KEY=OWNER_KEY)
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
@@ -966,6 +986,30 @@ def test_first_purchase_shows_the_same_refund_guarantee_as_every_other_purchase(
         assert "вернём деньги" in text, "гарантия возврата обязана быть видна у первой покупки, не только у допродажи"
         assert page.locator("#pricing-top .terms-note a[href='/oferta']").count() == 1
         _assert_clean(page, "отчёт с гарантией возврата у первой покупки")
+    finally:
+        ctx.close()
+
+
+def test_generation_failure_reminds_the_paying_customer_about_the_refund(site, browser):
+    """Продолжение аудита воронки 2026-08-08: гарантия возврата теперь стоит
+    у кнопки оплаты (G10) и в FAQ (G11), но именно в момент, когда сбой
+    генерации РЕАЛЬНО случился и деньги уже списаны -- самый расстроенный
+    момент для покупателя -- сообщение молчало о ней и звало просто
+    обновить страницу. ids['gen_failed'] оплачен, но report_json пуст:
+    открытие страницы вызывает generate_core живьём, а ключей LLM в
+    окружении теста нет (см. env в site()) -- тот же путь, что настоящий
+    сбой. Разметку строит скрипт (innerHTML), подстрокой в шаблоне не
+    проверить."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['gen_failed']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        note = page.locator("#status-note")
+        assert note.is_visible()
+        assert "вернём деньги" in note.inner_text()
+        link = note.locator("a[href='/oferta']")
+        assert link.count() == 1
+        _assert_clean(page, "отчёт со сбоем генерации и напоминанием о возврате")
     finally:
         ctx.close()
 
