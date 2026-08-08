@@ -899,6 +899,54 @@ def test_docx_download_link_appears_alongside_pdf_and_actually_downloads(site, b
         ctx.close()
 
 
+def test_order_button_blocks_a_second_click_while_the_first_is_in_flight(site, browser):
+    """Аудит воронки 2026-08-08 (блок G исчерпан, «пройди воронку глазами
+    человека с улицы»): каждая другая кнопка на сайте, которая шлёт
+    fetch (сохранить, заострить, запустить, напомнить письмом — см.
+    result.html/index.html/desk.html), блокируется на время запроса, эта
+    оставалась исключением. Кнопка «Получить отчёт» — единственная на
+    сайте, которая берёт деньги покупателя, и именно она была без защиты
+    от повторного клика: на медленной сети нетерпеливый повторный тап
+    уходил бы вторым заказом — второе письмо владельцу без оплаты, а с
+    оплатой (ЮКасса настроена) — вторая платёжная сессия на ту же
+    покупку. Проверяем через задержанный /api/report: после первого клика
+    кнопка обязана быть disabled ДО того, как первый ответ пришёл, и
+    второй клик не должен уйти вторым запросом."""
+    ids = site["ids"]
+    # ids['business'] уже несёт пример-покупку (is_example) -- анонимному
+    # посетителю показывается баннер «уже оплачен», а не тарифы. ids['weak']
+    # без единой покупки -- ровно тот же экран, что видит настоящий
+    # неоплативший посетитель.
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['weak']}")
+    try:
+        calls = []
+
+        def _slow_order(route):
+            calls.append(1)
+            time.sleep(0.4)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "paid": False,
+                                           "message": "Заявка принята."}, ensure_ascii=False))
+
+        page.route("**/api/report", _slow_order)
+        page.fill("#contact", "sweep@example.com")
+        btn = page.locator(".tier button.btn").first
+        btn.click()
+        page.wait_for_timeout(50)
+        assert btn.is_disabled(), "кнопка обязана блокироваться сразу после первого клика"
+        # Второй клик, пока первый запрос ещё не ответил -- через нативный
+        # DOM .click(), потому что настоящий disabled уже не даёт браузеру
+        # доставить событие клика вообще (это и есть защита), а Playwright
+        # с force:true спотыкается о ту же самую блокировку раньше, чем
+        # успевает её проверить.
+        page.evaluate("document.querySelector('.tier button.btn').click()")
+        page.wait_for_timeout(600)
+        assert len(calls) == 1, f"второй клик ушёл отдельным запросом: {len(calls)} вызовов /api/report"
+        _assert_clean(page, "отчёт после блокировки повторного клика по кнопке заказа")
+    finally:
+        ctx.close()
+
+
 def test_two_kinds_of_tables_render_correctly_side_by_side(site, browser):
     """G6 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента
     таблиц несколько и они разные по смыслу -- смета деньгами и план

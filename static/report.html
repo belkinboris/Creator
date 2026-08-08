@@ -632,7 +632,7 @@ function tierCard(key){
     <div class="name">${escapeHtml(t.label)}</div>
     <div><span class="price">${fmt(t.price)} ₽</span></div>
     <div class="desc">${key === 'quick' ? '4 ключевых раздела: резюме, рынок, конкуренты, вердикт' : 'Все 8 разделов: + аудитория, финансы, риски, план запуска'}</div>
-    <button class="btn" type="button" onclick="order('${key}')">Получить отчёт</button>
+    <button class="btn" type="button" onclick="order('${key}', this)">Получить отчёт</button>
   </div>`;
 }
 // Отчёт по этой идее уже куплен, просто открыт не тем (или тем, но без
@@ -659,10 +659,18 @@ if (document.getElementById('access-note')) {
     <p class="err" id="order-err" role="alert"></p>`;
 }
 
-async function order(tier){
+async function order(tier, btn){
   const errEl = document.getElementById('order-err');
   const contact = document.getElementById('contact').value;
   errEl.classList.remove('show');
+  // Кнопка платит деньгами покупателя -- без блокировки двойной клик (или
+  // нетерпеливый тап на медленной сети) уходил бы двумя заказами: два
+  // письма владельцу, а с оплатой -- две платёжные сессии в ЮКассе на одну
+  // и ту же покупку. Тот же приём уже стоит у каждой другой кнопки на
+  // сайте (result.html, index.html, desk.html) -- здесь его не было.
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Секунду…';
   try {
     const r = await fetch('/api/report', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -674,8 +682,11 @@ async function order(tier){
     if (data.paid && data.confirmation_url) { location.href = data.confirmation_url; return; }
     statusEl.textContent = data.message; statusEl.classList.add('ok'); statusEl.style.display = 'block';
     statusEl.scrollIntoView({behavior:'smooth', block:'center'});
+    pricing.style.display = 'none';
   } catch (e) {
     errEl.textContent = e.message; errEl.classList.add('show');
+    btn.disabled = false;
+    btn.textContent = label;
   }
 }
 
