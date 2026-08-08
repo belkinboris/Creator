@@ -5298,7 +5298,7 @@ class TestNoHardcodedServerValuesInStatic:
         import app.main as m
         amounts = {str(m.LIVE_TEST_PRICE)}
         for tier in m.REPORT_PRICES.values():
-            amounts |= {str(tier["price"]), str(tier["was"])}
+            amounts.add(str(tier["price"]))
         bad = []
         for name, text in self._sources():
             # Сначала схлопываем разделители разрядов: «1 490 ₽» -> «1490 ₽».
@@ -9511,11 +9511,16 @@ class TestPlanFirstHidesIrrelevantSteps:
         assert "Скачайте" not in t
         assert "скачат" not in t.lower()
 
-    def test_social_contract_still_shows_all_four_prices(self):
-        """prices-note не входит в эту задачу — цены остаются как были,
-        чтобы не задеть test_prices_are_the_same_for_everyone заново."""
+    def test_social_contract_still_shows_the_real_prices(self):
+        """prices-note не входит в эту задачу — реальные цены остаются как
+        были, чтобы не задеть test_prices_are_the_same_for_everyone заново.
+        990/2990 -- тарифы отчёта, 1490 -- LIVE_TEST_PRICE (живой тест),
+        настоящая цена. 3990 сюда не входит: это была зачёркнутая
+        "старая" цена бизнес-плана, которую никто никогда не платил (см.
+        аудит воронки 2026-08-08, REPORT_PRICES.was) — убрана как
+        выдуманная скидка."""
         t = client.get("/social-contract").text
-        for price in ("990", "1490", "2990", "3990"):
+        for price in ("990", "1490", "2990"):
             assert price in t, price
 
     def test_student_keeps_the_full_seven_step_map(self):
@@ -9954,3 +9959,47 @@ class TestStagesTableInDocx:
         assert "Регистрация ИП" in body_cells
         assert "1-я неделя" in body_cells
         assert "Итого" not in [c.text for c in t.rows[-1].cells]
+
+
+class TestNoFabricatedDiscount:
+    """Аудит воронки 2026-08-08 («блок G исчерпан, пройди воронку глазами
+    человека с улицы»): зачёркнутая «старая» цена (1490 ₽ → 990 ₽,
+    3990 ₽ → 2990 ₽) стояла в REPORT_PRICES с самого первого коммита,
+    введшего платный отчёт (`git log -S'"was": 1490'`) — то есть НИКОГДА не
+    была ценой, которую кто-то реально платил. Тот же класс проблемы, что
+    уже ловили в A14: «Ранним — 50% на первый месяц» — скидку на чужой
+    бизнес придумали за владельца и показывали живым людям. Здесь придумали
+    скидку на свой же тариф — то же самое, только более скрытое: обёрнуто
+    в обычный ценник, а не в отдельную табличку с надписью «скидка»."""
+
+    def test_report_prices_carry_no_fabricated_was_field(self):
+        import app.main as m
+        for tier in m.REPORT_PRICES.values():
+            assert "was" not in tier, tier
+
+    def test_no_strikethrough_price_markup_anywhere(self):
+        """Разметка вымышленной скидки не должна вернуться ни в одной
+        витрине, даже если кто-то реализует G4/новый тариф и случайно
+        скопирует старый шаблон карточки."""
+        for name, text in (("index.html", _read_static("index.html")),
+                           ("audience-landing.html", _read_static("audience-landing.html")),
+                           ("report.html", _read_static("report.html"))):
+            assert 'class="was"' not in text, name
+            assert "text-decoration:line-through" not in text, name
+
+    def test_social_contract_shows_a_single_honest_price_per_tier(self):
+        t = client.get("/social-contract").text
+        assert "990" in t and "2990" in t
+        assert "3990" not in t, "выдуманная «была» цена бизнес-плана вернулась"
+
+    def test_report_page_tariff_cards_show_no_was_price(self, monkeypatch):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        monkeypatch.setattr(m, "check_demand", fake_check)
+        rid = client.post("/api/demand", json={"idea": "Идея для проверки честной цены"}).json()["id"]
+        t = client.get(f"/report/{rid}").text
+        assert "3990" not in t
+        assert "class=\"was\"" not in t

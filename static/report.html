@@ -140,7 +140,6 @@
   .tier{border:1px solid var(--line);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px}
   .tier .name{font-size:16px;font-weight:600}
   .tier .price{font:600 26px "IBM Plex Mono",monospace}
-  .tier .was{font-size:14px;color:var(--muted);text-decoration:line-through;margin-left:8px}
   .tier .desc{color:var(--muted);font-size:13.5px}
   .tier button{margin-top:auto}
   .group-title{font:600 13px "IBM Plex Sans";color:var(--muted);margin:26px 0 2px;
@@ -631,7 +630,7 @@ function tierCard(key){
   const t = PRICES[key];
   return `<div class="tier">
     <div class="name">${escapeHtml(t.label)}</div>
-    <div><span class="price">${fmt(t.price)} ₽</span><span class="was">${fmt(t.was)} ₽</span></div>
+    <div><span class="price">${fmt(t.price)} ₽</span></div>
     <div class="desc">${key === 'quick' ? '4 ключевых раздела: резюме, рынок, конкуренты, вердикт' : 'Все 8 разделов: + аудитория, финансы, риски, план запуска'}</div>
     <button class="btn" type="button" onclick="order('${key}')">Получить отчёт</button>
   </div>`;
