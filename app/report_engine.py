@@ -341,9 +341,12 @@ SECTION_SPECS = [
 
     {"key": "verdict", "group": "Риски и проверка", "title": "Вердикт",
      "ask": "Запускать, дорабатывать или не запускать в текущем виде?",
-     "must": "Прямой вывод одним из трёх вариантов и объяснение почему. Вердикт без права "
-             "сказать «нет» — не вердикт. Если ответ «дорабатывать» — назови, что именно "
-             "изменить, чтобы ответ стал «запускать»."},
+     "must": "Первое предложение — сам вердикт, прямым словом. Дальше — причины именно "
+             "такого ответа, опирающиеся на посчитанные цифры, а не на общие рассуждения. "
+             "Если вердикт «запускать» — скажи, с чего начать на этой неделе, и не "
+             "приписывай в конце оговорку «но сначала доработайте». Если «дорабатывать» "
+             "или «не запускать» — назови, что именно изменить, чтобы ответ стал "
+             "«запускать»."},
 ]
 
 # Порядок фиксирован; (ключ, заголовок) — совместимость с остальным кодом.
@@ -506,11 +509,48 @@ _TABLE_SCHEMA_FIELD = ''',
    "total": число_рублей_без_текста}'''
 
 
-def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS) -> str:
+def _verdict_call(score: int) -> str:
+    """Какой из трёх вердиктов следует из уже посчитанного балла.
+
+    Кастдев 2026-08-07: раздел «Вердикт» ВСЕГДА заканчивался словом
+    «доработать», на любой идее и любом балле. Причина не в идеях, а в том,
+    что раздел писался без единого якоря: модели дают три варианта, из
+    которых средний безопасен всегда, и она честно выбирает безопасный. Это
+    обесценивает главный раздел платного плана — читатель платит за ответ
+    «да/нет», а получает «ну, доработайте».
+
+    Тот же принцип, что у compute_verdict в demand.py и _viability_label
+    выше: вердикт считает код, модель его ОБЪЯСНЯЕТ. Пороги намеренно те же,
+    что у _viability_label — иначе метка рядом с баллом («Рабочий вариант»)
+    и вердикт в конце («дорабатывать») противоречили бы друг другу на одной
+    и той же странице."""
+    if score >= 60:
+        return "запускать"
+    if score >= 40:
+        return "дорабатывать"
+    return "не запускать в текущем виде"
+
+
+def _verdict_anchor(score: int | None) -> str:
+    if not isinstance(score, (int, float)):
+        return ""
+    call = _verdict_call(int(score))
+    return f"""
+
+ВЕРДИКТ УЖЕ ПОСЧИТАН, ТЫ ЕГО НЕ ВЫБИРАЕШЬ. Балл жизнеспособности этой идеи —
+{int(score)} из 100, и по нему вердикт: «{call}». Твоя работа — объяснить
+ИМЕННО ЭТОТ вердикт, а не выбрать свой. Начни раздел прямо с него, теми же
+словами. Не смягчай («скорее да, но»), не переиначивай и не подменяй его
+рекомендацией доработать, если вердикт другой."""
+
+
+def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS,
+                    viability_score: int | None = None) -> str:
     if purpose not in PURPOSES:
         purpose = PURPOSE_BUSINESS
     spec = _spec(key, purpose)
     wants_table = bool(spec.get("wants_table"))
+    anchor = _verdict_anchor(viability_score) if key == "verdict" else ""
     return f"""{audiences.get(purpose).persona}
 
 Твой текст прочитает: {audiences.get(purpose).reader}. Пиши так, чтобы это
@@ -530,6 +570,7 @@ def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS) -> str
 
 Требования к этому разделу:
 {spec['must']}
+{anchor}
 {_TABLE_ASK if wants_table else ""}
 
 {_HOW_TO_WRITE}
@@ -673,24 +714,31 @@ def _viability_label(score: int) -> str:
 async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "full",
                            chosen_offer: dict | None = None,
                            purpose: str = PURPOSE_BUSINESS,
+                           viability_score: int | None = None,
                            *, _post=None, _attempt: int = 1) -> dict:
-    """Один раздел — один вызов модели со своим ТЗ и своим бюджетом токенов."""
+    """Один раздел — один вызов модели со своим ТЗ и своим бюджетом токенов.
+
+    `viability_score` нужен только разделу «Вердикт» — см. `_verdict_anchor`.
+    Балл к этому моменту уже посчитан (`generate_core` идёт первым и лежит
+    в `report_json`), так что раздел не пересчитывает его заново."""
     if key not in section_keys(tier):
         raise ReportEngineError(f"секции {key} нет в тарифе {tier}")
     user_msg = _user_message(idea, demand_data, chosen_offer)
     try:
-        text = await _call_llm(_section_prompt(key, tier, purpose), user_msg,
-                               MAX_TOKENS_SECTION, _post=_post)
+        text = await _call_llm(_section_prompt(key, tier, purpose, viability_score),
+                               user_msg, MAX_TOKENS_SECTION, _post=_post)
         data = _parse(text)
     except (json.JSONDecodeError, ReportEngineError):
         if _attempt == 1:
             return await generate_section(key, idea, demand_data, tier, chosen_offer,
-                                          purpose, _post=_post, _attempt=2)
+                                          purpose, viability_score,
+                                          _post=_post, _attempt=2)
         raise ReportEngineError("Модель вернула неразборчивый ответ. Попробуйте ещё раз.")
     except (httpx.HTTPError, httpx.TimeoutException, llm_adapter.LLMAdapterError) as e:
         if _attempt == 1:
             return await generate_section(key, idea, demand_data, tier, chosen_offer,
-                                          purpose, _post=_post, _attempt=2)
+                                          purpose, viability_score,
+                                          _post=_post, _attempt=2)
         raise ReportEngineError(f"Сервис анализа недоступен: {e}")
 
     body = str(data.get("body") or "").strip()
@@ -755,5 +803,6 @@ async def generate_report(idea: str, demand_data: dict, tier: str = "quick",
     sections = []
     for key in section_keys(tier):
         sections.append(await generate_section(key, idea, demand_data, tier,
-                                               chosen_offer, purpose, _post=_post))
+                                               chosen_offer, purpose,
+                                               core.get("viability_score"), _post=_post))
     return {**core, "sections": sections}

@@ -3495,12 +3495,16 @@ class TestSocialContractPage:
         """Часть пункта 14 сырого фидбека владельца (2026-07-31): карта пути
         0->6 раньше была только на главной -- пришедший через рекламу на
         /social-contract или /students не видел общую картину сервиса.
-        Секция теперь общая (audience-landing.html), а не главная-only."""
-        for path in ("/social-contract", "/students"):
-            text = client.get(path).text
-            assert 'id="path"' in text, path
-            assert "Путь от идеи до денег" in text, path
-            assert text.count('class="step"') == 7, path
+        Секция теперь общая (audience-landing.html), а не главная-only.
+
+        /social-contract с 2026-08-08 (G1, остаток задачи) показывает не эту
+        карту, а свою короткую «Как это работает» -- см.
+        TestPlanFirstHidesIrrelevantSteps ниже. Здесь остаётся проверка
+        только для /students, у которой полная семиэтапная карта не менялась."""
+        text = client.get("/students").text
+        assert 'id="path"' in text
+        assert "Путь от идеи до денег" in text
+        assert text.count('class="step"') == 7
 
     def test_fast_plan_button_only_on_social_contract(self):
         """F10: кнопка-обгон «Сразу сделать бизнес-план» — только у
@@ -5363,7 +5367,9 @@ class TestNoHardcodedServerValuesInStatic:
             "__PAGE_TITLE__", "__META__", "__FIELD_LABEL__", "__PLACEHOLDER__",
             "__PROMISE_TITLE__", "__PROMISE_SUB__", "__PROMISES__",
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
-            "__FAST_PLAN_BTN__",
+            "__ACTION_BUTTONS__", "__CONTEXT_BLOCK__",
+            "__AUDIENCE_SWITCH_TOP__", "__AUDIENCE_SWITCH_BOTTOM__",
+            "__PATH_TITLE__", "__PATH_SUB__", "__PATH_ITEMS__", "__PATH_NOTE__",
             # страница результата -- audiences.for_page / состояние проверки
             "__AUDIENCE_JSON__", "__RESUME__", "__CHOSEN_H1_JSON__",
             # страница подтверждения входа -- заполняет _verify_page
@@ -8928,11 +8934,19 @@ class TestVisitorCanFindHisOwnEntrance:
                 assert bad not in low, (a.key, a.switch_label)
 
     def test_switch_is_built_in_one_place(self):
-        """Разметка переключателя не должна лежать копией в витринах."""
-        for name in ("index.html", "audience-landing.html"):
-            t = _read_static(name)
-            assert "__AUDIENCE_SWITCH__" in t, name
-            assert 'class="aud-switch"' not in t, name
+        """Разметка переключателя не должна лежать копией в витринах.
+
+        audience-landing.html держит ДВА слота, не один (G1, PRODUCT_ROADMAP):
+        у plan_first-аудитории переключатель уезжает вниз страницы, у
+        остальных остаётся наверху -- но собирает его по-прежнему только
+        _audience_switch_html, копии разметки в шаблоне нет ни там, ни там."""
+        t = _read_static("index.html")
+        assert "__AUDIENCE_SWITCH__" in t
+        assert 'class="aud-switch"' not in t
+        t = _read_static("audience-landing.html")
+        assert "__AUDIENCE_SWITCH_TOP__" in t
+        assert "__AUDIENCE_SWITCH_BOTTOM__" in t
+        assert 'class="aud-switch"' not in t
 
     def test_result_page_lets_you_switch_optics_without_rechecking(self):
         """Спрос уже посчитан — гонять человека через проверку заново, чтобы
@@ -9049,9 +9063,16 @@ class TestStudentAudience:
 
     def test_prices_are_the_same_for_everyone(self):
         """Решение владельца: разные цены обидят тех, кто не попал в льготную
-        группу. Витрины обязаны называть одни и те же суммы."""
+        группу. Витрины обязаны называть одни и те же суммы.
+
+        G2 (PRODUCT_ROADMAP) добавил на /social-contract суммы соцконтракта
+        («до 350 000 ₽») — это не тариф сайта, а параметр госпрограммы, ему
+        законно быть только на этой витрине. Без lookbehind старый regex
+        ловил «000» из «350 000 ₽» как отдельную «цену» и ломал сравнение
+        ложным расхождением; lookbehind исключает хвост разрядного пробела,
+        не ослабляя саму проверку тарифов сайта."""
         import re
-        nums = [set(re.findall(r"(\d{3,4}) ₽", client.get(p).text))
+        nums = [set(re.findall(r"(?<!\d )(\d{3,4}) ₽", client.get(p).text))
                 for p in ("/social-contract", "/students")]
         assert nums[0] == nums[1], nums
 
@@ -9203,3 +9224,449 @@ class TestOpticsCanBeSwitchedOnTheResultPage:
         t = client.get(f"/r/{pid}").text
         aud = json.loads(t.split("const AUDIENCE = ", 1)[1].split(";\n", 1)[0])
         assert aud["plan_first"] is True
+
+
+class TestVerdictAnchor:
+    """Кастдев 2026-08-07: раздел «Вердикт» ЗАКАНЧИВАЛСЯ словом «доработать»
+    в каждом бизнес-плане, независимо от идеи и балла. Причина не в идеях:
+    раздел писался без якоря, а из трёх вариантов («запускать» /
+    «дорабатывать» / «не запускать») средний безопасен всегда — модель
+    честно выбирала безопасный. Вердикт теперь считает код, модель его
+    объясняет (тот же принцип, что compute_verdict в demand.py)."""
+
+    IDEA = "Мобильный шиномонтаж с выездом"
+
+    def test_call_matches_viability_label_thresholds(self):
+        """Два места на одной странице не должны противоречить друг другу:
+        метка рядом с баллом («Рабочий вариант») и вердикт в конце. Пороги
+        обязаны быть одни и те же — иначе 65/100 даст «Рабочий вариант» и
+        тут же «дорабатывать»."""
+        from app.report_engine import _verdict_call, _viability_label
+        for score in range(1, 101):
+            label, call = _viability_label(score), _verdict_call(score)
+            if label in ("Сильная позиция для запуска", "Рабочий вариант, есть слабые места"):
+                assert call == "запускать", f"{score}: {label} → {call}"
+            elif label == "Нужна доработка перед запуском":
+                assert call == "дорабатывать", f"{score}: {label} → {call}"
+            else:
+                assert call == "не запускать в текущем виде", f"{score}: {label} → {call}"
+
+    def test_high_score_anchors_the_prompt_to_launch(self):
+        from app.report_engine import _section_prompt
+        p = _section_prompt("verdict", "full", "business", viability_score=85)
+        assert "«запускать»" in p
+        assert "85 из 100" in p
+        assert "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" in p
+
+    def test_low_score_anchors_the_prompt_to_refusal(self):
+        from app.report_engine import _section_prompt
+        p = _section_prompt("verdict", "full", "business", viability_score=20)
+        assert "«не запускать в текущем виде»" in p
+
+    def test_anchor_forbids_softening_into_rework(self):
+        """Мало назвать вердикт — модель дописывала «но сначала доработайте»
+        и обнуляла его. Запрет должен стоять в самом промпте."""
+        from app.report_engine import _section_prompt
+        p = " ".join(_section_prompt("verdict", "full", "business",
+                                     viability_score=85).split())
+        assert "Не смягчай" in p
+        assert "подменяй его рекомендацией доработать" in p
+
+    def test_other_sections_get_no_verdict_anchor(self):
+        """Якорь принадлежит одному разделу. В «Рынке» он был бы шумом и
+        подталкивал бы модель выносить приговор не в своём разделе."""
+        from app.report_engine import _section_prompt
+        for key in ("market", "summary", "competitors"):
+            assert "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" not in _section_prompt(
+                key, "full", "business", viability_score=85)
+
+    def test_absent_score_leaves_prompt_unanchored(self):
+        """Старые покупки в БД лежат без балла рядом с разделами; они обязаны
+        продолжать генерироваться, просто без якоря."""
+        from app.report_engine import _section_prompt
+        assert "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" not in _section_prompt("verdict", "full", "business")
+
+    def test_score_reaches_the_model_through_generate_section(self):
+        from app.report_engine import generate_section
+        cap = {}
+        asyncio.run(generate_section(
+            "verdict", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            viability_score=88,
+            _post=_fake_llm(body="Запускать. Спрос подтверждён.", captured=cap)))
+        flat = " ".join(cap["instructions"].split())
+        assert "88 из 100" in flat and "«запускать»" in flat
+
+    def test_full_report_anchors_verdict_to_its_own_core_score(self):
+        """generate_report считает ядро первым — вердикт обязан опираться на
+        тот же балл, а не на второе независимое мнение модели."""
+        from app.report_engine import generate_report, _verdict_call
+        cap = {}
+        out = asyncio.run(generate_report(self.IDEA, DEMAND_DATA_FIXTURE, "quick",
+                                          _post=_fake_llm(captured=cap)))
+        expected = _verdict_call(out["viability_score"])
+        verdict_calls = [c for c in cap["calls"]
+                         if "Ты пишешь ОДИН раздел" in c.get("instructions", "")
+                         and "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" in c["instructions"]]
+        assert len(verdict_calls) == 1
+        assert f"«{expected}»" in verdict_calls[0]["instructions"]
+
+
+class TestLandingSpeaksHumanLanguage:
+    """Кастдев 2026-08-07, дословно: «Семь ступеней, которые нельзя
+    перепрыгнуть, и дальше каждая отвечает на один вопрос и только да
+    открывает следующую. Что за да? Что это за метафоры? Это очень плохо».
+
+    Заголовок и подписи витрины обязаны говорить про выгоду посетителя, а не
+    про нашу внутреннюю механику. Человек попадает на сайт со стороны и за
+    три секунды решает, его это или нет; метафора в этот момент — потеря."""
+
+    #: Формулировки, каждая из которых уже была на сайте и была забракована
+    #: владельцем. Тест сторожит от возврата, а не от абстрактного «плохого
+    #: текста»: судить о вкусе тест не может, а про эти строки решение есть.
+    BANNED = [
+        "Семь ступеней, которые нельзя перепрыгнуть",
+        "только «да» открывает следующую",
+        "Начнём с",
+    ]
+
+    def _pages(self):
+        return {"/": client.get("/").text,
+                "/social-contract": client.get("/social-contract").text}
+
+    def test_rejected_metaphors_are_gone_from_every_showcase(self):
+        for url, body in self._pages().items():
+            for phrase in self.BANNED:
+                assert phrase not in body, f"{url}: вернулась формулировка «{phrase}»"
+
+    def test_h1_names_the_benefit_not_our_first_step(self):
+        """«От идеи до денег» владельцу нравилось, «Начнём с проверки спроса»
+        — нет: посетителю не важно, с чего начинаем МЫ, важно, что получит
+        ОН. Проверяем, что в заголовке есть его выгода и его страх."""
+        h1 = re.search(r"<h1>(.*?)</h1>", client.get("/").text, re.S).group(1)
+        assert "нужна ли кому-то ваша идея" in h1
+        assert "вложите в неё деньги" in h1
+
+    def test_path_subtitle_says_what_is_free(self):
+        """Замена метафоры не должна просто убрать текст: подпись обязана
+        отвечать на вопрос «сколько это стоит», который у посетителя стоит
+        первым."""
+        body = client.get("/").text
+        assert "Первые два бесплатны" in body
+
+
+class TestPlanFirstPrimaryAction:
+    """G1 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у соцконтракта
+    главной кнопкой была проверка спроса, хотя человек пришёл ровно за
+    планом («сразу попал, сразу всё понял, нажал одну кнопку» — так
+    владелец описал витрину конкурента). plan_first в реестре аудиторий уже
+    существовал (app/audiences.py), но управлял только страницей /r/, а не
+    самой витриной, где выбор кнопки и происходит."""
+
+    def test_social_contract_makes_the_plan_button_primary(self):
+        t = client.get("/social-contract").text
+        assert '<button class="btn" id="plan-btn"' in t
+        assert '<button class="btn-ghost" id="check-btn"' in t
+
+    def test_social_contract_plan_button_comes_first_in_the_dom(self):
+        t = client.get("/social-contract").text
+        assert t.index('id="plan-btn"') < t.index('id="check-btn"')
+
+    def test_student_keeps_demand_check_as_the_primary_action(self):
+        """Студент не заказывает документ с порога — у него plan_first=False,
+        и обгона нет вовсе (нет fast_plan_label в реестре), проверяем, что
+        обычная кнопка проверки спроса осталась главной."""
+        t = client.get("/students").text
+        assert '<button class="btn" id="check-btn"' in t
+        assert 'id="plan-btn"' not in t
+
+    def test_home_page_unaffected(self):
+        """Главная не использует audience-landing.html — сторож от случайной
+        порчи чужого шаблона при редактировании этой функции."""
+        t = client.get("/").text
+        assert 'id="plan-btn"' not in t
+
+
+class TestSocialContractContextBlock:
+    """G2 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента блок
+    с суммами соцконтракта -- двигатель мотивации ("До 350 000 ₽...",
+    "требуется бизнес-план"), у нас его не было вовсе. Суммы проверены
+    2026-08-08 (kontur.ru, УБРиР, Sberbusiness): 350 000 ₽ на бизнес,
+    200 000 ₽ на ЛПХ, 30 000 ₽ на обучение -- совпадают у трёх независимых
+    источников."""
+
+    def test_block_present_on_social_contract(self):
+        t = client.get("/social-contract").text
+        assert "Что такое социальный контракт" in t
+        assert "350 000" in t
+        assert "200 000" in t
+        assert "30 000" in t
+
+    def test_block_explains_why_the_product_is_needed(self):
+        """Последняя строка -- ради неё весь блок: она объясняет, зачем
+        человеку наш продукт, а не просто пересказывает программу."""
+        t = client.get("/social-contract").text
+        assert "требуется бизнес-план" in t.lower() or "обязателен бизнес-план" in t.lower()
+
+    def test_amounts_are_capped_not_promised_exactly(self):
+        """Порядок подачи и суммы -- предмет регионального регулирования;
+        сайт не должен звучать так, будто гарантирует федеральную сумму
+        каждому регионально."""
+        t = client.get("/social-contract").text
+        assert "До 350 000" in t or "до 350 000" in t
+
+    def test_block_absent_for_other_audiences(self):
+        """context_block — данные только у social_contract; у остальных
+        аудиторий реестр его не задаёт, секция не должна появляться пустой
+        рамкой."""
+        for url in ("/", "/students"):
+            t = client.get(url).text
+            assert "Что такое социальный контракт" not in t
+
+    def test_block_sits_above_the_path_section(self):
+        """Ценностное объяснение -- первое, что видно после формы, а не
+        погребено под следующей секцией (above the fold, конверсионный
+        копирайтинг: ценность видна сразу, не после скролла мимо лишнего).
+
+        Заголовок следующей секции с 2026-08-08 (G1, остаток задачи) уже не
+        «Путь от идеи до денег» -- у /social-contract вместо семиэтапной
+        карты короткая «Как это работает» (см.
+        TestPlanFirstHidesIrrelevantSteps)."""
+        t = client.get("/social-contract").text
+        assert t.index("Что такое социальный контракт") < t.index("Как это работает")
+
+
+class TestPlanFirstSwitchMovesBelowTheFold:
+    """G1 (PRODUCT_ROADMAP, разбор соцплан.рф), последний кусок задачи:
+    переключатель «Вы к нам зачем» стоял первым под шапкой на КАЖДОЙ
+    витрине — лишнее решение до того, как человек увидел хоть какую-то
+    ценность (Baymard/NN·g: above-the-fold место — самому ценному
+    предложению, не навигационному выбору). F2 когда-то добавил его именно
+    наверх, чтобы избежать тупика витрины — сама навигация остаётся, просто
+    не ценой первого экрана у аудитории, которая пришла за готовым
+    документом."""
+
+    def test_social_contract_switch_is_not_above_the_hero(self):
+        t = client.get("/social-contract").text
+        h1_pos = t.index("<h1>")
+        switch_pos = t.index('class="aud-switch"')
+        assert switch_pos > h1_pos, "переключатель всё ещё стоит перед заголовком"
+
+    def test_social_contract_switch_sits_after_the_faq(self):
+        t = client.get("/social-contract").text
+        faq_pos = t.index("Частые вопросы")
+        switch_pos = t.index('class="aud-switch"')
+        assert switch_pos > faq_pos
+
+    def test_student_switch_still_leads_the_page(self):
+        """Без plan_first поведение не меняется — переключатель остаётся
+        первым, как было."""
+        t = client.get("/students").text
+        h1_pos = t.index("<h1>")
+        switch_pos = t.index('class="aud-switch"')
+        assert switch_pos < h1_pos
+
+    def test_switch_still_works_from_the_new_position(self):
+        """Перенос не должен молча сломать саму навигацию: переключатель
+        должен по-прежнему называть остальные аудитории и вести на главную."""
+        t = client.get("/social-contract").text
+        assert 'href="/"' in t
+        assert 'href="/students"' in t
+
+
+class TestPlanFirstHidesIrrelevantSteps:
+    """G1 (PRODUCT_ROADMAP, разбор соцплан.рф), последний кусок задачи:
+    семиэтапная карта Создателя (тест на реальных людях, заявки, продажи,
+    повторяемость, удержание) отношения к задаче plan_first-аудитории не
+    имеет — пять из семи шагов про рекламу, которую они не запускают.
+    Источник приёма — соцплан.рф: на её месте простое «Как это работает»
+    из трёх шагов (Опишите идею / Получите план / Скачайте), извлечено из
+    PDF владельца 2026-08-07."""
+
+    def test_social_contract_shows_the_short_flow_instead(self):
+        t = client.get("/social-contract").text
+        assert "Как это работает" in t
+        assert "Путь от идеи до денег" not in t
+        assert t.count('class="step"') == 3
+
+    def test_social_contract_drops_the_irrelevant_stages(self):
+        """Шаги про рекламный тест, заявки, повторные продажи и удержание
+        не относятся к задаче «получить документ для комиссии» — им тут
+        не место, это шум перед покупкой."""
+        t = client.get("/social-contract").text
+        for phrase in ("Тест на реальных людях", "Яндекс Директе", "Первые продажи",
+                       "Повторяемость", "Удержание"):
+            assert phrase not in t, phrase
+
+    def test_social_contract_drops_the_now_backwards_note(self):
+        """«Не готовы тратиться на рекламу?» предполагает, что реклама —
+        путь по умолчанию, а бизнес-план — альтернатива. Для plan_first это
+        уже перевёрнуто: сюда и приходят за планом сразу."""
+        t = client.get("/social-contract").text
+        assert "Не готовы тратиться на рекламу" not in t
+
+    def test_social_contract_keeps_the_honest_capability(self):
+        """Соцплан.рф обещает «Скачайте pdf/docx» — у нас такого ещё нет
+        (G3, не сделано). Три шага не должны тайком приписывать нам это."""
+        t = client.get("/social-contract").text
+        assert "Скачайте" not in t
+        assert "скачат" not in t.lower()
+
+    def test_social_contract_still_shows_all_four_prices(self):
+        """prices-note не входит в эту задачу — цены остаются как были,
+        чтобы не задеть test_prices_are_the_same_for_everyone заново."""
+        t = client.get("/social-contract").text
+        for price in ("990", "1490", "2990", "3990"):
+            assert price in t, price
+
+    def test_student_keeps_the_full_seven_step_map(self):
+        """Без plan_first поведение не менялось."""
+        t = client.get("/students").text
+        assert "Путь от идеи до денег" in t
+        assert "Как это работает" not in t
+        assert t.count('class="step"') == 7
+        assert "Не готовы тратиться на рекламу" in t
+
+
+class TestDocxExport:
+    """G3 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): конкурент прямо
+    продаёт «Скачайте pdf/docx(word)» — комиссии соцзащиты сдают документ, а
+    не ссылку на веб-страницу. «Скачать PDF» уже был (печать браузером),
+    .docx не было вовсе. python-docx, тот же принцип единого FastAPI-процесса,
+    что у всего проекта."""
+
+    def _paid(self, monkeypatch, *, tier="quick", contact="docx-buyer@example.com",
+             status="paid", complete=True, with_table=False):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        from app.report_engine import section_keys
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "пошив штор", "count": 1200}],
+                    "best_phrase": "пошив штор",
+                    "verdict": {"level": "niche", "text": "Нишевый спрос"},
+                    "competitors": {"found": 900, "top": []},
+                    "scores": [{"key": "demand", "label": "Спрос", "value": 6, "note": ""}],
+                    "overall": {"value": 6, "weakest": "Спрос", "basis": "Среднее"}}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": "Пошив штор на заказ на дому"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        client.post("/api/report", json={"check_id": rid, "tier": tier, "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = status
+            keys = section_keys(tier)
+            if complete:
+                sections = []
+                for k in keys:
+                    sec = {"key": k, "title": k, "body": "Абзац первый.\n\nАбзац второй."}
+                    if with_table and k == "finance":
+                        sec["table"] = {"caption": "Смета расходов", "rows": [
+                            {"item": "Аренда", "sum": 15000}, {"item": "Материалы", "sum": 10000}],
+                            "total": 25000}
+                    sections.append(sec)
+            else:
+                sections = [{"key": keys[0], "title": keys[0], "body": "Готово."}]
+            o.report_json = json.dumps({
+                "viability_score": 62, "viability_label": "Рабочий вариант, есть слабые места",
+                "viability_summary": "Причина именно такого балла.",
+                "top_risks": [{"title": "Риск конкуренции", "body": "Механика провала."}],
+                "sections": sections}, ensure_ascii=False)
+            s.add(o); s.commit()
+            # rid -- числовой id ПРОВЕРКИ СПРОСА (DemandCheck), не покупки:
+            # именно его берут report_section/report_docx (см. rid: int в
+            # ручках main.py) и __CHECK_ID__ на странице. Раньше здесь
+            # ошибочно возвращался o.id (id самой ReportPurchase) -- в
+            # изолированном прогоне только этого класса счётчики двух таблиц
+            # случайно совпадали (по одной строке каждой на тест), и баг был
+            # не виден; в общем прогоне тесты бы стабильно ловили чужую или
+            # несуществующую проверку.
+            pub = s.get(m.DemandCheck, rid).public_id
+            return rid, o.access_token, pub
+
+    def test_requires_payment(self, monkeypatch):
+        import app.main as m
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        monkeypatch.setattr(m, "check_demand", fake_check)
+        rid = client.post("/api/demand", json={"idea": "Идея без всякой оплаты вообще"}).json()["id"]
+        r = client.get(f"/api/report/{rid}/docx")
+        assert r.status_code == 403
+
+    def test_requires_the_right_access(self, monkeypatch):
+        """Ни ключа владельца, ни токена покупателя, ни сессии кабинета --
+        файл выдаёт куда больше пользы постороннему, чем один раздел на
+        экране, поэтому доступ не может быть слабее, чем у /section."""
+        rid, tok, pub = self._paid(monkeypatch, contact="rightful@example.com")
+        r = client.get(f"/api/report/{rid}/docx")
+        assert r.status_code == 403
+
+    def test_token_from_the_purchase_grants_access(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, contact="withtoken@example.com")
+        r = client.get(f"/api/report/{rid}/docx?t={tok}")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        assert "attachment" in r.headers["content-disposition"]
+        assert ".docx" in r.headers["content-disposition"]
+
+    def test_rejects_when_sections_are_not_all_ready(self, monkeypatch):
+        """Раздел один из пяти -- документ был бы честной сметой наполовину,
+        хотя оплачен целый тариф (тот же принцип, что у «Скачать PDF»,
+        см. test_pdf_button_waits_for_all_sections_not_just_the_first)."""
+        rid, tok, pub = self._paid(monkeypatch, contact="partial@example.com", complete=False)
+        r = client.get(f"/api/report/{rid}/docx?t={tok}")
+        assert r.status_code == 409
+
+    def test_document_contains_the_idea_score_and_sections(self, monkeypatch):
+        import io
+        from docx import Document
+        rid, tok, pub = self._paid(monkeypatch, contact="content@example.com")
+        r = client.get(f"/api/report/{rid}/docx?t={tok}")
+        assert r.status_code == 200
+        doc = Document(io.BytesIO(r.content))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Пошив штор на заказ на дому" in text
+        assert "62/100" in text
+        assert "Риск конкуренции" in text
+        assert "Абзац первый." in text
+
+    def test_finance_table_becomes_a_word_table(self, monkeypatch):
+        """D1/G6: смета построчно таблицей, не абзацем — тот же принцип, что
+        уже действует на экране (wants_table у finance), должен пережить
+        экспорт в файл, а не деградировать обратно в текст."""
+        import io
+        from docx import Document
+        rid, tok, pub = self._paid(monkeypatch, tier="full", contact="tablebuyer@example.com",
+                                   with_table=True)
+        r = client.get(f"/api/report/{rid}/docx?t={tok}")
+        assert r.status_code == 200
+        doc = Document(io.BytesIO(r.content))
+        assert doc.tables, "смета должна прийти таблицей, не абзацем"
+        cells = [c.text for row in doc.tables[0].rows for c in row.cells]
+        assert "Аренда" in cells and "15 000" in cells
+        assert "Итого" in cells and "25 000" in cells
+
+    def test_owner_can_preview_before_anyone_pays(self, monkeypatch):
+        """Владелец собирает любой тариф без оплаты -- тот же принцип, что у
+        /report/{id}?preview=full (иначе проверить качество .docx можно
+        только заплатив себе самому)."""
+        rid, tok, pub = self._paid(monkeypatch, contact="preview@example.com", status="preview")
+        r = client.get(f"/api/report/{rid}/docx?key=test-owner-key")
+        assert r.status_code == 200
+
+    def test_stranger_with_wrong_token_is_rejected(self, monkeypatch):
+        rid, tok, pub = self._paid(monkeypatch, contact="secret-owner@example.com")
+        r = client.get(f"/api/report/{rid}/docx?t=wrong-token-entirely")
+        assert r.status_code == 403
+
+    def test_report_page_carries_the_download_link_markup(self, monkeypatch):
+        """Кнопка должна физически быть на странице (JS её только показывает
+        и подставляет href, см. report.html render())."""
+        rid, tok, pub = self._paid(monkeypatch, contact="markup@example.com")
+        t = client.get(f"/report/{pub}?t={tok}").text
+        assert 'id="docx-link"' in t
+        assert "docxUrl" in t

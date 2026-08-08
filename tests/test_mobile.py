@@ -836,6 +836,33 @@ def test_pdf_button_waits_for_all_sections_not_just_the_first(site, browser):
         ctx.close()
 
 
+def test_docx_download_link_appears_alongside_pdf_and_actually_downloads(site, browser):
+    """G3 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): рядом со
+    «Скачать PDF» появляется «Скачать DOCX», href на неё подставляет
+    докстрипт (docxUrl()), а не голая заглушка «#». Тот же принцип, что и у
+    PDF-кнопки, — обе ждут, пока готовы ВСЕ разделы тарифа (см. предыдущий
+    тест), проверено одним и тем же сидом pdf_full. Разметку и href рисует
+    скрипт — смотрим глазами браузера, а не подстрокой в шаблоне."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_full']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        link = page.locator("#docx-link")
+        assert link.is_visible(), "DOCX-ссылка обязана появиться вместе с PDF-кнопкой"
+        href = link.get_attribute("href")
+        assert href and href != "#"
+        assert "/docx" in href and f"key={OWNER_KEY}" in href
+
+        resp = page.request.get(f"{site['base']}{href}")
+        assert resp.status == 200
+        assert resp.headers.get("content-type") == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        assert len(resp.body()) > 1000, "файл не должен быть пустой заглушкой"
+        _assert_clean(page, "отчёт с готовой ссылкой на DOCX")
+    finally:
+        ctx.close()
+
+
 def test_paid_project_is_not_labelled_as_just_an_idea(site, browser):
     """A13. Этап рисует скрипт по ответу сервера — подстроками не проверить.
     Человек, оплативший тест на людях, не должен видеть свой проект на

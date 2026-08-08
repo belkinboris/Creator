@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -67,6 +67,7 @@ from app.report_engine import (  # noqa: E402
 from app import audiences  # noqa: E402
 from app import payments  # noqa: E402
 from app import mailer  # noqa: E402
+from app.docx_export import build_docx  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sozdatel")
@@ -1436,10 +1437,15 @@ async def report_section(rid: int, request: Request, key: str):
         idea, tier, purpose = rec.idea, purchase.tier, rec.purpose
         chosen, purchase_id = _chosen_offer(rec), purchase.id
         demand_data = json.loads(rec.result_json)
+        # Балл уже посчитан ядром отчёта и лежит рядом с разделами. Раздел
+        # «Вердикт» без него скатывался в «доработать» на любой идее — см.
+        # report_engine._verdict_anchor.
+        score = stored.get("viability_score")
 
     try:
         section = await generate_section(key, idea, demand_data, tier,
-                                         chosen_offer=chosen, purpose=purpose)
+                                         chosen_offer=chosen, purpose=purpose,
+                                         viability_score=score)
     except ReportEngineError as e:
         # Сбой одного раздела не должен выглядеть как сбой всего отчёта:
         # остальные уже собраны и читаются.
@@ -1459,6 +1465,54 @@ async def report_section(rid: int, request: Request, key: str):
             fresh.report_json = json.dumps(data, ensure_ascii=False)
             s.add(fresh); s.commit()
     return {"ok": True, "section": section}
+
+
+@app.get("/api/report/{rid}/docx")
+def report_docx(rid: int, request: Request):
+    """Скачать бизнес-план файлом .docx.
+
+    G3 (PRODUCT_ROADMAP): PDF уже был («Скачать PDF» на report.html — печать
+    браузером), .docx не было вовсе — а комиссии соцзащиты сдают именно
+    редактируемый документ, не ссылку. Тот же контур доступа, что у
+    report_section: файл выдаёт куда больше пользы постороннему, чем один
+    раздел на экране, поэтому проверка не может быть слабее.
+
+    Отдаёт файл, только когда ВСЕ разделы тарифа уже сгенерированы --
+    неполный документ был бы честной сметой наполовину, а платили за целую.
+    """
+    owner = _is_owner(request)
+    with Session(engine) as s:
+        rec = s.get(DemandCheck, rid)
+        if not rec or not rec.result_json:
+            return JSONResponse({"ok": False, "error": "Проверка не найдена."}, status_code=404)
+        purchase = _best_report_purchase(s, rid, include_preview=owner)
+        if not purchase:
+            return JSONResponse({"ok": False, "error": "Файл доступен после оплаты."},
+                                status_code=403)
+        if not _report_access_ok(request, purchase):
+            return JSONResponse({"ok": False, "error": "Этот отчёт открывается по вашей ссылке "
+                                                       "или из личного кабинета."},
+                                status_code=403)
+        if not purchase.report_json:
+            return JSONResponse({"ok": False, "error": "Разбор ещё собирается, "
+                                                       "попробуйте через минуту."},
+                                status_code=409)
+        report_full = json.loads(purchase.report_json)
+        ready = {sec.get("key") for sec in report_full.get("sections", [])}
+        expected = set(section_keys(purchase.tier))
+        if ready != expected:
+            return JSONResponse({"ok": False, "error": "Не все разделы ещё готовы, "
+                                                       "обновите страницу и попробуйте снова."},
+                                status_code=409)
+        doc_title, _ = _doc_title_and_meta(purchase)
+        idea = rec.idea
+
+    data = build_docx(doc_title=doc_title, idea=idea, core=report_full,
+                      sections=report_full["sections"])
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="biznes-plan-{rid}.docx"'})
 
 
 @app.post("/api/example/publish")
@@ -2926,12 +2980,114 @@ def _audience_landing(key: str) -> str:
     faq = "".join(f'<div class="faq"><h3>{html.escape(q)}</h3>'
                   f"<p>{html.escape(ans)}</p></div>"
                   for q, ans in c.get("faq", []))
+    # G2 (PRODUCT_ROADMAP, разбор соцплан.рф): «что такое соцконтракт» с
+    # суммами -- у конкурента это первое, что объясняет ценность продукта,
+    # у нас не было вовсе. Задаётся в реестре (сейчас только у social_contract
+    # есть context_block), пустая секция у остальных аудиторий не рендерится.
+    context_block = c.get("context_block")
+    context_html = ""
+    if context_block:
+        items = "".join(
+            f'<div class="point"><span class="mark"></span><div>'
+            f"<h3>{html.escape(h3)}</h3><p>{html.escape(txt)}</p></div></div>"
+            for h3, txt in context_block.get("items", []))
+        context_html = (
+            f'<section class="band wrap"><h2>{html.escape(context_block["title"])}</h2>'
+            f'<p class="band-sub">{html.escape(context_block.get("sub", ""))}</p>'
+            f'{items}</section>')
+    # G1 (PRODUCT_ROADMAP, разбор соцплан.рф, остаток задачи): переключатель
+    # «Вы к нам зачем» стоял первым под шапкой на КАЖДОЙ витрине -- лишнее
+    # решение до того, как человек увидел хоть какую-то ценность (F2 когда-то
+    # добавил его именно наверх, чтобы витрина не была тупиком; сама навигация
+    # остаётся, снизу, а не наверху). У аудитории, которая пришла за готовым
+    # документом (plan_first), переключатель уезжает вниз страницы, после FAQ
+    # -- если человек всё же ошибся аудиторией, путь назад остаётся, просто
+    # не ценой первого экрана. У остальных аудиторий поведение не менялось.
+    switch_html = _audience_switch_html(a.key)
+    if a.plan_first:
+        switch_top, switch_bottom = "", f'<section class="band">{switch_html}</section>'
+    else:
+        switch_top, switch_bottom = switch_html, ""
+    # G1 (PRODUCT_ROADMAP, разбор соцплан.рф, последний кусок задачи):
+    # семиэтапная карта Создателя (тест на реальных людях, заявки, продажи,
+    # повторяемость, удержание) отношения к задаче plan_first-аудитории не
+    # имеет -- пять из семи шагов про рекламу, которую они не запускают.
+    # Соцплан.рф на её месте показывает три простых шага «Как это работает»
+    # (Опишите идею / Получите план / Скачайте) -- та же структура, честно
+    # под наши возможности: пока читают текст в браузере, не скачивают файл
+    # (скачивание -- G3, ещё не сделано). Цены (prices-note) не трогаем: она
+    # общая для обеих веток шаблона, менять её здесь не входит в эту задачу.
+    how_it_works = c.get("how_it_works")
+    if a.plan_first and how_it_works:
+        path_title = html.escape(how_it_works["title"])
+        path_sub = html.escape(how_it_works.get("sub", ""))
+        path_items = "".join(
+            f'<div class="step"><span class="n">{i}</span><div>'
+            f"<h3>{html.escape(h3)}</h3><p>{html.escape(txt)}</p></div></div>"
+            for i, (h3, txt) in enumerate(how_it_works.get("items", []), start=1))
+        path_note = ""
+    else:
+        path_title = "Путь от идеи до денег"
+        path_sub = ("Семь шагов от «кажется, идея неплохая» до первых денег. "
+                    "Первые два бесплатны — после них уже понятно, стоит ли "
+                    "вкладываться дальше.")
+        path_items = (
+            '<div class="step"><span class="n">1</span><div><h3>Идея '
+            '<span class="tag free-tag">бесплатно</span></h3><p>Формулируем, кому и чем '
+            'помогает продукт. Заостряем до предложения, за которое люди готовы платить.'
+            '</p></div></div>'
+            '<div class="step"><span class="n">2</span><div><h3>Спрос '
+            '<span class="tag free-tag">бесплатно</span></h3><p>Смотрим цифры Яндекса: '
+            'сколько людей ищут решение и какими словами. И кто уже в выдаче.</p></div></div>'
+            '<div class="step"><span class="n">3</span><div><h3>'
+            '<span class="hl">Тест на реальных людях</span></h3><p>Мы сами соберём вам '
+            'страницу под лучшую формулировку — дизайн, тексты, форма для заявок. Дальше '
+            'вы по нашей <a href="/guide/direct">пошаговой инструкции</a> запускаете '
+            'рекламу в Яндекс Директе — так узнаете, сколько реальных людей оставят заявку '
+            'на вашу идею.</p></div></div>'
+            '<div class="step"><span class="n">4</span><div><h3>Заявки</h3><p>Считаем, '
+            'сколько из зашедших оставили заявку. Больше __SIGNAL_PCT__ — идея живая, '
+            'меньше __DEAD_PCT__ — меняем предложение или аудиторию. Раньше '
+            '__CLICK_TARGET__ визитов не судим: меньше — ещё не статистика.</p></div></div>'
+            '<div class="step"><span class="n">5</span><div><h3>Первые продажи '
+            '<span class="tag future-tag">в Создателе 2.0</span></h3><p>Превращаем заявки '
+            'в деньги: цена, способ оплаты.</p></div></div>'
+            '<div class="step"><span class="n">6</span><div><h3>Повторяемость '
+            '<span class="tag future-tag">в Создателе 2.0</span></h3><p>Проверяем, что '
+            'продажи — не случайность: канал стабильно приводит клиентов по известной '
+            'цене.</p></div></div>'
+            '<div class="step"><span class="n">7</span><div><h3>Удержание '
+            '<span class="tag future-tag">в Создателе 2.0</span></h3><p>Клиенты '
+            'возвращаются и рекомендуют. Здесь идея становится бизнесом.</p></div></div>')
+        path_note = ('<p class="note"><b>Не готовы тратиться на рекламу?</b> После '
+                     'бесплатной проверки спроса можно сразу заказать разбор идеи с '
+                     'бизнес-планом — рынок, конкуренты, финансы, риски и план запуска, '
+                     'без теста на реальных людях.</p>')
     # Кнопка-обгон (F10): только у аудиторий, где она задана в реестре --
     # проверка спроса всё равно считается в фоне, ведёт сразу на /report/.
-    fast_plan_btn = (
-        f'<button class="btn-ghost" id="plan-btn" type="button">'
-        f'{html.escape(c["fast_plan_label"])}</button>'
-        if c.get("fast_plan_label") else "")
+    #
+    # G1 (PRODUCT_ROADMAP, разбор соцплан.рф): у аудиторий с plan_first=True
+    # человек пришёл именно за документом (соцплан.рф отдаёт план в одну
+    # кнопку с порога, без обязательного шага «сначала проверка спроса»).
+    # Раньше кнопка проверки спроса ВСЕГДА была тёмной/главной, а кнопка-обгон
+    # — второстепенной серой, даже когда именно она отвечает на запрос, с
+    # которым человек и пришёл. Акцент теперь решает plan_first, а не порядок
+    # объявления в шаблоне; проверка спроса никуда не девается, просто уступает
+    # главную кнопку тому действию, за которым реально пришли.
+    def _action_btn(id_: str, label: str, primary: bool) -> str:
+        cls = "btn" if primary else "btn-ghost"
+        return f'<button class="{cls}" id="{id_}" type="button">{html.escape(label)}</button>'
+
+    demand_label = "Проверить спрос — бесплатно"
+    plan_label = c.get("fast_plan_label", "")
+    if a.plan_first and plan_label:
+        action_buttons = (_action_btn("plan-btn", plan_label, primary=True) + "\n        "
+                          + _action_btn("check-btn", demand_label, primary=False))
+    elif plan_label:
+        action_buttons = (_action_btn("check-btn", demand_label, primary=True) + "\n        "
+                          + _action_btn("plan-btn", plan_label, primary=False))
+    else:
+        action_buttons = _action_btn("check-btn", demand_label, primary=True)
     page = (_static("audience-landing.html")
             .replace("__PAGE_TITLE__", html.escape(c.get("title", "Создатель")))
             .replace("__META__", html.escape(c.get("meta", "")))
@@ -2942,11 +3098,17 @@ def _audience_landing(key: str) -> str:
             .replace("__PROMISE_TITLE__", html.escape(c.get("promise_title", "")))
             .replace("__PROMISE_SUB__", html.escape(c.get("promise_sub", "")))
             .replace("__PROMISES__", promises)
+            .replace("__CONTEXT_BLOCK__", context_html)
+            .replace("__PATH_TITLE__", path_title)
+            .replace("__PATH_SUB__", path_sub)
+            .replace("__PATH_ITEMS__", path_items)
+            .replace("__PATH_NOTE__", path_note)
+            .replace("__AUDIENCE_SWITCH_TOP__", switch_top)
+            .replace("__AUDIENCE_SWITCH_BOTTOM__", switch_bottom)
             .replace("__QUICK_NOTE__", c.get("quick_note", ""))
             .replace("__FULL_NOTE__", c.get("full_note", ""))
             .replace("__FAQ__", faq)
-            .replace("__FAST_PLAN_BTN__", fast_plan_btn)
-            .replace("__AUDIENCE_SWITCH__", _audience_switch_html(a.key))
+            .replace("__ACTION_BUTTONS__", action_buttons)
             .replace("__AUDIENCE_KEY__", a.key))
     return _fill_server_values(page, a.key)
 
