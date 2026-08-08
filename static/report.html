@@ -663,8 +663,12 @@ if (document.getElementById('access-note')) {
 } else if (UNLOCKED_TIER === 'full') {
   pricing.style.display = 'none';
 } else if (UNLOCKED_TIER === 'quick') {
-  pricing.innerHTML = `<h3>Докупить <span class="hl">бизнес-план</span></h3>
-    <p>У вас тариф «__QUICK_LABEL__». «__FULL_LABEL__» добавляет аудиторию, финансовую модель, риски и план запуска.</p>
+  // «Докупить» подразумевало бы вычет уже заплаченного за быстрый разбор --
+  // report_order (app/main.py) берёт цену тарифа целиком, без скидки на
+  // предыдущую покупку. Слово обещало то, чего код не делает: тот же
+  // класс проблемы, который уже ловили на цифрах (G14) и цене (G8).
+  pricing.innerHTML = `<h3>Перейти на <span class="hl">бизнес-план</span></h3>
+    <p>У вас тариф «__QUICK_LABEL__». «__FULL_LABEL__» — отдельный тариф по полной цене: аудитория, финансовая модель, риски и план запуска в дополнение к тому, что уже есть.</p>
     <div class="tiers">${tierCard('full')}</div>
     <p class="terms-note">Отчёт формируется сразу после оплаты. Если собрать его не удалось — вернём деньги полностью. <a href="/oferta">Условия и возврат</a></p>
   <div class="contact-row"><input id="contact" placeholder="Почта или телефон — для чека"></div>

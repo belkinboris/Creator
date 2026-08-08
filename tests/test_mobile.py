@@ -1037,6 +1037,26 @@ def test_tier_cards_show_the_real_section_count(site, browser):
         ctx.close()
 
 
+def test_upgrade_offer_does_not_promise_a_discount_it_does_not_give(site, browser):
+    """Аудит воронки 2026-08-08: у покупателя, уже оплатившего «Быстрый
+    разбор», блок допродажи бизнес-плана назывался «Докупить» -- слово
+    прямо подразумевает вычет уже заплаченного (990 ₽). report_order
+    (app/main.py) берёт цену полного тарифа целиком, без скидки на
+    предыдущую покупку -- то есть страница обещала то, чего код не делает.
+    ids['pdf_full'] уже несёт оплаченный тариф quick -- открытие страницы
+    ведёт в ветку допродажи. Разметку строит скрипт -- подстрокой в
+    шаблоне не проверить."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_full']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(500)
+        heading = page.inner_text("#pricing-top h3")
+        assert "докуп" not in heading.lower(), heading
+        _assert_clean(page, "отчёт с честным заголовком допродажи бизнес-плана")
+    finally:
+        ctx.close()
+
+
 def test_two_kinds_of_tables_render_correctly_side_by_side(site, browser):
     """G6 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента
     таблиц несколько и они разные по смыслу -- смета деньгами и план
