@@ -3495,12 +3495,16 @@ class TestSocialContractPage:
         """Часть пункта 14 сырого фидбека владельца (2026-07-31): карта пути
         0->6 раньше была только на главной -- пришедший через рекламу на
         /social-contract или /students не видел общую картину сервиса.
-        Секция теперь общая (audience-landing.html), а не главная-only."""
-        for path in ("/social-contract", "/students"):
-            text = client.get(path).text
-            assert 'id="path"' in text, path
-            assert "Путь от идеи до денег" in text, path
-            assert text.count('class="step"') == 7, path
+        Секция теперь общая (audience-landing.html), а не главная-only.
+
+        /social-contract с 2026-08-08 (G1, остаток задачи) показывает не эту
+        карту, а свою короткую «Как это работает» -- см.
+        TestPlanFirstHidesIrrelevantSteps ниже. Здесь остаётся проверка
+        только для /students, у которой полная семиэтапная карта не менялась."""
+        text = client.get("/students").text
+        assert 'id="path"' in text
+        assert "Путь от идеи до денег" in text
+        assert text.count('class="step"') == 7
 
     def test_fast_plan_button_only_on_social_contract(self):
         """F10: кнопка-обгон «Сразу сделать бизнес-план» — только у
@@ -5365,6 +5369,7 @@ class TestNoHardcodedServerValuesInStatic:
             "__QUICK_NOTE__", "__FULL_NOTE__", "__FAQ__", "__AUDIENCE_KEY__",
             "__ACTION_BUTTONS__", "__CONTEXT_BLOCK__",
             "__AUDIENCE_SWITCH_TOP__", "__AUDIENCE_SWITCH_BOTTOM__",
+            "__PATH_TITLE__", "__PATH_SUB__", "__PATH_ITEMS__", "__PATH_NOTE__",
             # страница результата -- audiences.for_page / состояние проверки
             "__AUDIENCE_JSON__", "__RESUME__", "__CHOSEN_H1_JSON__",
             # страница подтверждения входа -- заполняет _verify_page
@@ -9417,12 +9422,17 @@ class TestSocialContractContextBlock:
             t = client.get(url).text
             assert "Что такое социальный контракт" not in t
 
-    def test_block_sits_above_the_seven_step_map(self):
+    def test_block_sits_above_the_path_section(self):
         """Ценностное объяснение -- первое, что видно после формы, а не
-        погребено под картой из семи этапов (above the fold, конверсионный
-        копирайтинг: ценность видна сразу, не после скролла мимо лишнего)."""
+        погребено под следующей секцией (above the fold, конверсионный
+        копирайтинг: ценность видна сразу, не после скролла мимо лишнего).
+
+        Заголовок следующей секции с 2026-08-08 (G1, остаток задачи) уже не
+        «Путь от идеи до денег» -- у /social-contract вместо семиэтапной
+        карты короткая «Как это работает» (см.
+        TestPlanFirstHidesIrrelevantSteps)."""
         t = client.get("/social-contract").text
-        assert t.index("Что такое социальный контракт") < t.index("Путь от идеи до денег")
+        assert t.index("Что такое социальный контракт") < t.index("Как это работает")
 
 
 class TestPlanFirstSwitchMovesBelowTheFold:
@@ -9461,3 +9471,57 @@ class TestPlanFirstSwitchMovesBelowTheFold:
         t = client.get("/social-contract").text
         assert 'href="/"' in t
         assert 'href="/students"' in t
+
+
+class TestPlanFirstHidesIrrelevantSteps:
+    """G1 (PRODUCT_ROADMAP, разбор соцплан.рф), последний кусок задачи:
+    семиэтапная карта Создателя (тест на реальных людях, заявки, продажи,
+    повторяемость, удержание) отношения к задаче plan_first-аудитории не
+    имеет — пять из семи шагов про рекламу, которую они не запускают.
+    Источник приёма — соцплан.рф: на её месте простое «Как это работает»
+    из трёх шагов (Опишите идею / Получите план / Скачайте), извлечено из
+    PDF владельца 2026-08-07."""
+
+    def test_social_contract_shows_the_short_flow_instead(self):
+        t = client.get("/social-contract").text
+        assert "Как это работает" in t
+        assert "Путь от идеи до денег" not in t
+        assert t.count('class="step"') == 3
+
+    def test_social_contract_drops_the_irrelevant_stages(self):
+        """Шаги про рекламный тест, заявки, повторные продажи и удержание
+        не относятся к задаче «получить документ для комиссии» — им тут
+        не место, это шум перед покупкой."""
+        t = client.get("/social-contract").text
+        for phrase in ("Тест на реальных людях", "Яндекс Директе", "Первые продажи",
+                       "Повторяемость", "Удержание"):
+            assert phrase not in t, phrase
+
+    def test_social_contract_drops_the_now_backwards_note(self):
+        """«Не готовы тратиться на рекламу?» предполагает, что реклама —
+        путь по умолчанию, а бизнес-план — альтернатива. Для plan_first это
+        уже перевёрнуто: сюда и приходят за планом сразу."""
+        t = client.get("/social-contract").text
+        assert "Не готовы тратиться на рекламу" not in t
+
+    def test_social_contract_keeps_the_honest_capability(self):
+        """Соцплан.рф обещает «Скачайте pdf/docx» — у нас такого ещё нет
+        (G3, не сделано). Три шага не должны тайком приписывать нам это."""
+        t = client.get("/social-contract").text
+        assert "Скачайте" not in t
+        assert "скачат" not in t.lower()
+
+    def test_social_contract_still_shows_all_four_prices(self):
+        """prices-note не входит в эту задачу — цены остаются как были,
+        чтобы не задеть test_prices_are_the_same_for_everyone заново."""
+        t = client.get("/social-contract").text
+        for price in ("990", "1490", "2990", "3990"):
+            assert price in t, price
+
+    def test_student_keeps_the_full_seven_step_map(self):
+        """Без plan_first поведение не менялось."""
+        t = client.get("/students").text
+        assert "Путь от идеи до денег" in t
+        assert "Как это работает" not in t
+        assert t.count('class="step"') == 7
+        assert "Не готовы тратиться на рекламу" in t

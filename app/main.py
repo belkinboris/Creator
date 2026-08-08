@@ -2959,6 +2959,61 @@ def _audience_landing(key: str) -> str:
         switch_top, switch_bottom = "", f'<section class="band">{switch_html}</section>'
     else:
         switch_top, switch_bottom = switch_html, ""
+    # G1 (PRODUCT_ROADMAP, разбор соцплан.рф, последний кусок задачи):
+    # семиэтапная карта Создателя (тест на реальных людях, заявки, продажи,
+    # повторяемость, удержание) отношения к задаче plan_first-аудитории не
+    # имеет -- пять из семи шагов про рекламу, которую они не запускают.
+    # Соцплан.рф на её месте показывает три простых шага «Как это работает»
+    # (Опишите идею / Получите план / Скачайте) -- та же структура, честно
+    # под наши возможности: пока читают текст в браузере, не скачивают файл
+    # (скачивание -- G3, ещё не сделано). Цены (prices-note) не трогаем: она
+    # общая для обеих веток шаблона, менять её здесь не входит в эту задачу.
+    how_it_works = c.get("how_it_works")
+    if a.plan_first and how_it_works:
+        path_title = html.escape(how_it_works["title"])
+        path_sub = html.escape(how_it_works.get("sub", ""))
+        path_items = "".join(
+            f'<div class="step"><span class="n">{i}</span><div>'
+            f"<h3>{html.escape(h3)}</h3><p>{html.escape(txt)}</p></div></div>"
+            for i, (h3, txt) in enumerate(how_it_works.get("items", []), start=1))
+        path_note = ""
+    else:
+        path_title = "Путь от идеи до денег"
+        path_sub = ("Семь шагов от «кажется, идея неплохая» до первых денег. "
+                    "Первые два бесплатны — после них уже понятно, стоит ли "
+                    "вкладываться дальше.")
+        path_items = (
+            '<div class="step"><span class="n">1</span><div><h3>Идея '
+            '<span class="tag free-tag">бесплатно</span></h3><p>Формулируем, кому и чем '
+            'помогает продукт. Заостряем до предложения, за которое люди готовы платить.'
+            '</p></div></div>'
+            '<div class="step"><span class="n">2</span><div><h3>Спрос '
+            '<span class="tag free-tag">бесплатно</span></h3><p>Смотрим цифры Яндекса: '
+            'сколько людей ищут решение и какими словами. И кто уже в выдаче.</p></div></div>'
+            '<div class="step"><span class="n">3</span><div><h3>'
+            '<span class="hl">Тест на реальных людях</span></h3><p>Мы сами соберём вам '
+            'страницу под лучшую формулировку — дизайн, тексты, форма для заявок. Дальше '
+            'вы по нашей <a href="/guide/direct">пошаговой инструкции</a> запускаете '
+            'рекламу в Яндекс Директе — так узнаете, сколько реальных людей оставят заявку '
+            'на вашу идею.</p></div></div>'
+            '<div class="step"><span class="n">4</span><div><h3>Заявки</h3><p>Считаем, '
+            'сколько из зашедших оставили заявку. Больше __SIGNAL_PCT__ — идея живая, '
+            'меньше __DEAD_PCT__ — меняем предложение или аудиторию. Раньше '
+            '__CLICK_TARGET__ визитов не судим: меньше — ещё не статистика.</p></div></div>'
+            '<div class="step"><span class="n">5</span><div><h3>Первые продажи '
+            '<span class="tag future-tag">в Создателе 2.0</span></h3><p>Превращаем заявки '
+            'в деньги: цена, способ оплаты.</p></div></div>'
+            '<div class="step"><span class="n">6</span><div><h3>Повторяемость '
+            '<span class="tag future-tag">в Создателе 2.0</span></h3><p>Проверяем, что '
+            'продажи — не случайность: канал стабильно приводит клиентов по известной '
+            'цене.</p></div></div>'
+            '<div class="step"><span class="n">7</span><div><h3>Удержание '
+            '<span class="tag future-tag">в Создателе 2.0</span></h3><p>Клиенты '
+            'возвращаются и рекомендуют. Здесь идея становится бизнесом.</p></div></div>')
+        path_note = ('<p class="note"><b>Не готовы тратиться на рекламу?</b> После '
+                     'бесплатной проверки спроса можно сразу заказать разбор идеи с '
+                     'бизнес-планом — рынок, конкуренты, финансы, риски и план запуска, '
+                     'без теста на реальных людях.</p>')
     # Кнопка-обгон (F10): только у аудиторий, где она задана в реестре --
     # проверка спроса всё равно считается в фоне, ведёт сразу на /report/.
     #
@@ -2995,6 +3050,10 @@ def _audience_landing(key: str) -> str:
             .replace("__PROMISE_SUB__", html.escape(c.get("promise_sub", "")))
             .replace("__PROMISES__", promises)
             .replace("__CONTEXT_BLOCK__", context_html)
+            .replace("__PATH_TITLE__", path_title)
+            .replace("__PATH_SUB__", path_sub)
+            .replace("__PATH_ITEMS__", path_items)
+            .replace("__PATH_NOTE__", path_note)
             .replace("__AUDIENCE_SWITCH_TOP__", switch_top)
             .replace("__AUDIENCE_SWITCH_BOTTOM__", switch_bottom)
             .replace("__QUICK_NOTE__", c.get("quick_note", ""))
