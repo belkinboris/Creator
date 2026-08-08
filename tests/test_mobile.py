@@ -243,6 +243,42 @@ with Session(engine) as s:
     s.commit()
     out["pdf_full"] = rec2.public_id
     s.commit()
+    # G6 (PRODUCT_ROADMAP): план запуска этапами -- второй вид таблицы,
+    # отдельно от денежной сметы (finance). Полный тариф с обеими таблицами
+    # на одной странице -- проверить, что они не путаются местами и обе
+    # умещаются на узком экране.
+    rec3 = DemandCheck(idea="Идея с полным разбором и двумя видами таблиц",
+                       best_count=1200, purpose="business",
+                       result_json=json.dumps(quick_partial, ensure_ascii=False))
+    s.add(rec3); s.commit(); s.refresh(rec3)
+    from app.report_engine import section_keys
+    full_keys = section_keys("full")
+    full_sections = [{"key": k, "title": k, "body": "Готовый раздел."} for k in full_keys]
+    for sec in full_sections:
+        if sec["key"] == "finance":
+            sec["table"] = {"kind": "money", "caption": "Смета расходов на старт",
+                            "rows": [{"item": "Фургон и оборудование", "sum": 290000},
+                                    {"item": "Аренда бокса на три месяца", "sum": 24000},
+                                    {"item": "Регистрация и реклама", "sum": 20000},
+                                    {"item": "Резерв на непредвиденные расходы", "sum": 16000}],
+                            "total": 350000}
+        elif sec["key"] == "launch":
+            sec["table"] = {"kind": "stages", "caption": "Этапы запуска",
+                            "rows": [{"stage": "Подготовительный", "what": "Регистрация ИП",
+                                     "deadline": "1-я неделя", "who": "Инициатор проекта"},
+                                    {"stage": "Закупочный", "what": "Покупка фургона и оборудования",
+                                     "deadline": "2-я — 3-я неделя", "who": "Инициатор проекта"},
+                                    {"stage": "Запуск", "what": "Первые заказы",
+                                     "deadline": "7-я — 8-я неделя", "who": "Инициатор проекта, мастер"}]}
+    s.add(ReportPurchase(check_id=rec3.id, idea=rec3.idea, tier="full", status="paid",
+                         contact="two-tables@example.com", amount=2990,
+                         report_json=json.dumps({
+                             "viability_score": 68, "viability_summary": "с",
+                             "top_risks": [{"title": "р", "body": "б"}],
+                             "sections": full_sections}, ensure_ascii=False)))
+    s.commit()
+    out["two_tables"] = rec3.public_id
+    s.commit()
 print(json.dumps(out))
 '''
     r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,
@@ -859,6 +895,39 @@ def test_docx_download_link_appears_alongside_pdf_and_actually_downloads(site, b
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         assert len(resp.body()) > 1000, "файл не должен быть пустой заглушкой"
         _assert_clean(page, "отчёт с готовой ссылкой на DOCX")
+    finally:
+        ctx.close()
+
+
+def test_two_kinds_of_tables_render_correctly_side_by_side(site, browser):
+    """G6 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента
+    таблиц несколько и они разные по смыслу -- смета деньгами и план
+    запуска этапами. tableHtml() в report.html различает их по полю kind;
+    подстрокой в шаблоне это не проверить, разметку строит скрипт.
+    Проверяем на узком экране (390px) -- у таблицы этапов 4 колонки, легче
+    всего переполниться именно там."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['two_tables']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        tables = page.locator("table.cost-table")
+        assert tables.count() == 2, f"ожидали смету и план запуска, нашли {tables.count()} таблиц"
+
+        money = page.locator("table.cost-table:not(.stages-table)")
+        assert "Смета расходов на старт" in money.locator("caption").inner_text()
+        money_rows = money.locator("tbody tr")
+        assert money_rows.count() == 4
+        tfoot_text = money.locator("tfoot").inner_text().replace("\xa0", " ")
+        assert "350 000" in tfoot_text, \
+            "итог обязан сойтись в сумму строк (290+24+20+16=350)"
+
+        stages = page.locator("table.stages-table")
+        headers = stages.locator("th").all_inner_texts()
+        assert headers == ["Этап", "Что сделать", "Срок", "Ответственный"]
+        assert "Регистрация ИП" in stages.inner_text()
+        assert "Итого" not in stages.inner_text()
+
+        _assert_clean(page, "отчёт с денежной таблицей и таблицей этапов")
     finally:
         ctx.close()
 

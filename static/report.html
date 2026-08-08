@@ -78,6 +78,11 @@
   .risk p{color:var(--muted);font-size:14px}
 
   .report-layout{display:grid;grid-template-columns:200px 1fr;gap:28px;margin-top:22px}
+  /* Виновник переполнения из G6: широкая таблица (4 колонки, nowrap в
+     заголовках) задаёт треку грида неявный min-width:auto по своему
+     min-content -- без явного 0 страница растягивается под таблицу вместо
+     того, чтобы таблица скроллилась в своём .table-scroll. */
+  .report-main{min-width:0}
   @media (max-width:720px){.report-layout{grid-template-columns:1fr}}
 
   .report-nav{position:sticky;top:18px;align-self:start}
@@ -111,6 +116,12 @@
   .cost-table td:first-child{color:var(--ink)}
   .cost-table td.sum{font:600 14px "IBM Plex Mono",monospace;text-align:right;white-space:nowrap}
   .cost-table tfoot td{border-top:1px solid var(--ink);font-weight:600}
+  .cost-table th{padding:8px 10px;border-top:1px solid var(--line);text-align:left;
+    font:600 12px "IBM Plex Sans";color:var(--muted);white-space:nowrap}
+  /* Таблица этапов -- 4 колонки, на узком экране шире 375px без переноса
+     не помещается (правило дизайн-системы: широкий контент скроллится в
+     своём контейнере, страница вбок -- нет). */
+  .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 
   /* Что осталось за пределами купленного тарифа -- одной строкой внизу
      документа, а не решетом из замазанных заголовков по всему тексту. */
@@ -231,7 +242,7 @@
       <div class="report-nav-label">Разделы отчёта</div>
       <ul id="section-nav"></ul>
     </aside>
-    <div>
+    <div class="report-main">
       <div id="sections"></div>
     </div>
   </div>
@@ -396,17 +407,29 @@ function inTier(key){ return TIER_KEYS.indexOf(key) !== -1; }
 // Внутри оплаченного отчёта чужой тариф сворачивается в одну строку внизу.
 const PAID = TIER_KEYS.length > 0;
 
-// Смета построчно (F: соц-план.рф, владелец 2026-08-02) -- не у каждого
+// Таблица построчно (F: соц-план.рф, владелец 2026-08-02) -- не у каждого
 // раздела есть table, только у тех, где wants_table (см. report_engine.py).
+// G6 (PRODUCT_ROADMAP): два вида -- смета деньгами (money) и план запуска
+// этапами (stages), различаются столбцами и наличием итога.
 function tableHtml(t){
   if (!t || !t.rows || !t.rows.length) return '';
+  if (t.kind === 'stages') {
+    const rows = t.rows.map(r => `
+        <tr><td>${escapeHtml(r.stage)}</td><td>${escapeHtml(r.what)}</td>
+        <td>${escapeHtml(r.deadline || '—')}</td><td>${escapeHtml(r.who || '—')}</td></tr>`).join('');
+    return `<div class="table-scroll"><table class="cost-table stages-table">
+      <caption>${escapeHtml(t.caption || 'Этапы запуска')}</caption>
+      <thead><tr><th>Этап</th><th>Что сделать</th><th>Срок</th><th>Ответственный</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+  }
   const rows = t.rows.map(r => `
       <tr><td>${escapeHtml(r.item)}</td><td class="sum">${fmt(r.sum)} ₽</td></tr>`).join('');
-  return `<table class="cost-table">
+  return `<div class="table-scroll"><table class="cost-table">
     <caption>${escapeHtml(t.caption || 'Смета')}</caption>
     <tbody>${rows}</tbody>
     <tfoot><tr><td>Итого</td><td class="sum">${fmt(t.total)} ₽</td></tr></tfoot>
-  </table>`;
+  </table></div>`;
 }
 
 function sectionHtml(s){

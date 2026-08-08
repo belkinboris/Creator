@@ -9846,3 +9846,111 @@ class TestNotifyWhenReportIsReady:
         assert 'id="notify-row"' in t
         assert 'id="notify-btn"' in t
         assert "notify-me" in t
+
+
+class TestRicherTables:
+    """G6 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента
+    таблиц несколько и они разные по смыслу — смета деньгами и план
+    запуска этапами. У нас была только денежная форма, зашитая под
+    finance. Отдельно: их смета сходится в 350 000 ₽ РОВНО (290+24+20+16) —
+    комиссия проверяет именно это, и такая арифметика должна быть
+    требованием промпта, а не удачей."""
+
+    IDEA = "Мобильный шиномонтаж с выездом на дом"
+
+    def test_money_total_is_always_computed_not_trusted(self):
+        """Модель может ошибиться в арифметике (или соврать). Раньше её
+        число total подставлялось как есть, если оно вообще было числом —
+        сходимость сметы была везением. Теперь итог считает код."""
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "finance", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="Смета: аренда 15 000 ₽, материалы 10 000 ₽.",
+                            table={"caption": "Смета", "rows": [
+                                {"item": "Аренда", "sum": 15000},
+                                {"item": "Материалы", "sum": 10000}],
+                                "total": 999999})))  # модель ошиблась в итоге
+        assert out["table"]["total"] == 25000
+        assert out["table"]["kind"] == "money"
+
+    def test_launch_gets_a_stages_table(self):
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "launch", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="План запуска по неделям.",
+                            table={"caption": "Этапы запуска", "rows": [
+                                {"stage": "Подготовительный", "what": "Регистрация ИП",
+                                 "deadline": "1-я неделя", "who": "Инициатор проекта"},
+                                {"stage": "Закупочный", "what": "Покупка оборудования",
+                                 "deadline": "2-я неделя", "who": "Инициатор проекта"}]})))
+        assert out["table"]["kind"] == "stages"
+        assert out["table"]["rows"][0]["stage"] == "Подготовительный"
+        assert out["table"]["rows"][0]["what"] == "Регистрация ИП"
+        assert out["table"]["rows"][0]["deadline"] == "1-я неделя"
+
+    def test_stages_table_has_no_fake_total(self):
+        """Таблица этапов не про деньги -- у неё не должно появляться поле
+        total, даже случайно унаследованное от денежной формы."""
+        from app.report_engine import generate_section, PURPOSE_BUSINESS
+        out = asyncio.run(generate_section(
+            "launch", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_BUSINESS,
+            _post=_fake_llm(body="План запуска.",
+                            table={"rows": [{"stage": "А", "what": "Б"}]})))
+        assert "total" not in out["table"]
+
+    def test_missing_stages_table_is_not_fatal_even_for_social_contract(self):
+        """Денежная таблица (finance) обязательна для estimate_required —
+        план этапами полезен, но раздел не про деньги, и без таблицы body
+        всё ещё полный ответ на вопрос раздела."""
+        from app.report_engine import generate_section, PURPOSE_SOCIAL_CONTRACT
+        out = asyncio.run(generate_section(
+            "launch", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            purpose=PURPOSE_SOCIAL_CONTRACT,
+            _post=_fake_llm(body="План запуска текстом, без таблицы.")))
+        assert "table" not in out
+        assert out["body"]
+
+    def test_launch_prompt_asks_for_stages_not_money(self):
+        from app.report_engine import _section_prompt
+        p = _section_prompt("launch", "full", "business")
+        assert "stage" in p and "deadline" in p
+        assert '"sum"' not in p
+
+    def test_finance_prompt_still_asks_for_money(self):
+        from app.report_engine import _section_prompt
+        p = _section_prompt("finance", "full", "business")
+        assert '"sum"' in p
+        assert "stage" not in p
+
+
+class TestStagesTableInDocx:
+    """G6: план запуска этапами должен пережить экспорт в .docx таблицей
+    с колонками этап/что сделать/срок/ответственный, не деградировать в
+    денежную форму и не потерять данные."""
+
+    def test_stages_table_renders_with_its_own_columns(self):
+        import io
+        from docx import Document
+        from app.docx_export import build_docx
+        data = build_docx(
+            doc_title="Бизнес-план", idea="Мобильный шиномонтаж",
+            core={"viability_score": 70, "viability_summary": "с", "top_risks": []},
+            sections=[{"key": "launch", "title": "План запуска", "body": "Текст плана.",
+                      "table": {"kind": "stages", "caption": "Этапы запуска", "rows": [
+                          {"stage": "Подготовительный", "what": "Регистрация ИП",
+                           "deadline": "1-я неделя", "who": "Инициатор проекта"},
+                          {"stage": "Закупочный", "what": "Покупка оборудования",
+                           "deadline": "2-я неделя", "who": "Инициатор проекта"}]}}])
+        doc = Document(io.BytesIO(data))
+        assert doc.tables, "план запуска должен прийти таблицей"
+        t = doc.tables[0]
+        header = [c.text for c in t.rows[0].cells]
+        assert header == ["Этап", "Что сделать", "Срок", "Ответственный"]
+        body_cells = [c.text for row in t.rows[1:] for c in row.cells]
+        assert "Подготовительный" in body_cells
+        assert "Регистрация ИП" in body_cells
+        assert "1-я неделя" in body_cells
+        assert "Итого" not in [c.text for c in t.rows[-1].cells]

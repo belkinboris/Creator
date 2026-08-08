@@ -31,6 +31,9 @@ def _add_body_paragraphs(doc: Document, body: str) -> None:
 
 
 def _add_table(doc: Document, table: dict) -> None:
+    """Два вида таблиц -- смета деньгами (money) и план запуска этапами
+    (stages), см. table_kind в report_engine.SECTION_SPECS (G6,
+    PRODUCT_ROADMAP). Разные столбцы, у stages нет строки «Итого»."""
     rows = table.get("rows") or []
     if not rows:
         return
@@ -38,6 +41,19 @@ def _add_table(doc: Document, table: dict) -> None:
     if caption:
         p = doc.add_paragraph()
         p.add_run(str(caption)).bold = True
+    if table.get("kind") == "stages":
+        t = doc.add_table(rows=1, cols=4)
+        t.style = "Light Grid Accent 1"
+        hdr = t.rows[0].cells
+        hdr[0].text, hdr[1].text, hdr[2].text, hdr[3].text = (
+            "Этап", "Что сделать", "Срок", "Ответственный")
+        for row in rows:
+            cells = t.add_row().cells
+            cells[0].text = str(row.get("stage", ""))
+            cells[1].text = str(row.get("what", ""))
+            cells[2].text = str(row.get("deadline", "") or "—")
+            cells[3].text = str(row.get("who", "") or "—")
+        return
     t = doc.add_table(rows=1, cols=2)
     t.style = "Light Grid Accent 1"
     hdr = t.rows[0].cells
