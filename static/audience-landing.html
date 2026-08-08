@@ -71,6 +71,9 @@
   .fine{color:var(--muted);font-size:13px}
   .err{display:none;margin-top:10px;color:#B23A3A;font-size:15px}
   .err.show{display:block}
+  .social-proof{margin-top:14px;font-size:14px;color:var(--muted)}
+  .social-proof b{color:var(--ink);font:600 15px "IBM Plex Mono",monospace;font-weight:600;
+    background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
 
   section.band{border-top:1px solid var(--line);padding-top:34px;padding-bottom:30px}
   h2{font-size:22px;font-weight:600;letter-spacing:-.01em;margin-bottom:6px}
@@ -150,6 +153,7 @@
       </div>
       <p class="err" id="err" role="alert"></p>
     </div>
+    <p class="social-proof" id="social-proof"></p>
   </section>
 
   __CONTEXT_BLOCK__
@@ -215,6 +219,26 @@ const ideaEl = document.getElementById('idea');
 const errEl = document.getElementById('err');
 
 function showErr(msg){ errEl.textContent = msg; errEl.classList.add('show'); }
+
+// G7 (PRODUCT_ROADMAP, разбор соцплан.рф): «74 отзыва • 4.6/5» на каждой
+// странице конкурента, у нас — вообще ничего на этих двух витринах (счётчик
+// был только на главной). Живая цифра из БД, не выдуманная (тот же принцип,
+// что и на главной): честный ноль лучше нечестной звезды. Для аудитории,
+// пришедшей за документом (plan_first), уместнее число собранных планов, а
+// не проверок идей — она ближе к оплате, и это её реальный вопрос «а вообще
+// у вас покупают?». Порог ниже, чем у ideas_checked (100): платных решений
+// объективно на порядок меньше бесплатных проверок, и высокий порог не
+// показал бы честную цифру ещё очень долго.
+function fmt(n){ return n.toLocaleString('ru-RU'); }
+fetch('/api/stats').then(r => r.json()).then(d => {
+  const el = document.getElementById('social-proof');
+  if (!el) return;
+  if (AUDIENCE === 'social_contract' && d.plans_delivered >= 20) {
+    el.innerHTML = `Уже собрали <b>${fmt(d.plans_delivered)}</b> бизнес-планов`;
+  } else if (AUDIENCE !== 'social_contract' && d.ideas_checked >= 100) {
+    el.innerHTML = `Уже проверили <b>${fmt(d.ideas_checked)}</b> идей`;
+  }
+}).catch(() => {});
 
 // Кнопка «Сразу сделать бизнес-план» (соцконтракт, F10) ведёт на тот же
 // /api/demand -- проверка спроса идёт в фоне как обычно, цифры Вордстата

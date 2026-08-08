@@ -9670,3 +9670,62 @@ class TestDocxExport:
         t = client.get(f"/report/{pub}?t={tok}").text
         assert 'id="docx-link"' in t
         assert "docxUrl" in t
+
+
+class TestPlansDeliveredSocialProof:
+    """G7 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): «74 отзыва •
+    4.6/5» у конкурента на каждой странице, у нас счётчик был только на
+    главной («уже проверили N идей») и вообще отсутствовал на
+    /social-contract и /students. Честного числа отзывов у нас нет, значит
+    не выдумываем — показываем реально измеримое: для аудитории, пришедшей
+    за документом, это число собранных планов, а не проверок идей."""
+
+    def _make_purchase(self, contact, *, status="paid", delivered=True):
+        import app.main as m
+        from app.main import ReportPurchase, Session, engine, select
+        async def fake_check(idea):
+            return {"formulations": [{"phrase": "а", "count": 10}], "best_phrase": "а",
+                    "verdict": {"level": "weak", "text": ""},
+                    "competitors": {"found": None, "top": []}, "scores": [], "overall": None}
+        orig = m.check_demand
+        m.check_demand = fake_check
+        try:
+            rid = client.post("/api/demand", json={"idea": f"Идея для {contact}"}).json()["id"]
+        finally:
+            m.check_demand = orig
+        client.post("/api/report", json={"check_id": rid, "tier": "quick", "contact": contact})
+        with Session(engine) as s:
+            o = s.exec(select(ReportPurchase).where(ReportPurchase.contact == contact)).first()
+            o.status = status
+            if delivered:
+                o.report_json = json.dumps({"viability_score": 50, "viability_summary": "с",
+                                           "top_risks": [], "sections": []}, ensure_ascii=False)
+            s.add(o); s.commit()
+
+    def test_counts_only_paid_and_delivered(self):
+        """Оплата без доставленного разбора (A1 -- генерация сорвалась) не
+        должна попадать в цифру, которую сайт показывает как доказательство,
+        что у нас покупают И получают."""
+        before = client.get("/api/stats").json()["plans_delivered"]
+        self._make_purchase("proof-paid-delivered@example.com", status="paid", delivered=True)
+        self._make_purchase("proof-paid-failed@example.com", status="paid", delivered=False)
+        self._make_purchase("proof-not-paid@example.com", status="pending_payment", delivered=True)
+        after = client.get("/api/stats").json()["plans_delivered"]
+        assert after == before + 1
+
+    def test_social_proof_element_present_on_all_three_showcases(self):
+        for url in ("/", "/social-contract", "/students"):
+            assert 'id="social-proof"' in client.get(url).text, url
+
+    def test_social_contract_shows_plans_not_ideas(self):
+        """plan_first-аудитория ближе к оплате -- её вопрос «а вообще у вас
+        покупают», не «сколько идей проверили»."""
+        t = client.get("/social-contract").text
+        assert "plans_delivered" in t
+        assert "Уже собрали" in t
+
+    def test_other_showcases_keep_the_ideas_counter(self):
+        for url in ("/", "/students"):
+            t = client.get(url).text
+            assert "ideas_checked" in t
+            assert "Уже проверили" in t

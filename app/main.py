@@ -1818,11 +1818,22 @@ def orders_list(request: Request):
 
 @app.get("/api/stats")
 def public_stats():
-    """Живые цифры для главной. Только честные счётчики из БД."""
+    """Живые цифры для витрин. Только честные счётчики из БД.
+
+    G7 (PRODUCT_ROADMAP, разбор соцплан.рф): «74 отзыва • 4.6/5» у
+    конкурента на каждой странице -- у нас честного числа отзывов нет
+    вовсе, выдумывать его нельзя (принцип 3). plans_delivered считает не
+    оплаты, а РЕАЛЬНО доставленные разборы (report_json заполнен) -- иначе
+    сорвавшаяся генерация (A1) попала бы в цифру, которую сайт показывает
+    как доказательство, что у нас покупают и получают.
+    """
     with Session(engine) as s:
         ideas = len(s.exec(select(DemandCheck)).all())
         events = len(s.exec(select(SmokeEvent)).all())
-    return {"ideas_checked": ideas, "events": events}
+        plans = len(s.exec(select(ReportPurchase).where(
+            ReportPurchase.status == "paid",
+            ReportPurchase.report_json != "")).all())
+    return {"ideas_checked": ideas, "events": events, "plans_delivered": plans}
 
 
 @app.get("/api/funnel")
