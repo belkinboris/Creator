@@ -635,10 +635,23 @@ if (GEN_ERROR) {
 const pricing = document.getElementById('pricing-top');
 function tierCard(key){
   const t = PRICES[key];
+  // Число разделов считаем от QUICK_KEYS/SECTIONS, а не пишем руками --
+  // тот же урок, что уже стоит в upsellHtml(): набор секций уже менялся, и
+  // здесь оно молча разъехалось («4 раздела» при пяти в QUICK_KEYS, «8» при
+  // 21 в полном тарифе — то есть карточка занижала ценность «бизнес-плана»
+  // почти в три раза именно в момент решения платить). Слова-примеры
+  // оставлены короткими, «и другое» честно говорит, что список не полный.
+  const n = key === 'quick' ? QUICK_KEYS.length : SECTIONS.length;
+  const noun = plural(n, key === 'quick' ? 'ключевой раздел' : 'раздел',
+                      key === 'quick' ? 'ключевых раздела' : 'раздела',
+                      key === 'quick' ? 'ключевых разделов' : 'разделов');
+  const desc = key === 'quick'
+    ? `${n} ${noun}: резюме, рынок, конкуренты, вердикт и другое`
+    : `Все ${n} ${noun}: аудитория, финансы, риски, план запуска и другое`;
   return `<div class="tier">
     <div class="name">${escapeHtml(t.label)}</div>
     <div><span class="price">${fmt(t.price)} ₽</span></div>
-    <div class="desc">${key === 'quick' ? '4 ключевых раздела: резюме, рынок, конкуренты, вердикт' : 'Все 8 разделов: + аудитория, финансы, риски, план запуска'}</div>
+    <div class="desc">${escapeHtml(desc)}</div>
     <button class="btn" type="button" onclick="order('${key}', this)">Получить отчёт</button>
   </div>`;
 }

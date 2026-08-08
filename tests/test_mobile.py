@@ -1014,6 +1014,29 @@ def test_generation_failure_reminds_the_paying_customer_about_the_refund(site, b
         ctx.close()
 
 
+def test_tier_cards_show_the_real_section_count(site, browser):
+    """Аудит воронки 2026-08-08: карточки тарифов на report.html писали
+    число разделов вручную -- «4 ключевых раздела» и «Все 8 разделов» --
+    хотя QUICK_KEYS (app/report_engine.py) даёт 5, а полный тариф — 21.
+    Карточка занижала ценность бизнес-плана почти в три раза именно в
+    момент решения платить. Разметку строит скрипт (tierCard()), числа
+    не в статическом HTML -- подстрокой в шаблоне не проверить."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['weak']}")
+    try:
+        page.wait_for_timeout(400)
+        descs = page.locator(".tier .desc").all_inner_texts()
+        assert len(descs) == 2
+        quick_n = page.evaluate("QUICK_KEYS.length")
+        full_n = page.evaluate("SECTIONS.length")
+        assert full_n > quick_n > 0, (quick_n, full_n)
+        assert str(quick_n) in descs[0], descs[0]
+        assert str(full_n) in descs[1], descs[1]
+        _assert_clean(page, "отчёт с точным числом разделов в карточках тарифов")
+    finally:
+        ctx.close()
+
+
 def test_two_kinds_of_tables_render_correctly_side_by_side(site, browser):
     """G6 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента
     таблиц несколько и они разные по смыслу -- смета деньгами и план
