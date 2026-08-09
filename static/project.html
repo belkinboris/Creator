@@ -231,6 +231,13 @@ async function load(){
   rate.textContent = d.views ? Math.round(d.leads/d.views*100)+"%" : "—";
   verdict.textContent = d.verdict;
   verdict.className = "verdict-line " + (VERDICT_CLASS[d.verdict] || "");
+  // #nextline держал статичный текст «наберите визиты» даже после того, как
+  // цель уже набрана и вердикт вынесен -- покупатель, у которого визитов
+  // уже больше цели и «СИГНАЛ ЕСТЬ» видно строкой ниже, всё равно читал
+  // «наберите визиты… вердикт вынесется автоматически», хотя он уже
+  // вынесен. compute_verdict (app/main.py) уже
+  // объясняет текущее состояние словами в d.detail -- просто не был подключён.
+  if (d.detail) document.getElementById("nextline").textContent = d.detail;
   const url = location.origin + d.landing_url;
   landlink.href = d.landing_url;
   fullurl.textContent = url + d.direct_utm;

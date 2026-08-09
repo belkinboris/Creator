@@ -602,6 +602,27 @@ def test_project_page_fits_narrow_screen(site, browser):
         ctx.close()
 
 
+def test_project_page_next_step_text_updates_once_the_target_is_reached(site, browser):
+    """Аудит воронки 2026-08-08: карточка «Цель этапа» держала статичный
+    текст «Чтобы перейти дальше, наберите визиты… вердикт вынесется
+    автоматически» (#nextline в static/project.html) — JS никогда его не
+    трогал. sweep1 (52 визита, цель 40, 3 заявки) уже прошёл цель и получил
+    «СИГНАЛ ЕСТЬ» строкой ниже, а прямо над ней покупатель всё ещё читал
+    «наберите визиты», хотя цель уже набрана. compute_verdict (app/main.py)
+    уже кладёт человеческое объяснение текущего состояния в d.detail —
+    просто не был подключён. Разметку и текст обновляет скрипт по фетчу
+    /api/verdict/{id} -- подстрокой в шаблоне не проверить."""
+    ctx, page = _open(browser, f"{site['base']}/p/sweep1?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        next_text = page.inner_text("#nextline")
+        assert "наберите визиты" not in next_text.lower(), next_text
+        assert "52" in next_text and "3 заявк" in next_text, next_text
+        _assert_clean(page, "страница проекта с актуальным текстом цели этапа")
+    finally:
+        ctx.close()
+
+
 def test_owner_desk_fits_narrow_screen(site, browser):
     ctx, page = _open(browser, f"{site['base']}/desk?key={OWNER_KEY}")
     try:
