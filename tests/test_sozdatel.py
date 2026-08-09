@@ -5700,29 +5700,46 @@ class TestPublicReportExample:
         other = self._check()
         assert 'href="/example"' in client.get(f"/r/{pub(other)}").text
 
-    def test_examples_do_not_leak_across_audiences(self, monkeypatch):
-        """Пример собран под одну оптику (business) -- показывать его как
-        «вот что вы получите» соцконтракту или студенту обещает не ту оптику,
-        что мы реально отдадим по их заявке (принцип 4). Раньше пример был
-        виден на любой витрине, у которой есть слот __EXAMPLE_LINK__."""
+    def test_examples_are_labelled_honestly_across_audiences(self, monkeypatch):
+        """G4 (PRODUCT_ROADMAP, узкая находка внутри разбора соцплан.рф):
+        пример собран под одну оптику (business) -- показывать его как
+        «вот что вы получите» соцконтракту или студенту обещает не ту
+        оптику, что мы реально отдадим по их заявке (принцип 4). Но раньше
+        ссылка на других витринах молчала вовсе -- то есть посетитель не
+        видел НИКАКОГО примера, хотя настоящий готовый отчёт уже
+        существует, а владелец отдельно называл отсутствие примера
+        блокером доверия. Честнее показать реальный отчёт с оговоркой про
+        другую задачу, чем не показать ничего."""
         self._clear_examples()
         rid = self._built_report(monkeypatch)
         client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
-        assert 'href="/example"' not in client.get("/social-contract").text
-        assert 'href="/example"' not in client.get("/students").text
+        for url in ("/social-contract", "/students"):
+            text = client.get(url).text
+            assert 'href="/example"' in text, url
+            assert "собран для другой задачи" in text, url
         soc_check = self._check("social_contract")
-        assert 'href="/example"' not in client.get(f"/r/{pub(soc_check)}").text
+        r_text = client.get(f"/r/{pub(soc_check)}").text
+        assert 'href="/example"' in r_text
+        assert "собран для другой задачи" in r_text
 
-    def test_example_link_appears_for_its_own_audience(self, monkeypatch):
-        """Пример, собранный под соцконтракт, виден именно на витрине
-        соцконтракта -- а не фаундера или студента."""
+    def test_example_link_carries_no_mismatch_note_for_its_own_audience(self, monkeypatch):
+        """Пример, собранный под соцконтракт, виден на витрине соцконтракта
+        БЕЗ оговорки про чужую задачу -- она нужна только когда оптика
+        реально не совпадает."""
         self._clear_examples()
         rid = self._built_report(monkeypatch, purpose="social_contract")
         client.post(f"/api/example/publish?check_id={rid}&tier=full", headers=OWNER)
-        assert 'href="/example"' in client.get("/social-contract").text
-        assert 'href="/example"' not in client.get("/students").text
+        own_text = client.get("/social-contract").text
+        assert 'href="/example"' in own_text
+        assert "собран для другой задачи" not in own_text
+        for url in ("/students",):
+            other_text = client.get(url).text
+            assert 'href="/example"' in other_text, url
+            assert "собран для другой задачи" in other_text, url
         biz_check = self._check()
-        assert 'href="/example"' not in client.get(f"/r/{pub(biz_check)}").text
+        biz_text = client.get(f"/r/{pub(biz_check)}").text
+        assert 'href="/example"' in biz_text
+        assert "собран для другой задачи" in biz_text
 
     def test_only_the_owner_can_publish(self, monkeypatch):
         self._clear_examples()
