@@ -243,6 +243,56 @@ with Session(engine) as s:
     s.commit()
     out["pdf_full"] = rec2.public_id
     s.commit()
+    # G6 (PRODUCT_ROADMAP): план запуска этапами -- второй вид таблицы,
+    # отдельно от денежной сметы (finance). Полный тариф с обеими таблицами
+    # на одной странице -- проверить, что они не путаются местами и обе
+    # умещаются на узком экране.
+    rec3 = DemandCheck(idea="Идея с полным разбором и двумя видами таблиц",
+                       best_count=1200, purpose="business",
+                       result_json=json.dumps(quick_partial, ensure_ascii=False))
+    s.add(rec3); s.commit(); s.refresh(rec3)
+    from app.report_engine import section_keys
+    full_keys = section_keys("full")
+    full_sections = [{"key": k, "title": k, "body": "Готовый раздел."} for k in full_keys]
+    for sec in full_sections:
+        if sec["key"] == "finance":
+            sec["table"] = {"kind": "money", "caption": "Смета расходов на старт",
+                            "rows": [{"item": "Фургон и оборудование", "sum": 290000},
+                                    {"item": "Аренда бокса на три месяца", "sum": 24000},
+                                    {"item": "Регистрация и реклама", "sum": 20000},
+                                    {"item": "Резерв на непредвиденные расходы", "sum": 16000}],
+                            "total": 350000}
+        elif sec["key"] == "launch":
+            sec["table"] = {"kind": "stages", "caption": "Этапы запуска",
+                            "rows": [{"stage": "Подготовительный", "what": "Регистрация ИП",
+                                     "deadline": "1-я неделя", "who": "Инициатор проекта"},
+                                    {"stage": "Закупочный", "what": "Покупка фургона и оборудования",
+                                     "deadline": "2-я — 3-я неделя", "who": "Инициатор проекта"},
+                                    {"stage": "Запуск", "what": "Первые заказы",
+                                     "deadline": "7-я — 8-я неделя", "who": "Инициатор проекта, мастер"}]}
+    s.add(ReportPurchase(check_id=rec3.id, idea=rec3.idea, tier="full", status="paid",
+                         contact="two-tables@example.com", amount=2990,
+                         report_json=json.dumps({
+                             "viability_score": 68, "viability_summary": "с",
+                             "top_risks": [{"title": "р", "body": "б"}],
+                             "sections": full_sections}, ensure_ascii=False)))
+    s.commit()
+    out["two_tables"] = rec3.public_id
+    s.commit()
+    # Аудит воронки 2026-08-08 (после G10/G11): оплачено, но report_json
+    # пуст -- открытие страницы вызовет generate_core живьём и упадёт (ключей
+    # LLM в этом окружении нет, см. env в site()), тот же путь, что настоящий
+    # сбой генерации. Проверяем, что расстроенный покупатель видит гарантию
+    # возврата, а не голое "обновите страницу".
+    rec4 = DemandCheck(idea="Идея, для которой отчёт не соберётся",
+                       best_count=1200, purpose="business",
+                       result_json=json.dumps(quick_partial, ensure_ascii=False))
+    s.add(rec4); s.commit(); s.refresh(rec4)
+    s.add(ReportPurchase(check_id=rec4.id, idea=rec4.idea, tier="quick", status="paid",
+                         contact="gen-failed@example.com", amount=990))
+    s.commit()
+    out["gen_failed"] = rec4.public_id
+    s.commit()
 print(json.dumps(out))
 '''
     r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,
@@ -258,7 +308,21 @@ def site(tmp_path_factory):
     db_url = f"sqlite:///{db}"
     ids = _seed(db_url)
     port = _free_port()
-    env = dict(os.environ, DATABASE_URL=db_url, SOZDATEL_OWNER_KEY=OWNER_KEY)
+    # Ни один тест здесь не рассчитывает на живой ответ LLM (весь платный
+    # разбор приходит уже готовым report_json из сида) -- явно снимаем
+    # ключи, чтобы generate_core падал предсказуемо в тесте на сбой
+    # генерации, а не только когда в окружении хоста их случайно нет.
+    base_env = {k: v for k, v in os.environ.items()
+               if k not in ("YANDEX_API_KEY", "ANTHROPIC_API_KEY", "YANDEX_FOLDER_ID")}
+    # YOOKASSA_* заданы фиктивными значениями, чтобы payments.configured() ==
+    # True и PAY_ENABLED на result.html был правдой прода -- иначе кнопка
+    # живого теста везде показывает текст «заявки», а не оплаты, и весь этот
+    # путь (чек 54-ФЗ, гарантия возврата) остаётся непроверенным. Ни один
+    # тест здесь не кликает по кнопке до конца (см. TestBuyerHearsFromUs в
+    # test_sozdatel.py -- там платёж подделывается инъекцией), реальных
+    # сетевых вызовов к ЮКассе эти значения не вызывают.
+    env = dict(base_env, DATABASE_URL=db_url, SOZDATEL_OWNER_KEY=OWNER_KEY,
+              YOOKASSA_SHOP_ID="test-shop", YOOKASSA_SECRET_KEY="test-secret")
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
@@ -538,6 +602,27 @@ def test_project_page_fits_narrow_screen(site, browser):
         ctx.close()
 
 
+def test_project_page_next_step_text_updates_once_the_target_is_reached(site, browser):
+    """Аудит воронки 2026-08-08: карточка «Цель этапа» держала статичный
+    текст «Чтобы перейти дальше, наберите визиты… вердикт вынесется
+    автоматически» (#nextline в static/project.html) — JS никогда его не
+    трогал. sweep1 (52 визита, цель 40, 3 заявки) уже прошёл цель и получил
+    «СИГНАЛ ЕСТЬ» строкой ниже, а прямо над ней покупатель всё ещё читал
+    «наберите визиты», хотя цель уже набрана. compute_verdict (app/main.py)
+    уже кладёт человеческое объяснение текущего состояния в d.detail —
+    просто не был подключён. Разметку и текст обновляет скрипт по фетчу
+    /api/verdict/{id} -- подстрокой в шаблоне не проверить."""
+    ctx, page = _open(browser, f"{site['base']}/p/sweep1?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        next_text = page.inner_text("#nextline")
+        assert "наберите визиты" not in next_text.lower(), next_text
+        assert "52" in next_text and "3 заявк" in next_text, next_text
+        _assert_clean(page, "страница проекта с актуальным текстом цели этапа")
+    finally:
+        ctx.close()
+
+
 def test_owner_desk_fits_narrow_screen(site, browser):
     ctx, page = _open(browser, f"{site['base']}/desk?key={OWNER_KEY}")
     try:
@@ -616,6 +701,39 @@ def test_good_demand_keeps_the_live_test_as_the_main_action(site, browser):
         assert not page.locator("#weak-caveat").is_visible()
         assert page.evaluate(
             "() => document.getElementById('order').className") == "next"
+    finally:
+        ctx.close()
+
+
+def test_live_test_order_shows_its_own_refund_terms(site, browser):
+    """Аудит воронки 2026-08-08: у соседнего блока «Или получите отчёт по
+    идее» (alt-report) есть гарантия возврата рядом с кнопкой — комментарий
+    в коде прямо объясняет, почему («там же, где решают платить, а не
+    только в оферте»). У ГЛАВНОЙ кнопки на этой же странице — живого теста,
+    самой дорогой покупки на сайте (цена + рекламный бюджет отдельно) —
+    такой гарантии не было вовсе. У живого теста и правда другие условия
+    возврата (оферта, п.5: 3 дня, пока страница не опубликована, а не
+    «не собралось — вернём») — текст не скопирован с report.html, а
+    описывает настоящее условие. Показывается только когда оплата реально
+    включена (PAY_ENABLED) — без кассы это заявка, возврата с неё не
+    обещаем. Разметку строит скрипт -- подстрокой в шаблоне не проверить."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}")
+    try:
+        for _ in range(6):
+            btns = page.locator(".step-next .btn:visible, #skip-sharpen:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+        pay_enabled = page.evaluate("PAY_ENABLED")
+        assert pay_enabled, "тест ожидает PAY_ENABLED=true (см. YOOKASSA_* в env фикстуры site())"
+        note = page.locator("#refund-note")
+        assert note.is_visible()
+        text = note.inner_text()
+        assert "3 дней" in text
+        assert "опубликован" in text
+        assert note.locator("a[href='/oferta']").count() == 1
+        _assert_clean(page, "результат с гарантией возврата у живого теста")
     finally:
         ctx.close()
 
@@ -859,6 +977,208 @@ def test_docx_download_link_appears_alongside_pdf_and_actually_downloads(site, b
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
         assert len(resp.body()) > 1000, "файл не должен быть пустой заглушкой"
         _assert_clean(page, "отчёт с готовой ссылкой на DOCX")
+    finally:
+        ctx.close()
+
+
+def test_order_button_blocks_a_second_click_while_the_first_is_in_flight(site, browser):
+    """Аудит воронки 2026-08-08 (блок G исчерпан, «пройди воронку глазами
+    человека с улицы»): каждая другая кнопка на сайте, которая шлёт
+    fetch (сохранить, заострить, запустить, напомнить письмом — см.
+    result.html/index.html/desk.html), блокируется на время запроса, эта
+    оставалась исключением. Кнопка «Получить отчёт» — единственная на
+    сайте, которая берёт деньги покупателя, и именно она была без защиты
+    от повторного клика: на медленной сети нетерпеливый повторный тап
+    уходил бы вторым заказом — второе письмо владельцу без оплаты, а с
+    оплатой (ЮКасса настроена) — вторая платёжная сессия на ту же
+    покупку. Проверяем через задержанный /api/report: после первого клика
+    кнопка обязана быть disabled ДО того, как первый ответ пришёл, и
+    второй клик не должен уйти вторым запросом."""
+    ids = site["ids"]
+    # ids['business'] уже несёт пример-покупку (is_example) -- анонимному
+    # посетителю показывается баннер «уже оплачен», а не тарифы. ids['weak']
+    # без единой покупки -- ровно тот же экран, что видит настоящий
+    # неоплативший посетитель.
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['weak']}")
+    try:
+        calls = []
+
+        def _slow_order(route):
+            calls.append(1)
+            time.sleep(0.4)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"ok": True, "paid": False,
+                                           "message": "Заявка принята."}, ensure_ascii=False))
+
+        page.route("**/api/report", _slow_order)
+        page.fill("#contact", "sweep@example.com")
+        btn = page.locator(".tier button.btn").first
+        btn.click()
+        page.wait_for_timeout(50)
+        assert btn.is_disabled(), "кнопка обязана блокироваться сразу после первого клика"
+        # Второй клик, пока первый запрос ещё не ответил -- через нативный
+        # DOM .click(), потому что настоящий disabled уже не даёт браузеру
+        # доставить событие клика вообще (это и есть защита), а Playwright
+        # с force:true спотыкается о ту же самую блокировку раньше, чем
+        # успевает её проверить.
+        page.evaluate("document.querySelector('.tier button.btn').click()")
+        page.wait_for_timeout(600)
+        assert len(calls) == 1, f"второй клик ушёл отдельным запросом: {len(calls)} вызовов /api/report"
+        _assert_clean(page, "отчёт после блокировки повторного клика по кнопке заказа")
+    finally:
+        ctx.close()
+
+
+def test_first_purchase_shows_the_same_refund_guarantee_as_every_other_purchase(site, browser):
+    """Аудит воронки 2026-08-08: гарантия возврата («если собрать не
+    удалось — вернём деньги полностью») стоит РЯДОМ с кнопкой оплаты в
+    result.html (комментарий в коде так и объясняет: «Условия возврата —
+    там же, где решают платить, а не только в оферте» — приём Baymard про
+    risk reversal в момент решения) и в допродаже бизнес-плана здесь же, в
+    report.html. Но именно у ПЕРВОЙ покупки на report.html — самого
+    тревожного момента, первый раз видит незнакомый сервис — гарантии не
+    было: ветка pricing.innerHTML для ещё неоплаченного отчёта копировала
+    всё, кроме этой строки. Разметку строит скрипт, подстрокой в шаблоне
+    не проверить."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['weak']}")
+    try:
+        page.wait_for_timeout(400)
+        text = page.inner_text("#pricing-top")
+        assert "вернём деньги" in text, "гарантия возврата обязана быть видна у первой покупки, не только у допродажи"
+        assert page.locator("#pricing-top .terms-note a[href='/oferta']").count() == 1
+        _assert_clean(page, "отчёт с гарантией возврата у первой покупки")
+    finally:
+        ctx.close()
+
+
+def test_generation_failure_reminds_the_paying_customer_about_the_refund(site, browser):
+    """Продолжение аудита воронки 2026-08-08: гарантия возврата теперь стоит
+    у кнопки оплаты (G10) и в FAQ (G11), но именно в момент, когда сбой
+    генерации РЕАЛЬНО случился и деньги уже списаны -- самый расстроенный
+    момент для покупателя -- сообщение молчало о ней и звало просто
+    обновить страницу. ids['gen_failed'] оплачен, но report_json пуст:
+    открытие страницы вызывает generate_core живьём, а ключей LLM в
+    окружении теста нет (см. env в site()) -- тот же путь, что настоящий
+    сбой. Разметку строит скрипт (innerHTML), подстрокой в шаблоне не
+    проверить."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['gen_failed']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        note = page.locator("#status-note")
+        assert note.is_visible()
+        assert "вернём деньги" in note.inner_text()
+        link = note.locator("a[href='/oferta']")
+        assert link.count() == 1
+        _assert_clean(page, "отчёт со сбоем генерации и напоминанием о возврате")
+    finally:
+        ctx.close()
+
+
+def test_tier_cards_show_the_real_section_count(site, browser):
+    """Аудит воронки 2026-08-08: карточки тарифов на report.html писали
+    число разделов вручную -- «4 ключевых раздела» и «Все 8 разделов» --
+    хотя QUICK_KEYS (app/report_engine.py) даёт 5, а полный тариф — 21.
+    Карточка занижала ценность бизнес-плана почти в три раза именно в
+    момент решения платить. Разметку строит скрипт (tierCard()), числа
+    не в статическом HTML -- подстрокой в шаблоне не проверить."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['weak']}")
+    try:
+        page.wait_for_timeout(400)
+        descs = page.locator(".tier .desc").all_inner_texts()
+        assert len(descs) == 2
+        quick_n = page.evaluate("QUICK_KEYS.length")
+        full_n = page.evaluate("SECTIONS.length")
+        assert full_n > quick_n > 0, (quick_n, full_n)
+        assert str(quick_n) in descs[0], descs[0]
+        assert str(full_n) in descs[1], descs[1]
+        _assert_clean(page, "отчёт с точным числом разделов в карточках тарифов")
+    finally:
+        ctx.close()
+
+
+def test_upgrade_offer_does_not_promise_a_discount_it_does_not_give(site, browser):
+    """Аудит воронки 2026-08-08: у покупателя, уже оплатившего «Быстрый
+    разбор», блок допродажи бизнес-плана назывался «Докупить» -- слово
+    прямо подразумевает вычет уже заплаченного (990 ₽). report_order
+    (app/main.py) берёт цену полного тарифа целиком, без скидки на
+    предыдущую покупку -- то есть страница обещала то, чего код не делает.
+    ids['pdf_full'] уже несёт оплаченный тариф quick -- открытие страницы
+    ведёт в ветку допродажи. Разметку строит скрипт -- подстрокой в
+    шаблоне не проверить."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_full']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(500)
+        heading = page.inner_text("#pricing-top h3")
+        assert "докуп" not in heading.lower(), heading
+        _assert_clean(page, "отчёт с честным заголовком допродажи бизнес-плана")
+    finally:
+        ctx.close()
+
+
+def test_two_kinds_of_tables_render_correctly_side_by_side(site, browser):
+    """G6 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): у конкурента
+    таблиц несколько и они разные по смыслу -- смета деньгами и план
+    запуска этапами. tableHtml() в report.html различает их по полю kind;
+    подстрокой в шаблоне это не проверить, разметку строит скрипт.
+    Проверяем на узком экране (390px) -- у таблицы этапов 4 колонки, легче
+    всего переполниться именно там."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['two_tables']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        tables = page.locator("table.cost-table")
+        assert tables.count() == 2, f"ожидали смету и план запуска, нашли {tables.count()} таблиц"
+
+        money = page.locator("table.cost-table:not(.stages-table)")
+        assert "Смета расходов на старт" in money.locator("caption").inner_text()
+        money_rows = money.locator("tbody tr")
+        assert money_rows.count() == 4
+        tfoot_text = money.locator("tfoot").inner_text().replace("\xa0", " ")
+        assert "350 000" in tfoot_text, \
+            "итог обязан сойтись в сумму строк (290+24+20+16=350)"
+
+        stages = page.locator("table.stages-table")
+        headers = stages.locator("th").all_inner_texts()
+        assert headers == ["Этап", "Что сделать", "Срок", "Ответственный"]
+        assert "Регистрация ИП" in stages.inner_text()
+        assert "Итого" not in stages.inner_text()
+
+        _assert_clean(page, "отчёт с денежной таблицей и таблицей этапов")
+    finally:
+        ctx.close()
+
+
+def test_notify_button_appears_while_waiting_and_works(site, browser):
+    """G5 (PRODUCT_ROADMAP, разбор соцплан.рф владельцем): владелец отдельно
+    отметил кнопку «надоело ждать» + уведомление о готовности у конкурента.
+    Кнопка должна появляться ровно тогда, когда идёт сборка (тот же сид
+    pdf_partial, что и у прогресс-бара), пропадать вместе с прогрессом, когда
+    всё готово (pdf_full), и реально отвечать на клик — смотрим глазами
+    браузера, разметку и состояние рисует скрипт."""
+    ids = site["ids"]
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_partial']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        btn = page.locator("#notify-btn")
+        assert btn.is_visible(), "разбор ещё собирается -- кнопка должна быть видна"
+        btn.click()
+        page.wait_for_timeout(400)
+        status = page.inner_text("#notify-status")
+        assert status, "клик обязан оставить понятный статус, не тишину"
+        assert "готов" in status.lower() or "почт" in status.lower(), status
+        _assert_clean(page, "разбор в процессе сборки, кнопка «надоело ждать» нажата")
+    finally:
+        ctx.close()
+
+    ctx, page = _open(browser, f"{site['base']}/report/{ids['pdf_full']}?key={OWNER_KEY}")
+    try:
+        page.wait_for_timeout(600)
+        assert not page.locator("#notify-btn").is_visible(), \
+            "все разделы готовы -- кнопка «надоело ждать» больше не нужна"
     finally:
         ctx.close()
 

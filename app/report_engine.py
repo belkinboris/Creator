@@ -279,6 +279,13 @@ SECTION_SPECS = [
      "must": f"План по этапам пути Создателя: {', '.join(STAGE_NAMES)}. Идея и Спрос уже "
              f"пройдены бесплатно — начинай с «{STAGE_NAMES[2]}». По каждому этапу: что "
              "сделать, за какой срок и по какому признаку считать его пройденным.",
+     # G6 (PRODUCT_ROADMAP, разбор соцплан.рф): у конкурента этапы запуска —
+     # тоже таблица (Этап / Содержание работ / Срок / Ответственный), не
+     # абзац. table_kind="stages" -- второй вид таблицы наравне с денежной
+     # (finance): читателю (и тем более комиссии) план по неделям читается
+     # построчно легче, чем текстом.
+     "wants_table": True,
+     "table_kind": "stages",
      "by_audience": {"social_contract": {"ask": "Что делать до подачи заявления и сразу после одобрения?",
                 "must": "Практический план без венчурных этапов и проверки гипотез: что "
                         "подготовить до подачи заявления, что сделать сразу после одобрения "
@@ -494,19 +501,38 @@ _MEASURED_ONLY = """
 как известных. Если оценка нужна для расчёта — прямо пометь её как
 допущение («предположим, что…»), чтобы читатель отличил её от замера."""
 
-_TABLE_ASK = """
+#: G6 (PRODUCT_ROADMAP, разбор соцплан.рф): у конкурента таблиц несколько, и
+#: они РАЗНЫЕ по смыслу -- смета (деньги) и план запуска (этапы). Раньше был
+#: только один вид таблицы, зашитый под смету; теперь `table_kind` в
+#: SECTION_SPECS выбирает форму запроса и разбора.
+_TABLE_ASK = {
+    "money": """
 Дополнительно к тексту верни ТУ ЖЕ смету/расчёт ЕЩЁ И ТАБЛИЦЕЙ, построчно —
 не заставляй читателя сводить абзац в таблицу самому. От 3 до 8 строк, ровно
 столько, сколько нужно именно этой идее (не переноси чужой шаблон
 «оборудование» и «сырьё» на идею, где расходы совсем другие — это может
 быть реклама, аренда, комплектующие, что угодно, что реально нужно на старт
 ИМЕННО ЭТОЙ идее). У каждой строки — короткое название статьи расходов и
-сумма в рублях. Итог — сумма всех строк."""
+сумма в рублях. Итог мы посчитаем сами как сумму строк — отдельно его
+называть не нужно, только сами строки.""",
+    "stages": """
+Дополнительно к тексту верни ТОТ ЖЕ план запуска ЕЩЁ И ТАБЛИЦЕЙ, по этапам —
+не заставляй читателя сводить абзац в план самому. От 3 до 7 строк, ровно
+столько этапов, сколько реально нужно именно этой идее. У каждой строки:
+короткое название этапа, что конкретно сделать, срок (например «1-я
+неделя» или число дней после старта) и кто отвечает — если исполнитель
+один, так и напиши: «инициатор проекта».""",
+}
 
-_TABLE_SCHEMA_FIELD = ''',
+_TABLE_SCHEMA_FIELD = {
+    "money": ''',
  "table": {"caption": "короткое название таблицы, например \\"Смета расходов на старт\\"",
-   "rows": [{"item": "название статьи расхода", "sum": число_рублей_без_текста}],
-   "total": число_рублей_без_текста}'''
+   "rows": [{"item": "название статьи расхода", "sum": число_рублей_без_текста}]}''',
+    "stages": ''',
+ "table": {"caption": "короткое название таблицы, например \\"Этапы запуска\\"",
+   "rows": [{"stage": "название этапа", "what": "что сделать", "deadline": "срок",
+             "who": "кто отвечает"}]}''',
+}
 
 
 def _verdict_call(score: int) -> str:
@@ -550,6 +576,7 @@ def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS,
         purpose = PURPOSE_BUSINESS
     spec = _spec(key, purpose)
     wants_table = bool(spec.get("wants_table"))
+    table_kind = spec.get("table_kind", "money")
     anchor = _verdict_anchor(viability_score) if key == "verdict" else ""
     return f"""{audiences.get(purpose).persona}
 
@@ -571,14 +598,14 @@ def _section_prompt(key: str, tier: str, purpose: str = PURPOSE_BUSINESS,
 Требования к этому разделу:
 {spec['must']}
 {anchor}
-{_TABLE_ASK if wants_table else ""}
+{_TABLE_ASK[table_kind] if wants_table else ""}
 
 {_HOW_TO_WRITE}
 
 Объём текста body: 3-6 содержательных абзацев. Пиши только этот раздел, без заголовка.
 
 Ответь ТОЛЬКО валидным JSON без markdown-обёртки:
-{{"body": "текст раздела"{_TABLE_SCHEMA_FIELD if wants_table else ""}}}"""
+{{"body": "текст раздела"{_TABLE_SCHEMA_FIELD[table_kind] if wants_table else ""}}}"""
 
 
 #: Ключи `demand_data`, которые являются МНЕНИЕМ модели, а не измерением.
@@ -755,27 +782,48 @@ async def generate_section(key: str, idea: str, demand_data: dict, tier: str = "
         raise ReportEngineError(_MALFORMED, tech=f"раздел {key}: нет сумм в рублях")
 
     result = {"key": key, "title": section_title(key, purpose), "body": body}
-    if _spec(key, purpose).get("wants_table"):
-        table = _parse_table(data.get("table"))
+    spec_for_table = _spec(key, purpose)
+    if spec_for_table.get("wants_table"):
+        table_kind = spec_for_table.get("table_kind", "money")
+        table = _parse_table(data.get("table"), table_kind)
         if table:
             result["table"] = table
-        elif audiences.get(purpose).estimate_required:
+        elif table_kind == "money" and audiences.get(purpose).estimate_required:
             # Соцзащита читает смету построчно (F: соц-план.рф, 2026-08-02) —
             # для этой аудитории таблица не украшение, а часть услуги, за
-            # которую заплатили, как и суммы в body чуть выше.
+            # которую заплатили, как и суммы в body чуть выше. Требование
+            # жёсткое ТОЛЬКО для денежной таблицы (табличная смета — то, за
+            # чем реально платят); план запуска этапами -- полезное
+            # дополнение, но без него текст body всё ещё полный ответ.
             raise ReportEngineError(_MALFORMED, tech=f"раздел {key}: нет таблицы сметы")
     return result
 
 
-def _parse_table(raw: object) -> dict | None:
-    """Смета построчно, не абзацем -- см. wants_table в SECTION_SPECS.
-    Мягко деградирует до None при любой кривизне: таблица — дополнение к
-    body, а не замена, отчёт не должен падать из-за одной лишней строки."""
+def _parse_table(raw: object, kind: str = "money") -> dict | None:
+    """Таблица построчно, не абзацем -- см. wants_table/table_kind в
+    SECTION_SPECS. Мягко деградирует до None при любой кривизне: таблица —
+    дополнение к body, а не замена, отчёт не должен падать из-за одной
+    лишней строки."""
     if not isinstance(raw, dict):
         return None
     rows_raw = raw.get("rows")
     if not isinstance(rows_raw, list):
         return None
+    if kind == "stages":
+        rows = []
+        for row in rows_raw:
+            if not isinstance(row, dict):
+                continue
+            stage = str(row.get("stage") or "").strip()
+            what = str(row.get("what") or "").strip()
+            if stage and what:
+                rows.append({"stage": stage, "what": what,
+                            "deadline": str(row.get("deadline") or "").strip(),
+                            "who": str(row.get("who") or "").strip()})
+        if not rows:
+            return None
+        caption = str(raw.get("caption") or "").strip() or "Этапы запуска"
+        return {"kind": "stages", "caption": caption, "rows": rows}
     rows = []
     for row in rows_raw:
         if not isinstance(row, dict):
@@ -786,11 +834,16 @@ def _parse_table(raw: object) -> dict | None:
             rows.append({"item": item, "sum": amount})
     if not rows:
         return None
-    total = raw.get("total")
-    if not isinstance(total, (int, float)) or isinstance(total, bool):
-        total = sum(r["sum"] for r in rows)
+    # G6 (PRODUCT_ROADMAP, разбор соцплан.рф): их смета сходится в 350 000 ₽
+    # РОВНО (290+24+20+16) -- комиссия проверяет именно это. Раньше итог брали
+    # у модели и подставляли сумму строк только если модель вообще не прислала
+    # число -- если она прислала число, но арифметически неверное, сходимость
+    # была везением, а не гарантией. Итог теперь СЧИТАЕМ САМИ всегда, тот же
+    # принцип, что у compute_verdict в demand.py: код считает, модель пишет
+    # содержание строк.
+    total = sum(r["sum"] for r in rows)
     caption = str(raw.get("caption") or "").strip() or "Смета"
-    return {"caption": caption, "rows": rows, "total": total}
+    return {"kind": "money", "caption": caption, "rows": rows, "total": total}
 
 
 async def generate_report(idea: str, demand_data: dict, tier: str = "quick",

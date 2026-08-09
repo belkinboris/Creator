@@ -71,6 +71,9 @@
   .fine{color:var(--muted);font-size:13px}
   .err{display:none;margin-top:10px;color:#B23A3A;font-size:15px}
   .err.show{display:block}
+  .social-proof{margin-top:14px;font-size:14px;color:var(--muted)}
+  .social-proof b{color:var(--ink);font:600 15px "IBM Plex Mono",monospace;font-weight:600;
+    background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 3px}
 
   section.band{border-top:1px solid var(--line);padding-top:34px;padding-bottom:30px}
   h2{font-size:22px;font-weight:600;letter-spacing:-.01em;margin-bottom:6px}
@@ -89,7 +92,6 @@
   .tier h3{font-size:16px;font-weight:600;margin-bottom:4px}
   .tier .price{font:600 26px/1 "IBM Plex Mono",monospace;
     background:linear-gradient(transparent 45%, var(--marker) 45%);padding:0 4px}
-  .tier .was{font-size:14px;color:var(--muted);text-decoration:line-through;margin-left:8px}
   .tier p{color:var(--muted);font-size:14px;margin-top:10px}
 
   .faq{padding:14px 0}
@@ -150,6 +152,7 @@
       </div>
       <p class="err" id="err" role="alert"></p>
     </div>
+    <p class="social-proof" id="social-proof"></p>
   </section>
 
   __CONTEXT_BLOCK__
@@ -182,12 +185,12 @@
            продавать по старой цене, а списывается новая (B5). -->
       <div class="tier">
         <h3>__QUICK_LABEL__</h3>
-        <div><span class="price">__QUICK_PRICE__ ₽</span><span class="was">__QUICK_WAS__ ₽</span></div>
+        <div><span class="price">__QUICK_PRICE__ ₽</span></div>
         <p>__QUICK_NOTE__</p>
       </div>
       <div class="tier full">
         <h3>__FULL_LABEL__</h3>
-        <div><span class="price">__FULL_PRICE__ ₽</span><span class="was">__FULL_WAS__ ₽</span></div>
+        <div><span class="price">__FULL_PRICE__ ₽</span></div>
         <p>__FULL_NOTE__</p>
       </div>
     </div>
@@ -215,6 +218,26 @@ const ideaEl = document.getElementById('idea');
 const errEl = document.getElementById('err');
 
 function showErr(msg){ errEl.textContent = msg; errEl.classList.add('show'); }
+
+// G7 (PRODUCT_ROADMAP, разбор соцплан.рф): «74 отзыва • 4.6/5» на каждой
+// странице конкурента, у нас — вообще ничего на этих двух витринах (счётчик
+// был только на главной). Живая цифра из БД, не выдуманная (тот же принцип,
+// что и на главной): честный ноль лучше нечестной звезды. Для аудитории,
+// пришедшей за документом (plan_first), уместнее число собранных планов, а
+// не проверок идей — она ближе к оплате, и это её реальный вопрос «а вообще
+// у вас покупают?». Порог ниже, чем у ideas_checked (100): платных решений
+// объективно на порядок меньше бесплатных проверок, и высокий порог не
+// показал бы честную цифру ещё очень долго.
+function fmt(n){ return n.toLocaleString('ru-RU'); }
+fetch('/api/stats').then(r => r.json()).then(d => {
+  const el = document.getElementById('social-proof');
+  if (!el) return;
+  if (AUDIENCE === 'social_contract' && d.plans_delivered >= 20) {
+    el.innerHTML = `Уже собрали <b>${fmt(d.plans_delivered)}</b> бизнес-планов`;
+  } else if (AUDIENCE !== 'social_contract' && d.ideas_checked >= 100) {
+    el.innerHTML = `Уже проверили <b>${fmt(d.ideas_checked)}</b> идей`;
+  }
+}).catch(() => {});
 
 // Кнопка «Сразу сделать бизнес-план» (соцконтракт, F10) ведёт на тот же
 // /api/demand -- проверка спроса идёт в фоне как обычно, цифры Вордстата
