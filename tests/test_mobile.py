@@ -314,7 +314,15 @@ def site(tmp_path_factory):
     # генерации, а не только когда в окружении хоста их случайно нет.
     base_env = {k: v for k, v in os.environ.items()
                if k not in ("YANDEX_API_KEY", "ANTHROPIC_API_KEY", "YANDEX_FOLDER_ID")}
-    env = dict(base_env, DATABASE_URL=db_url, SOZDATEL_OWNER_KEY=OWNER_KEY)
+    # YOOKASSA_* заданы фиктивными значениями, чтобы payments.configured() ==
+    # True и PAY_ENABLED на result.html был правдой прода -- иначе кнопка
+    # живого теста везде показывает текст «заявки», а не оплаты, и весь этот
+    # путь (чек 54-ФЗ, гарантия возврата) остаётся непроверенным. Ни один
+    # тест здесь не кликает по кнопке до конца (см. TestBuyerHearsFromUs в
+    # test_sozdatel.py -- там платёж подделывается инъекцией), реальных
+    # сетевых вызовов к ЮКассе эти значения не вызывают.
+    env = dict(base_env, DATABASE_URL=db_url, SOZDATEL_OWNER_KEY=OWNER_KEY,
+              YOOKASSA_SHOP_ID="test-shop", YOOKASSA_SECRET_KEY="test-secret")
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
@@ -672,6 +680,39 @@ def test_good_demand_keeps_the_live_test_as_the_main_action(site, browser):
         assert not page.locator("#weak-caveat").is_visible()
         assert page.evaluate(
             "() => document.getElementById('order').className") == "next"
+    finally:
+        ctx.close()
+
+
+def test_live_test_order_shows_its_own_refund_terms(site, browser):
+    """Аудит воронки 2026-08-08: у соседнего блока «Или получите отчёт по
+    идее» (alt-report) есть гарантия возврата рядом с кнопкой — комментарий
+    в коде прямо объясняет, почему («там же, где решают платить, а не
+    только в оферте»). У ГЛАВНОЙ кнопки на этой же странице — живого теста,
+    самой дорогой покупки на сайте (цена + рекламный бюджет отдельно) —
+    такой гарантии не было вовсе. У живого теста и правда другие условия
+    возврата (оферта, п.5: 3 дня, пока страница не опубликована, а не
+    «не собралось — вернём») — текст не скопирован с report.html, а
+    описывает настоящее условие. Показывается только когда оплата реально
+    включена (PAY_ENABLED) — без кассы это заявка, возврата с неё не
+    обещаем. Разметку строит скрипт -- подстрокой в шаблоне не проверить."""
+    ctx, page = _open(browser, f"{site['base']}/r/{site['ids']['business']}")
+    try:
+        for _ in range(6):
+            btns = page.locator(".step-next .btn:visible, #skip-sharpen:visible")
+            if btns.count() == 0:
+                break
+            btns.first.click()
+            page.wait_for_timeout(300)
+        pay_enabled = page.evaluate("PAY_ENABLED")
+        assert pay_enabled, "тест ожидает PAY_ENABLED=true (см. YOOKASSA_* в env фикстуры site())"
+        note = page.locator("#refund-note")
+        assert note.is_visible()
+        text = note.inner_text()
+        assert "3 дней" in text
+        assert "опубликован" in text
+        assert note.locator("a[href='/oferta']").count() == 1
+        _assert_clean(page, "результат с гарантией возврата у живого теста")
     finally:
         ctx.close()
 
