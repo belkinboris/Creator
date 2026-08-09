@@ -10104,3 +10104,26 @@ class TestPrivacyDoesNotOverclaimWhatIsCollected:
         import app.main as m
         src = inspect.getsource(m._client_ip) + inspect.getsource(m._rate_limited)
         assert "user-agent" not in src.lower()
+
+
+class TestQuickTierNoteListsWhatQuickActuallyContains:
+    """Аудит воронки 2026-08-08 (тот же класс проблемы, что G14 — карточки
+    тарифов занижали число разделов): `quick_note` для social_contract и
+    student (app/audiences.py) перечисляет разделы быстрого разбора как
+    «Резюме идеи, спрос и рынок, конкуренты, вердикт» — четыре пункта. Но
+    QUICK_KEYS (app/report_engine.py) даёт ПЯТЬ: summary, problem, market,
+    competitors, verdict. Раздел «problem» («Проблема и насколько она
+    острая») в перечне не назван вовсе — тот же тип пропуска, что уже
+    ловили в самих карточках report.html."""
+
+    def test_quick_keys_really_include_a_problem_section(self):
+        from app.report_engine import QUICK_KEYS
+        assert "problem" in QUICK_KEYS, QUICK_KEYS   # предпосылка теста
+
+    def test_social_contract_quick_note_names_the_problem_section(self):
+        t = client.get("/social-contract").text
+        assert "проблема и" in t.lower()
+
+    def test_students_quick_note_names_the_problem_section(self):
+        t = client.get("/students").text
+        assert "проблема и" in t.lower()
