@@ -10077,3 +10077,30 @@ class TestAgreementDoesNotPromiseAutomationThatDoesNotExist:
         t = client.get("/agreement").text
         assert "уникальной ссылке" in t
         assert 'href="/privacy"' in t
+
+
+class TestPrivacyDoesNotOverclaimWhatIsCollected:
+    """Аудит воронки 2026-08-08 (продолжение G17): `/privacy`, раздел
+    «Какие данные мы собираем», утверждал «Автоматически: IP-адрес и тип
+    браузера для защиты от злоупотреблений». Rate-limit (`_rate_limited` /
+    `_client_ip`, app/main.py) держит бакет запросов только по IP из
+    X-Forwarded-For — нигде в коде нет ни одного обращения к заголовку
+    User-Agent. Заявленный сбор данных, которого нет, — тот же класс
+    проблемы, что G8/G14-17 (обещание, которого не выполняет код), только
+    в другую сторону: не занижение ценности, а завышение объёма
+    собираемых данных в официальном документе о персональных данных."""
+
+    def test_privacy_does_not_claim_browser_type_is_collected(self):
+        t = client.get("/privacy").text
+        assert "тип браузера" not in t
+
+    def test_privacy_still_names_the_ip_based_rate_limit(self):
+        t = client.get("/privacy").text
+        assert "IP-адрес" in t
+        assert "ограничение частоты запросов" in t
+
+    def test_rate_limit_code_never_reads_the_user_agent_header(self):
+        import inspect
+        import app.main as m
+        src = inspect.getsource(m._client_ip) + inspect.getsource(m._rate_limited)
+        assert "user-agent" not in src.lower()
