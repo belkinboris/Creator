@@ -10127,3 +10127,27 @@ class TestQuickTierNoteListsWhatQuickActuallyContains:
     def test_students_quick_note_names_the_problem_section(self):
         t = client.get("/students").text
         assert "проблема и" in t.lower()
+
+
+class TestFullNoteDoesNotReclaimSectionsQuickAlreadyHas:
+    """Аудит воронки 2026-08-08 (продолжение G19): `full_note` студенческой
+    аудитории (app/audiences.py) читался «Всё из быстрого разбора + рынок,
+    конкуренты, финансы, риски и план запуска» — но «рынок» и «конкуренты»
+    уже названы двумя словами раньше, в самом `quick_note» той же карточки
+    («Резюме идеи, проблема и её острота, спрос и рынок, конкуренты,
+    вердикт»), то есть НЕ являются дополнением полного тарифа. Внимательный
+    читатель на /students видит противоречие в двух соседних абзацах одной
+    карточки — то же самое перечисляют дважды, один раз как «уже есть»,
+    другой раз как «плюс». Похоже на копипаст из другой карточки
+    (business/social_contract), а не на реальный состав полного тарифа."""
+
+    def test_students_full_note_does_not_repeat_market_and_competitors(self):
+        t = client.get("/students").text
+        full_note_start = t.index("Всё из быстрого разбора")
+        full_note = t[full_note_start:full_note_start + 200]
+        assert "рынок" not in full_note.lower(), full_note
+        assert "конкурент" not in full_note.lower(), full_note
+
+    def test_students_full_note_still_names_a_real_extra_section(self):
+        t = client.get("/students").text
+        assert "аудитория" in t.lower()
