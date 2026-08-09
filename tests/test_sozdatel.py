@@ -10036,3 +10036,27 @@ class TestFaqAnswersTheRefundObjection:
     def test_students_faq_answers_the_refund_question(self):
         t = client.get("/students").text
         assert "вернём деньги" in t
+
+
+class TestAgreementDoesNotPromiseAutomationThatDoesNotExist:
+    """Аудит воронки 2026-08-08: `/agreement` обещал «Результаты проверки
+    сохраняются на 90 дней» — конкретный, проверяемый срок хранения. В
+    кодовой базе нет ни одного фонового воркера или планировщика
+    (архитектурный принцип CLAUDE.md: «единый FastAPI-процесс, без фоновых
+    воркеров и очередей») и ни одной ссылки на число 90 нигде в app/*.py —
+    то есть проверки не удаляются ни через 90 дней, ни вообще когда-либо
+    автоматически. Тот же класс проблемы, что G8 (выдуманная скидка) и
+    G14/G15 (числа и обещания, которых не делает код): конкретный срок
+    хранения читается как обязательство, которое сервис не выполняет.
+    Заменено на точное описание того, что реально верно: данные хранятся,
+    пока работает сервис, и человек может удалить их запросом (право уже
+    описано в /privacy, раздел 6 — это реальный, ручной процесс)."""
+
+    def test_agreement_does_not_claim_a_fixed_retention_period(self):
+        t = client.get("/agreement").text
+        assert "90 дней" not in t
+
+    def test_agreement_points_to_the_real_deletion_right(self):
+        t = client.get("/agreement").text
+        assert "уникальной ссылке" in t
+        assert 'href="/privacy"' in t
