@@ -194,16 +194,32 @@ def _core_body(risk_count=2) -> dict:
     }
 
 
-def _fake_llm(risk_count=2, body="Абзац один.\n\nАбзац два.", captured=None, table=None):
+_DEFAULT_SECTION_BODY = "Абзац один.\n\nАбзац два."
+
+
+def _fake_llm(risk_count=2, body=_DEFAULT_SECTION_BODY, captured=None, table=None):
     """Один фейк на оба вида вызова: движок ходит в модель отдельно за ядром
     (балл + риски) и отдельно за каждым разделом. `table` -- для секций с
-    wants_table (сейчас только "finance"), см. app/report_engine.py."""
+    wants_table (сейчас только "finance"), см. app/report_engine.py.
+
+    Раздел «Вердикт» с 2026-08-09 проверяется на согласие с anchor'ом
+    (generate_section._verdict_matches_anchor) -- вызывающие, которым не
+    важен именно текст вердикта (подавляющее большинство), не должны
+    вручную подбирать текст под каждый балл. Если body не переопределён,
+    подставляем перед ним слово из anchor'а, разобрав его прямо из
+    инструкции, которую движок сам передал модели."""
     async def fake_post(provider, payload):
         if captured is not None:
             captured.setdefault("calls", []).append(dict(payload))
             captured.update(payload)
-        if "Ты пишешь ОДИН раздел" in payload.get("instructions", ""):
-            section_body = {"body": body}
+        instructions = payload.get("instructions", "")
+        if "Ты пишешь ОДИН раздел" in instructions:
+            section_text = body
+            if body == _DEFAULT_SECTION_BODY:
+                anchor = re.search(r"по нему вердикт: «([^»]+)»", instructions)
+                if anchor:
+                    section_text = f"{anchor.group(1).capitalize()}. {body}"
+            section_body = {"body": section_text}
             if table is not None:
                 section_body["table"] = table
             return _yandex_response(json.dumps(section_body, ensure_ascii=False))
@@ -9339,6 +9355,48 @@ class TestVerdictAnchor:
                          and "ТЫ ЕГО НЕ ВЫБИРАЕШЬ" in c["instructions"]]
         assert len(verdict_calls) == 1
         assert f"«{expected}»" in verdict_calls[0]["instructions"]
+
+    def test_matches_anchor_helper_accepts_compliant_text(self):
+        from app.report_engine import _verdict_matches_anchor
+        assert _verdict_matches_anchor("Запускать. Спрос подтверждён.", 85)
+        assert _verdict_matches_anchor("Не запускать в текущем виде: спроса нет.", 10)
+        assert _verdict_matches_anchor("Вердикт: дорабатывать перед стартом.", 50)
+
+    def test_matches_anchor_helper_rejects_contradicting_text(self):
+        """Живой опубликованный пример 2026-08-09: балл 80 (по _verdict_call
+        -- «запускать»), а раздел «Вердикт» открывался словом «Дорабатывать».
+        anchor это запрещал в тексте промпта с 2026-08-07, но соблюдение
+        никогда не проверялось после ответа модели."""
+        from app.report_engine import _verdict_matches_anchor
+        assert not _verdict_matches_anchor("Дорабатывать. Спрос есть, но объём мал.", 80)
+
+    def test_generate_section_rejects_verdict_contradicting_its_own_score(self):
+        """Ядро посчитало 80 -- «запускать» -- а модель дала «Дорабатывать».
+        Раздел обязан быть отклонён тем же путём, что пустой раздел или
+        смета без сумм, а не тихо сохранён с противоречащим текстом."""
+        from app.report_engine import generate_section, ReportEngineError
+        with pytest.raises(ReportEngineError):
+            asyncio.run(generate_section(
+                "verdict", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+                viability_score=80,
+                _post=_fake_llm(body="Дорабатывать. Спрос есть, но объём мал.")))
+
+    def test_generate_section_accepts_verdict_matching_its_own_score(self):
+        from app.report_engine import generate_section
+        result = asyncio.run(generate_section(
+            "verdict", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            viability_score=80,
+            _post=_fake_llm(body="Запускать. Спрос подтверждён цифрами Вордстата.")))
+        assert result["key"] == "verdict"
+
+    def test_verdict_check_is_skipped_without_a_score(self):
+        """Старые покупки без сохранённого балла обязаны продолжать
+        генерироваться -- см. test_absent_score_leaves_prompt_unanchored."""
+        from app.report_engine import generate_section
+        result = asyncio.run(generate_section(
+            "verdict", self.IDEA, DEMAND_DATA_FIXTURE, "full",
+            _post=_fake_llm(body="Дорабатывать. Спрос есть, но объём мал.")))
+        assert result["key"] == "verdict"
 
 
 class TestLandingSpeaksHumanLanguage:
